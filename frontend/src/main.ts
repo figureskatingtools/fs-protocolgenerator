@@ -237,18 +237,35 @@ function slotHtml(label: string, target: SlotTarget, fileId: string | null, requ
     </div>`;
 }
 
-/** Required-slot fill progress for a category (title + total results + each
- * segment's results PDF). Drives the per-category readiness badge. */
+/** Whether a category's segments hold more than one segment. With a single
+ * segment, its results just repeat the total results and detail scores may be
+ * absent (beginner/local judging), so those two slots are optional — see
+ * `segmentHtml` / `categoryReadiness`. The Panel of Judges is always required. */
+function isMultiSegment(cat: Category): boolean {
+  return (cat.segments || []).length > 1;
+}
+
+/** Required-slot fill progress for a category. Required: Protocol Head Page +
+ * Total Results, the Panel of Judges on every segment, and — only when the
+ * category has 2+ segments — each segment's Results and Judges Scores Details. */
 function categoryReadiness(cat: Category): { filled: number; total: number; ready: boolean } {
   let total = 0, filled = 0;
   const req = (v: string | null | undefined) => { total++; if (v) filled++; };
   req(cat.titlePdf);
   req(cat.totalResultsPdf);
-  (cat.segments || []).forEach(s => req(s.resultsPdf));
+  const multi = isMultiSegment(cat);
+  (cat.segments || []).forEach(s => {
+    req(s.panelPdf);                       // Panel of Judges: always required
+    if (multi) { req(s.resultsPdf); req(s.judgesDetailsPdf); }
+  });
   return { filled, total, ready: total > 0 && filled === total };
 }
 
 function segmentHtml(cat: Category, seg: Segment): string {
+  // With only one segment, Results and Judges Scores Details are optional (the
+  // single segment's results duplicate the total results, and beginner/local
+  // judging may not publish detail scores). Panel of Judges is always required.
+  const multi = isMultiSegment(cat);
   return `<div class="segment-block">
       <div class="segment-head">
         <input class="form-input segment-name" style="max-width: 320px;" value="${escapeHtml(seg.name)}"
@@ -256,9 +273,9 @@ function segmentHtml(cat: Category, seg: Segment): string {
         <button class="btn btn-xs btn-ghost btn-ghost--danger" data-rm-seg="${seg.id}" data-cat="${cat.id}">Remove segment</button>
       </div>
       <div class="segment-roles">
-        ${slotHtml('Segment Results', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'results' }, seg.resultsPdf, true)}
-        ${slotHtml('Panel of Judges', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'panel' }, seg.panelPdf)}
-        ${slotHtml('Judges Scores Details Without Referee', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'judgesDetails' }, seg.judgesDetailsPdf)}
+        ${slotHtml('Segment Results', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'results' }, seg.resultsPdf, multi)}
+        ${slotHtml('Panel of Judges', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'panel' }, seg.panelPdf, true)}
+        ${slotHtml('Judges Scores Details Without Referee', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'judgesDetails' }, seg.judgesDetailsPdf, multi)}
       </div>
     </div>`;
 }
@@ -451,6 +468,17 @@ function renderDetails() {
     <div class="section">
       <div class="section-head"><h3>Categories</h3>
         <button class="btn btn-xs btn-primary" id="btn-add-cat">Add category</button>
+      </div>
+      <div class="req-help">
+        <strong>Required files</strong> (marked <span class="req">•</span>) drive each category's
+        <em>“n/n uploaded”</em> badge — it turns green with a ✓ when all are present.
+        <ul>
+          <li>Every category needs a <strong>Protocol Head Page</strong> and <strong>Total Results</strong>.</li>
+          <li>The <strong>Podium Photo</strong> is optional — left empty, the podium page simply shows blank space.</li>
+          <li><strong>Panel of Judges</strong> is required on every segment.</li>
+          <li>With <strong>two or more segments</strong>, each segment also requires its <strong>Segment Results</strong> and <strong>Judges Scores Details Without Referee</strong>.</li>
+          <li>With <strong>a single segment</strong>, those two are optional: the lone segment's results would just repeat the Total Results, and for beginner-level competitors or local judging systems the detail scores might not be published — so they aren't required.</li>
+        </ul>
       </div>
       ${(s.categories || []).slice().sort((a, b) => a.order - b.order).map(categoryHtml).join('')
         || '<p class="section-sub">No categories yet. Upload a schedule or add one manually.</p>'}

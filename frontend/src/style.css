@@ -429,6 +429,22 @@ input[type="checkbox"] { accent-color: var(--ink); }
   white-space: nowrap;
 }
 .cat-ready.is-ready { background: var(--success-tint); color: var(--success-color); border-color: var(--success-color); }
+
+/* Required-files guidance callout above the category list. */
+.req-help {
+  background: var(--paper-tint);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--rink);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.83rem;
+  color: var(--ink-soft);
+  line-height: 1.55;
+}
+.req-help ul { margin: 0.4rem 0 0; padding-left: 1.1rem; }
+.req-help li { margin-bottom: 0.2rem; }
+.req-help .req { color: var(--rink); font-weight: 700; }
 .toggle-icon { font-size: 0.75rem; color: var(--ink-muted); transition: transform 0.2s; }
 .category-content { padding: 1rem 1.25rem 1.25rem; }
 

@@ -280,8 +280,10 @@ def podium_page(category_name: str, photo_bytes, names, chrome=None) -> bytes:
     box_x = MARGIN
     box_y = tallest_top + 16 * mm
     box_h = (CONTENT_TOP - 22 * mm) - box_y
-    if box_h > 30 * mm:
-        _draw_photo(c, photo_bytes, box_x, box_y, avail_w, box_h, "Podium photo (not provided)")
+    # The podium photo is optional: when none was provided, leave the space empty
+    # (no placeholder box) rather than drawing a "not provided" panel.
+    if photo_bytes and box_h > 30 * mm:
+        _draw_photo(c, photo_bytes, box_x, box_y, avail_w, box_h, "")
 
     labels = ["1st", "2nd", "3rd"]
     for col, (place, height) in enumerate(steps):
