@@ -85,13 +85,10 @@ appElement.innerHTML = `
         <div class="card reveal" style="max-width: 600px; margin: 0 auto;">
           <span class="micro-label">New Competition</span>
           <h2>Create New Competition</h2>
-          <div style="margin: 1.25rem 0;">
+          <div style="margin: 1.25rem 0 1.5rem;">
             <label class="form-label">Competition name</label>
             <input type="text" id="comp-name-input" class="form-input" placeholder="e.g. Winter Cup 2026">
-          </div>
-          <div style="margin-bottom: 1.5rem;">
-            <label class="form-label">Dates (free text)</label>
-            <input type="text" id="comp-dates-input" class="form-input" placeholder="e.g. 14.–15.3.2026">
+            <p class="text-muted" style="margin-top: 0.5rem;">Dates are filled in automatically from the schedule you upload.</p>
           </div>
           <div class="form-actions">
             <button id="btn-cancel-create" class="btn btn-ghost">Cancel</button>
@@ -771,16 +768,14 @@ function confirmDeleteCompetition(id: string, name: string) {
 // ── create competition ──
 async function createCompetition() {
   const name = (document.getElementById('comp-name-input') as HTMLInputElement).value.trim();
-  const dates = (document.getElementById('comp-dates-input') as HTMLInputElement).value.trim();
   if (!name) { alert('Please enter a name.'); return; }
   const btn = document.getElementById('btn-confirm-create') as HTMLButtonElement;
   btn.disabled = true; btn.textContent = 'Creating…';
   try {
-    const resp = await apiGet(`/api/create_competition?name=${encodeURIComponent(name)}&dates=${encodeURIComponent(dates)}`);
+    const resp = await apiGet(`/api/create_competition?name=${encodeURIComponent(name)}`);
     if (resp.ok) {
       const data = await resp.json();
       (document.getElementById('comp-name-input') as HTMLInputElement).value = '';
-      (document.getElementById('comp-dates-input') as HTMLInputElement).value = '';
       openCompetition(data.id, data.name);
     } else {
       alert('Create failed: ' + (await resp.text()));

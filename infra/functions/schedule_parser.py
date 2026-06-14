@@ -6,7 +6,10 @@ Calibrated against the Finnish "COMPETITION SCHEDULE" export. Each data row is:
     <start HH:MM:SS><finish HH:MM:SS>  <entries>  <Category>   <Segment>   <resurf> <perf…>
 
 Notes from real exports:
-  * start and finish times are often concatenated with no space (15:00:0016:21:00);
+  * the clock-time separator depends on the exporting computer's region settings —
+    it can be a colon (15:00:00) or a dot (15.00.00); both are accepted;
+  * start and finish times are often concatenated with no space
+    (15:00:0016:21:00 / 15.00.0016.21.00);
   * Category and Segment sit in separate columns separated by 2+ spaces;
   * Category may contain spaces/commas ("Tähtijuniorit, Naiset", "Taitajat ei axel");
   * the same category can appear on two days (Short Program + Free Skating) and is
@@ -25,12 +28,13 @@ from pypdf import PdfReader
 from structure import new_category, new_segment, discipline_signal
 
 # A data row: start finish? entries  <category+segment...>  [trailing HH:MM:SS times]
+# Clock times may use ':' or '.' as the separator (Finnish exports write "15.00.00").
 _ROW = re.compile(
-    r'^\s*(\d{1,2}:\d{2}:\d{2})'          # start time
-    r'\s*(\d{1,2}:\d{2}:\d{2})?'          # finish time (optional, may be glued on)
+    r'^\s*(\d{1,2}[:.]\d{2}[:.]\d{2})'    # start time
+    r'\s*(\d{1,2}[:.]\d{2}[:.]\d{2})?'    # finish time (optional, may be glued on)
     r'\s+(\d+)\s+'                         # number of entries
     r'(.+?)'                              # category + segment (lazy)
-    r'(?:\s+\d{1,2}:\d{2}:\d{2}\b.*)?$'   # trailing resurfacing/performance times
+    r'(?:\s+\d{1,2}[:.]\d{2}[:.]\d{2}\b.*)?$'  # trailing resurfacing/performance times
 )
 _DATE_LINE = re.compile(r'^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*$')
 
@@ -47,7 +51,7 @@ _NON_COMPETITION = (
 
 
 def _norm_time(t: str) -> str:
-    parts = t.split(':')
+    parts = re.split(r'[:.]', t)
     return f"{parts[0].zfill(2)}:{parts[1] if len(parts) > 1 else '00'}"
 
 
@@ -284,4 +288,14 @@ def parse_schedule_data(data: bytes):
     if head[:5] == b"<?xml" or b"DT_SCHEDULE" in head or b"OdfBody" in head:
         return parse_schedule_xml(data)
     rows, categories = parse_schedule(io.BytesIO(data))
-    return rows, categories, {}
+    return rows, categories, _meta_from_rows(rows)
+
+
+def _meta_from_rows(rows):
+    """Derive auto-fill hints (currently just the date range) from parsed PDF rows."""
+    dates = sorted({(r["date"], r["date_display"]) for r in rows
+                    if r.get("date") and r.get("date_display")})
+    if not dates:
+        return {}
+    span = dates[0][1] if dates[0][1] == dates[-1][1] else f"{dates[0][1]} – {dates[-1][1]}"
+    return {"dates": span}
