@@ -430,21 +430,56 @@ input[type="checkbox"] { accent-color: var(--ink); }
 }
 .cat-ready.is-ready { background: var(--success-tint); color: var(--success-color); border-color: var(--success-color); }
 
-/* Required-files guidance callout above the category list. */
-.req-help {
-  background: var(--paper-tint);
+/* Required-files guidance — a "?" icon next to the Categories heading that
+   reveals the rules on hover/focus. */
+.help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.05rem;
+  height: 1.05rem;
+  margin-left: 0.45rem;
+  border-radius: 50%;
+  background: var(--rink-tint);
+  color: var(--rink-deep);
+  border: 1px solid #c8ddee;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
+  cursor: help;
+  position: relative;
+}
+.help-pop {
+  display: none;
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  width: 380px;
+  max-width: 80vw;
+  z-index: 40;
+  background: var(--paper);
   border: 1px solid var(--line);
   border-left: 3px solid var(--rink);
   border-radius: 0.5rem;
-  padding: 0.75rem 1rem;
-  margin-bottom: 1rem;
-  font-size: 0.83rem;
+  box-shadow: var(--shadow-lg);
+  padding: 0.8rem 1rem;
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  text-align: left;
   color: var(--ink-soft);
   line-height: 1.55;
+  cursor: auto;
 }
-.req-help ul { margin: 0.4rem 0 0; padding-left: 1.1rem; }
-.req-help li { margin-bottom: 0.2rem; }
-.req-help .req { color: var(--rink); font-weight: 700; }
+.help-icon:hover .help-pop, .help-icon:focus .help-pop, .help-icon:focus-within .help-pop { display: block; }
+.help-pop strong { color: var(--ink); }
+.help-pop ul { margin: 0.4rem 0 0; padding-left: 1.1rem; }
+.help-pop li { margin-bottom: 0.2rem; }
+.help-pop .req { color: var(--rink); font-weight: 700; }
 .toggle-icon { font-size: 0.75rem; color: var(--ink-muted); transition: transform 0.2s; }
 .category-content { padding: 1rem 1.25rem 1.25rem; }
 

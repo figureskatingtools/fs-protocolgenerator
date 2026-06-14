@@ -406,6 +406,7 @@ function renderDetails() {
           <span>${escapeHtml(g.fileName)}</span>
           <span class="gen-badge">${g.size ? Math.round(Number(g.size) / 1024) + ' KB' : ''}</span>
         </a>
+        <button class="btn btn-xs btn-ghost btn-ghost--danger" data-del-protocol="${escapeHtml(g.fileName)}" title="Delete this protocol">×</button>
       </div>`).join('') : '<p class="section-sub">No protocol generated yet.</p>';
 
   document.getElementById('detail-body')!.innerHTML = `
@@ -465,20 +466,20 @@ function renderDetails() {
       <p class="section-sub">Select the competition's <strong>DT_PARTIC_TEAMS</strong> and <strong>DT_PARTIC</strong> XML files together — one pair covers the whole competition. Teams are matched to their synchro category automatically.</p>
     </div>` : ''}
 
-    <div class="section">
-      <div class="section-head"><h3>Categories</h3>
-        <button class="btn btn-xs btn-primary" id="btn-add-cat">Add category</button>
-      </div>
-      <div class="req-help">
-        <strong>Required files</strong> (marked <span class="req">•</span>) drive each category's
-        <em>“n/n uploaded”</em> badge — it turns green with a ✓ when all are present.
-        <ul>
-          <li>Every category needs a <strong>Protocol Head Page</strong> and <strong>Total Results</strong>.</li>
-          <li>The <strong>Podium Photo</strong> is optional — left empty, the podium page simply shows blank space.</li>
-          <li><strong>Panel of Judges</strong> is required on every segment.</li>
-          <li>With <strong>two or more segments</strong>, each segment also requires its <strong>Segment Results</strong> and <strong>Judges Scores Details Without Referee</strong>.</li>
-          <li>With <strong>a single segment</strong>, those two are optional: the lone segment's results would just repeat the Total Results, and for beginner-level competitors or local judging systems the detail scores might not be published — so they aren't required.</li>
-        </ul>
+    <div class=”section”>
+      <div class=”section-head”>
+        <h3>Categories<span class=”help-icon” tabindex=”0” role=”button” aria-label=”Required files help”>?<span class=”help-pop”>
+          <strong>Required files</strong> (marked <span class=”req”>•</span>) drive each category's
+          <em>”n/n uploaded”</em> badge — it turns green with a ✓ when all are present.
+          <ul>
+            <li>Every category needs a <strong>Protocol Head Page</strong> and <strong>Total Results</strong>.</li>
+            <li>The <strong>Podium Photo</strong> is optional — left empty, the podium page simply shows blank space.</li>
+            <li><strong>Panel of Judges</strong> is required on every segment.</li>
+            <li>With <strong>two or more segments</strong>, each segment also requires its <strong>Segment Results</strong> and <strong>Judges Scores Details Without Referee</strong>.</li>
+            <li>With <strong>a single segment</strong>, those two are optional: the lone segment's results would just repeat the Total Results, and for beginner-level competitors or local judging systems the detail scores might not be published — so they aren't required.</li>
+          </ul>
+        </span></span></h3>
+        <button class=”btn btn-xs btn-primary” id=”btn-add-cat”>Add category</button>
       </div>
       ${(s.categories || []).slice().sort((a, b) => a.order - b.order).map(categoryHtml).join('')
         || '<p class="section-sub">No categories yet. Upload a schedule or add one manually.</p>'}
@@ -615,8 +616,24 @@ function wireDetail() {
   trayBrowse?.addEventListener('click', () => trayInput?.click());
   trayInput?.addEventListener('change', () => { if (trayInput.files?.length) uploadFiles(trayInput.files); trayInput.value = ''; });
 
+  // Delete a generated protocol file.
+  body.querySelectorAll<HTMLElement>('[data-del-protocol]').forEach(b =>
+    b.addEventListener('click', () => deleteProtocol(b.dataset.delProtocol!)));
+
   // Generate.
   document.getElementById('btn-generate')?.addEventListener('click', generate);
+}
+
+async function deleteProtocol(fileName: string) {
+  if (!currentId) return;
+  if (!confirm(`Delete the generated protocol "${fileName}"? This cannot be undone.`)) return;
+  try {
+    const resp = await fetch(
+      `/api/delete_protocol?competition=${encodeURIComponent(currentId)}&fileName=${encodeURIComponent(fileName)}`,
+      { method: 'DELETE' });
+    if (!resp.ok) { alert('Delete failed: ' + (await resp.text())); return; }
+    await loadDetails();
+  } catch { alert('Could not delete protocol.'); }
 }
 
 // ── mutations ──

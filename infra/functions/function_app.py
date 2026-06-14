@@ -813,3 +813,40 @@ def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f"Error generating protocol: {e}", exc_info=True)
         return func.HttpResponse("Error generating protocol. Check server logs.", status_code=500)
+
+
+@app.route(route="delete_protocol", auth_level=func.AuthLevel.ANONYMOUS, methods=["DELETE", "POST"])
+def delete_protocol(req: func.HttpRequest) -> func.HttpResponse:
+    """Delete a generated protocol PDF: its blob and its generatedprotocols row.
+    Identified by competition id + fileName (the download-link list's fileName)."""
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('competition')
+    file_name = req.params.get('fileName')
+    if not comp_id or not file_name:
+        return func.HttpResponse("Missing competition or fileName", status_code=400)
+    file_name = os.path.basename(file_name)  # guard against path traversal
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+
+        blob_name = f"{folder_path}/protocols/{file_name}"
+        container = sh.get_container_client()
+        if container and container.get_blob_client(blob_name).exists():
+            container.delete_blob(blob_name)
+
+        try:
+            table_client = sh.get_table_client()
+            if table_client:
+                row_key = file_name.replace('/', '_').replace('\\', '_')
+                table_client.delete_entity(partition_key=comp_id, row_key=row_key)
+        except ResourceNotFoundError:
+            pass
+        except Exception as e:
+            logging.warning(f"Could not delete protocol table row: {e}")
+
+        return sh.json_response({"status": "deleted"})
+    except Exception as e:
+        logging.error(f"Error deleting protocol: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
