@@ -26,7 +26,8 @@ and connecting files together*; missing graphics fall back to generated defaults
 Each competition is a blob folder `"{name}-{id}"` containing:
 
 - `metadata.json` — the **structure** (see `infra/functions/structure.py`): event
-  details, `coverPage`/`lastPage` (default|custom), a `files` registry
+  details, `coverPage`/`lastPage`/`header`/`footer` (default|custom — header/footer
+  are the optional competition-wide page chrome), a `files` registry
   (`fileId -> {filename, kind, size, blob}`), and ordered `categories` with slots.
 - `uploads/{fileId}_{filename}` — every uploaded PDF/photo/XML.
 - `schedule.pdf` — the source schedule (kept for re-parsing).
@@ -39,9 +40,17 @@ sets it in the new one (`structure.assign_file`).
 ## Assembly order (`assemble.py`)
 
 cover (custom or default) → event-info page → time-schedule page → for each
-category in schedule order: *(synchro)* one team page per team → title PDF →
+category in schedule order: *(synchro)* one team page per team → protocol head
+page PDF (the category's `titlePdf` slot; "Protocol Head Page" in the UI) →
 podium page (when a photo or name exists) → total results PDF → per segment
 (results → panel → judges details) → last page (custom or default).
+
+Every *generated* page (not the inserted result PDFs) is stamped with a
+competition-wide **header/footer band** — see `generate_pages._draw_chrome`. The
+band uses the competition's uploaded `header`/`footer` graphic (drawn edge-to-edge)
+when present, else a generic placeholder ("EXAMPLE HEADER: <name>" / "EXAMPLE
+FOOTER") to be replaced by finished AI-designed art later. `assemble._chrome_band`
+resolves those graphics' bytes once and passes a `chrome` dict to each page builder.
 
 ## Backend routes (`function_app.py`)
 
@@ -67,16 +76,28 @@ timer.
 - `dt_partic.py` — calibrated against real ISU OdfBody files. Joins
   **DT_PARTIC_TEAMS** (`<Team>`/`<Composition>`/`<Athlete Code>`) with
   **DT_PARTIC** (`<Participant Code GivenName FamilyName>`) on athlete `Code`.
-  A TEAMS file spans several events; `import_rosters` imports one `RegisteredEvent`
-  at a time (the UI asks which when more than one is present). Names render
+  One TEAMS + one PARTIC file cover the **whole competition**: `import_rosters`
+  groups teams by `RegisteredEvent` and distributes each event's teams to the
+  matching category (`function_app._category_for_event` matches by the category's
+  stored `code` first, then by event label vs. a synchro category name); events
+  with no matching category are returned as `unmatched`. Names render
   "FAMILY Given", rosters sorted alphabetically.
+- `results_parser.py` — `parse_top_three(pdf_bytes)` reads ranks 1–3 from a
+  category's total-results PDF and returns "<nation/club> - <name>" strings (e.g.
+  "SCT - Lotta TERHO", "HTK - Helsinki Finettes"). When a totalResults slot is
+  filled (`assign_file`/`upload_file`), the backend pre-fills *empty* podium name
+  fields. Calibrated against a real ISU singles sheet (Tikkurila Trophy): the place
+  is often glued to the name in layout extraction ("1Lotta TERHO …"), and the
+  nation/club is the last non-numeric column (often mixed-case: "KaTa", "PoriTa").
+  Still heuristic — refine against synchro totals when a sample is available.
 
 ## Defaults / backups
 
 Generated in `generate_pages.py`: white "PROTOCOL" cover, "the last page
-placeholder", and neutral placeholder boxes for missing podium/team photos. These
-are deliberately simple — the real cover and last page are to be designed and
-swapped in later.
+placeholder", the generic header/footer band, and neutral placeholder boxes for
+missing podium/team photos. The podium page lays the top three out in podium shape
+(1st centre/highest, 2nd left, 3rd right). These are deliberately simple — the real
+cover, last page and header/footer art are to be designed and swapped in later.
 
 ## Local development
 

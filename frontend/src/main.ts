@@ -229,11 +229,23 @@ function chipHtml(fileId: string): string {
 
 function slotHtml(label: string, target: SlotTarget, fileId: string | null, required = false): string {
   const filled = fileId ? 'is-filled' : '';
+  const reqCls = required && !fileId ? 'is-missing' : '';
   const inner = fileId ? chipHtml(fileId) : '<div class="slot-empty">drop a file</div>';
-  return `<div class="slot ${filled}" data-target='${attr(target)}'>
+  return `<div class="slot ${filled} ${reqCls}" data-target='${attr(target)}'>
       <span class="slot-label">${escapeHtml(label)}${required ? ' <span class="req">•</span>' : ''}</span>
       ${inner}
     </div>`;
+}
+
+/** Required-slot fill progress for a category (title + total results + each
+ * segment's results PDF). Drives the per-category readiness badge. */
+function categoryReadiness(cat: Category): { filled: number; total: number; ready: boolean } {
+  let total = 0, filled = 0;
+  const req = (v: string | null | undefined) => { total++; if (v) filled++; };
+  req(cat.titlePdf);
+  req(cat.totalResultsPdf);
+  (cat.segments || []).forEach(s => req(s.resultsPdf));
+  return { filled, total, ready: total > 0 && filled === total };
 }
 
 function segmentHtml(cat: Category, seg: Segment): string {
@@ -244,9 +256,9 @@ function segmentHtml(cat: Category, seg: Segment): string {
         <button class="btn btn-xs btn-ghost btn-ghost--danger" data-rm-seg="${seg.id}" data-cat="${cat.id}">Remove segment</button>
       </div>
       <div class="segment-roles">
-        ${slotHtml('Results', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'results' }, seg.resultsPdf, true)}
+        ${slotHtml('Segment Results', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'results' }, seg.resultsPdf, true)}
         ${slotHtml('Panel of Judges', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'panel' }, seg.panelPdf)}
-        ${slotHtml('Judges Details', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'judgesDetails' }, seg.judgesDetailsPdf)}
+        ${slotHtml('Judges Scores Details Without Referee', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'judgesDetails' }, seg.judgesDetailsPdf)}
       </div>
     </div>`;
 }
@@ -281,14 +293,14 @@ function categoryHtml(cat: Category): string {
   const teamsSection = isSynchro ? `
       <div class="section">
         <div class="section-head"><h3>Teams</h3>
-          <span style="display:flex; gap:0.4rem;">
-            <button class="btn btn-xs btn-ghost" data-import-rosters="${cat.id}">Import teams (DT_PARTIC)…</button>
-            <button class="btn btn-xs btn-primary" data-add-team="${cat.id}">Add team</button>
-          </span>
+          <button class="btn btn-xs btn-primary" data-add-team="${cat.id}">Add team</button>
         </div>
-        <p class="section-sub">Import selects both the <strong>DT_PARTIC_TEAMS</strong> and <strong>DT_PARTIC</strong> XML files together — they are joined to fill team names, clubs and rosters.</p>
+        <p class="section-sub">Rosters are imported for the whole competition at once (see <strong>Team rosters</strong> above) and matched to their category automatically.</p>
         ${(cat.teams || []).map(t => teamHtml(cat, t)).join('') || '<p class="section-sub">No teams yet.</p>'}
       </div>` : '';
+
+  const r = categoryReadiness(cat);
+  const readyBadge = `<span class="cat-ready ${r.ready ? 'is-ready' : ''}" title="Required files uploaded">${r.ready ? '✓ ' : ''}${r.filled}/${r.total} uploaded</span>`;
 
   return `<div class="category-card">
       <div class="category-header ${isSynchro ? 'is-synchro' : ''}" data-toggle-cat="${cat.id}">
@@ -297,6 +309,7 @@ function categoryHtml(cat: Category): string {
           ${isSynchro ? '<span class="tag-synchro">Synchro</span>' : ''}
         </div>
         <div class="category-head-tail">
+          ${readyBadge}
           <span class="micro-label">${(cat.segments || []).length} seg</span>
           <span class="toggle-icon">${isOpen ? '▴' : '▾'}</span>
         </div>
@@ -317,7 +330,7 @@ function categoryHtml(cat: Category): string {
         <div class="section">
           <div class="section-head"><h3>Category pages</h3></div>
           <div class="slot-grid">
-            ${slotHtml('Title page (PDF)', { kind: 'categoryTitle', categoryId: cat.id }, cat.titlePdf, true)}
+            ${slotHtml('Protocol Head Page (PDF)', { kind: 'categoryTitle', categoryId: cat.id }, cat.titlePdf, true)}
             ${slotHtml('Podium photo', { kind: 'podiumPhoto', categoryId: cat.id }, cat.podium?.photo || null)}
             ${slotHtml('Total results (PDF)', { kind: 'totalResults', categoryId: cat.id }, cat.totalResultsPdf, true)}
           </div>
@@ -408,6 +421,15 @@ function renderDetails() {
     </div>
 
     <div class="section">
+      <div class="section-head"><h3>Header &amp; footer</h3></div>
+      <p class="section-sub">Optional. Stamped on every generated page. Leave empty to use the generic placeholder band (<code>EXAMPLE HEADER</code> / <code>EXAMPLE FOOTER</code>).</p>
+      <div class="page-slot-row">
+        ${slotHtml('Competition header (image)', { kind: 'header' }, s.header?.fileId || null)}
+        ${slotHtml('Competition footer (image)', { kind: 'footer' }, s.footer?.fileId || null)}
+      </div>
+    </div>
+
+    <div class="section">
       <div class="section-head"><h3>Uploads</h3>
         <button class="btn btn-xs btn-primary" id="tray-browse">Upload files…</button>
         <input type="file" id="tray-input" multiple accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.xml" style="display:none;">
@@ -417,6 +439,14 @@ function renderDetails() {
         <div class="tray-chips">${trayChips}</div>
       </div>
     </div>
+
+    ${(s.categories || []).some(c => c.discipline === 'synchro') ? `
+    <div class="section">
+      <div class="section-head"><h3>Team rosters</h3>
+        <button class="btn btn-xs btn-ghost" id="btn-import-rosters">Import teams (DT_PARTIC)…</button>
+      </div>
+      <p class="section-sub">Select the competition's <strong>DT_PARTIC_TEAMS</strong> and <strong>DT_PARTIC</strong> XML files together — one pair covers the whole competition. Teams are matched to their synchro category automatically.</p>
+    </div>` : ''}
 
     <div class="section">
       <div class="section-head"><h3>Categories</h3>
@@ -529,9 +559,8 @@ function wireDetail() {
   body.querySelectorAll<HTMLElement>('[data-rm-team]').forEach(b =>
     b.addEventListener('click', () => editStructure({ op: 'remove_team', categoryId: b.dataset.cat, teamId: b.dataset.rmTeam }, true)));
 
-  // Roster import (two DT_PARTIC XML files).
-  body.querySelectorAll<HTMLElement>('[data-import-rosters]').forEach(b =>
-    b.addEventListener('click', () => pickRosters(b.dataset.importRosters!)));
+  // Roster import (two DT_PARTIC XML files, one pair for the whole competition).
+  document.getElementById('btn-import-rosters')?.addEventListener('click', () => pickRosters());
 
   // Schedule upload.
   const schedBrowse = document.getElementById('schedule-browse');
@@ -634,7 +663,7 @@ async function parseSchedule(file: File, force = false) {
   } catch { alert('Network error parsing schedule.'); }
 }
 
-function pickRosters(categoryId: string) {
+function pickRosters() {
   const inp = document.createElement('input');
   inp.type = 'file'; inp.accept = '.xml'; inp.multiple = true;
   inp.onchange = async () => {
@@ -654,56 +683,24 @@ function pickRosters(categoryId: string) {
       });
     }
     if (!teamsXml) { alert('Could not find a DT_PARTIC_TEAMS file among the selected files.'); return; }
-    await importRosters(categoryId, teamsXml, particXml);
+    await importRosters(teamsXml, particXml);
   };
   inp.click();
 }
 
-async function importRosters(categoryId: string, teamsXml: string, particXml: string, eventCode?: string) {
+async function importRosters(teamsXml: string, particXml: string) {
   if (!currentId) return;
   try {
-    const resp = await apiJson('/api/import_rosters',
-      { id: currentId, categoryId, teamsXml, particXml, eventCode });
-    if (resp.status === 409) {
-      const data = await resp.json();
-      if (data.needEvent && Array.isArray(data.events)) {
-        const chosen = await chooseEvent(data.events);
-        if (chosen) return importRosters(categoryId, teamsXml, particXml, chosen);
-        return;
-      }
-    }
+    const resp = await apiJson('/api/import_rosters', { id: currentId, teamsXml, particXml });
     if (!resp.ok) { alert('Roster import failed: ' + (await resp.text())); return; }
     const data = await resp.json();
     await loadDetails();
-    flash(`Imported ${data.imported} team(s) — ${data.event}.`);
+    const parts = [`Imported ${data.imported} team(s) into ${data.categories} categor${data.categories === 1 ? 'y' : 'ies'}`];
+    if (Array.isArray(data.unmatched) && data.unmatched.length) {
+      parts.push(`no category matched: ${data.unmatched.join(', ')}`);
+    }
+    flash(parts.join(' — ') + '.');
   } catch { alert('Network error importing rosters.'); }
-}
-
-/** Modal picker: choose which registered event's teams to import. */
-function chooseEvent(events: { code: string; label: string; count: number }[]): Promise<string | null> {
-  return new Promise(resolve => {
-    const overlay = document.getElementById('modal-overlay')!;
-    document.getElementById('modal-title')!.textContent = 'Which event?';
-    document.getElementById('modal-message')!.innerHTML =
-      'This DT_PARTIC_TEAMS file contains several synchro events. Pick the one for this category:';
-    const extra = document.getElementById('modal-extra')!;
-    extra.innerHTML = `<div style="display:flex; flex-direction:column; gap:0.5rem;">${
-      events.map(e => `<button class="btn btn-ghost btn-sm" data-evt="${escapeHtml(e.code)}" style="justify-content:flex-start; text-align:left;">${escapeHtml(e.label)} <span class="text-muted">· ${e.count} team(s)</span></button>`).join('')
-    }</div>`;
-    const confirm = document.getElementById('modal-confirm') as HTMLButtonElement;
-    const cancel = document.getElementById('modal-cancel') as HTMLButtonElement;
-    confirm.classList.add('hidden');
-    overlay.classList.remove('hidden');
-    const done = (val: string | null) => {
-      overlay.classList.add('hidden');
-      confirm.classList.remove('hidden');
-      extra.innerHTML = '';
-      resolve(val);
-    };
-    extra.querySelectorAll<HTMLElement>('[data-evt]').forEach(b =>
-      b.addEventListener('click', () => done(b.dataset.evt!)));
-    cancel.onclick = () => done(null);
-  });
 }
 
 /** Brief transient status toast reusing the upload-status look. */

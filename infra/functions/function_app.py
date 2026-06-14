@@ -12,6 +12,7 @@ import storage_helpers as sh
 import structure as st
 from schedule_parser import parse_schedule_data
 from dt_partic import parse_participants, parse_team_rosters, distinct_events, event_label
+from results_parser import parse_top_three
 from assemble import assemble_protocol
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
@@ -58,6 +59,31 @@ def _file_bytes_getter(folder_path, structure):
         return blob.download_blob().readall()
 
     return _get
+
+
+def _fill_podium_from_results(structure, category):
+    """Read a category's total-results PDF and pre-fill any *empty* podium name
+    fields with the top three ('<code> - <name>'). User-entered names are kept."""
+    file_id = category.get("totalResultsPdf")
+    meta = structure.get("files", {}).get(file_id) if file_id else None
+    if not meta or meta.get("kind") != "pdf" or not meta.get("blob"):
+        return
+    try:
+        blob = sh.get_container_client().get_blob_client(meta["blob"])
+        if not blob.exists():
+            return
+        top = parse_top_three(blob.download_blob().readall())
+    except Exception as e:
+        logging.warning(f"Top-three podium autofill failed: {e}")
+        return
+    if not top:
+        return
+    podium = category.setdefault("podium", {"photo": None, "names": ["", "", ""]})
+    names = (list(podium.get("names") or []) + ["", "", ""])[:3]
+    for i in range(3):
+        if not (names[i] or "").strip() and i < len(top) and top[i]:
+            names[i] = top[i]
+    podium["names"] = names
 
 
 # ── competition registry ──────────────────────────────────────────────────────
@@ -367,6 +393,10 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
                     target[p] = req.params.get(p)
             try:
                 st.assign_file(structure, target, file_id)
+                if slot_kind == "totalResults":
+                    cat = st.find_category(structure, target.get("categoryId"))
+                    if cat:
+                        _fill_podium_from_results(structure, cat)
             except KeyError as ke:
                 logging.warning(f"Upload assign failed: {ke}")
 
@@ -441,6 +471,10 @@ def assign_file(req: func.HttpRequest) -> func.HttpResponse:
         if file_id and file_id not in structure.get("files", {}):
             return func.HttpResponse("Unknown fileId", status_code=400)
         st.assign_file(structure, target, file_id)
+        if target.get("kind") == "totalResults" and file_id:
+            cat = st.find_category(structure, target.get("categoryId"))
+            if cat:
+                _fill_podium_from_results(structure, cat)
         sh.write_structure(folder_path, structure)
         return sh.json_response({"ok": True})
     except KeyError as ke:
@@ -528,53 +562,84 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
+def _norm_event(code: str) -> str:
+    return (code or "").replace("-", "").strip().casefold()
+
+
+def _category_for_event(structure: dict, event_code: str):
+    """Find the category an ISU event code belongs to. A DT_SCHEDULE import stores
+    each category's event code, so an exact/prefix code match is tried first; we
+    then fall back to matching the event's human label against a synchro category
+    name."""
+    ec = _norm_event(event_code)
+    if ec:
+        for c in structure.get("categories", []):
+            cc = _norm_event(c.get("code"))
+            if cc and (cc == ec or cc.startswith(ec) or ec.startswith(cc)):
+                return c
+    label = (event_label(event_code) or "").casefold().strip()
+    if label:
+        for c in structure.get("categories", []):
+            if c.get("discipline") == "synchro" and label in (c.get("name") or "").casefold():
+                return c
+    return None
+
+
+def _merge_team_into(category: dict, parsed: dict):
+    """Merge one parsed team dict into a category's team list (match on code, then
+    name), updating roster/org/name in place."""
+    existing = category.setdefault("teams", [])
+    team = None
+    if parsed.get("code"):
+        team = next((t for t in existing if t.get("code") == parsed["code"]), None)
+    if not team:
+        pn = (parsed.get("name") or "").casefold().strip()
+        if pn:
+            team = next((t for t in existing if (t.get("name") or "").casefold().strip() == pn), None)
+    if not team:
+        team = st.new_team(parsed.get("org", ""), parsed.get("name", ""))
+        existing.append(team)
+    team["code"] = parsed.get("code", "")
+    team["event"] = parsed.get("event", "")
+    team["members"] = parsed.get("members", [])
+    if parsed.get("org"):
+        team["org"] = parsed["org"]
+    if parsed.get("name"):
+        team["name"] = parsed["name"]
+
+
 @app.route(route="import_rosters", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
-    """Import synchro team rosters into a category from a DT_PARTIC_TEAMS file
-    joined with a DT_PARTIC file (both passed as XML strings in the JSON body).
+    """Import synchro team rosters for the *whole competition* from one
+    DT_PARTIC_TEAMS file joined with one DT_PARTIC file (XML strings in the body).
 
-    Body: {id, categoryId, teamsXml, particXml, eventCode?}.
-    A TEAMS file usually spans several events; when more than one is present and
-    no eventCode is given, responds 409 with the event list so the caller can
-    choose which event's teams belong to this category.
+    Body: {id, teamsXml, particXml}.
+    A single TEAMS file spans every synchro event in the competition; teams are
+    grouped by their RegisteredEvent and distributed to the matching category
+    (by event code, then by event label). Events with no matching category are
+    reported back as `unmatched` so the operator can fix the category up.
     """
     if not _require_user(req):
         return func.HttpResponse("Unauthorized", status_code=401)
     try:
         body = req.get_json()
         comp_id = body.get('id')
-        category_id = body.get('categoryId')
         teams_xml = body.get('teamsXml')
         partic_xml = body.get('particXml')
-        event_code = body.get('eventCode')
     except ValueError:
         return func.HttpResponse("Invalid JSON body", status_code=400)
-    if not comp_id or not category_id or not teams_xml:
-        return func.HttpResponse("Missing id, categoryId or teamsXml", status_code=400)
+    if not comp_id or not teams_xml:
+        return func.HttpResponse("Missing id or teamsXml", status_code=400)
     try:
         entity, folder_path = _resolve(comp_id)
         if not entity:
             return func.HttpResponse("Competition not found", status_code=404)
         structure = sh.read_structure(folder_path)
-        category = st.find_category(structure, category_id)
-        if not category:
-            return func.HttpResponse("Category not found", status_code=404)
 
         participants = parse_participants(partic_xml.encode("utf-8")) if partic_xml else {}
         teams = parse_team_rosters(teams_xml.encode("utf-8"), participants)
         if not teams:
             return func.HttpResponse("No teams found in DT_PARTIC_TEAMS", status_code=422)
-
-        events = distinct_events(teams)
-        if not event_code:
-            if len(events) == 1:
-                event_code = events[0]["code"]
-            else:
-                return sh.json_response({"needEvent": True, "events": events}, 409)
-
-        selected = [t for t in teams if t.get("event") == event_code]
-        if not selected:
-            return func.HttpResponse("No teams for the chosen event", status_code=422)
 
         # Keep the source XML files for the record (not draggable upload chips).
         container = sh.get_container_client()
@@ -582,37 +647,25 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
         if partic_xml:
             container.upload_blob(f"{folder_path}/rosters/partic.xml", partic_xml.encode("utf-8"), overwrite=True)
 
-        existing = category.setdefault("teams", [])
+        imported = 0
+        touched = set()
+        unmatched = []
+        for evt in distinct_events(teams):
+            category = _category_for_event(structure, evt["code"])
+            if not category:
+                unmatched.append(evt["label"])
+                continue
+            for parsed in [t for t in teams if t.get("event") == evt["code"]]:
+                _merge_team_into(category, parsed)
+                imported += 1
+            category["discipline"] = "synchro"
+            touched.add(category["id"])
 
-        def _match(parsed):
-            if parsed.get("code"):
-                for t in existing:
-                    if t.get("code") == parsed["code"]:
-                        return t
-            pn = (parsed.get("name") or "").casefold().strip()
-            for t in existing:
-                if pn and (t.get("name") or "").casefold().strip() == pn:
-                    return t
-            return None
-
-        for parsed in selected:
-            team = _match(parsed)
-            if not team:
-                team = st.new_team(parsed.get("org", ""), parsed.get("name", ""))
-                existing.append(team)
-            team["code"] = parsed.get("code", "")
-            team["event"] = parsed.get("event", "")
-            team["members"] = parsed.get("members", [])
-            if parsed.get("org"):
-                team["org"] = parsed["org"]
-            if parsed.get("name"):
-                team["name"] = parsed["name"]
-
-        category["discipline"] = "synchro"
         sh.write_structure(folder_path, structure)
         return sh.json_response({
-            "imported": len(selected),
-            "event": event_label(event_code),
+            "imported": imported,
+            "categories": len(touched),
+            "unmatched": unmatched,
             "structure": structure,
         })
     except Exception as e:

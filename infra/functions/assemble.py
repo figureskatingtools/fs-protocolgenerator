@@ -65,26 +65,43 @@ def _photo_bytes(structure: dict, file_id, get_file_bytes):
     return get_file_bytes(file_id)
 
 
+def _chrome_band(structure: dict, key: str, get_file_bytes):
+    """Resolve the bytes of a competition header/footer graphic, if a custom one
+    is assigned (image only — drawn as an edge-to-edge band)."""
+    ref = structure.get(key) or {}
+    if ref.get("mode") == "custom" and ref.get("fileId"):
+        return _photo_bytes(structure, ref.get("fileId"), get_file_bytes)
+    return None
+
+
 def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
     """Build the merged protocol PDF and return its bytes."""
     writer = PdfWriter()
     event = structure.get("event", {}) or {}
+
+    # Competition-wide page chrome (custom graphic or generic placeholder band),
+    # stamped on every generated page.
+    chrome = {
+        "header": _chrome_band(structure, "header", get_file_bytes),
+        "footer": _chrome_band(structure, "footer", get_file_bytes),
+        "name": event.get("title") or structure.get("name", ""),
+    }
 
     # 1. Cover page
     cover = structure.get("coverPage", {}) or {}
     if cover.get("mode") == "custom" and cover.get("fileId"):
         if not _append_file(writer, structure, cover["fileId"], get_file_bytes):
             _append_pdf_bytes(writer, generate_pages.default_cover_page(
-                event.get("title", structure.get("name", "")), event.get("dates", "")))
+                event.get("title", structure.get("name", "")), event.get("dates", ""), chrome))
     else:
         _append_pdf_bytes(writer, generate_pages.default_cover_page(
-            event.get("title", structure.get("name", "")), event.get("dates", "")))
+            event.get("title", structure.get("name", "")), event.get("dates", ""), chrome))
 
     # 2. Event info page
-    _append_pdf_bytes(writer, generate_pages.event_info_page(event))
+    _append_pdf_bytes(writer, generate_pages.event_info_page(event, chrome))
 
     # 3. Time schedule page
-    _append_pdf_bytes(writer, generate_pages.time_schedule_page(structure.get("schedule") or []))
+    _append_pdf_bytes(writer, generate_pages.time_schedule_page(structure.get("schedule") or [], chrome))
 
     # 4. Categories (schedule order)
     for category in sorted_categories(structure):
@@ -94,9 +111,9 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
         if category.get("discipline") == "synchro":
             for team in category.get("teams", []):
                 photo = _photo_bytes(structure, team.get("photo"), get_file_bytes)
-                _append_pdf_bytes(writer, generate_pages.synchro_team_page(team, photo))
+                _append_pdf_bytes(writer, generate_pages.synchro_team_page(team, photo, chrome))
 
-        # Category title PDF
+        # Category protocol head page PDF
         _append_file(writer, structure, category.get("titlePdf"), get_file_bytes)
 
         # Podium page (only when there's a photo or at least one name)
@@ -104,7 +121,7 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
         names = podium.get("names", []) or []
         photo = _photo_bytes(structure, podium.get("photo"), get_file_bytes)
         if photo or any((n or "").strip() for n in names):
-            _append_pdf_bytes(writer, generate_pages.podium_page(cat_name, photo, names))
+            _append_pdf_bytes(writer, generate_pages.podium_page(cat_name, photo, names, chrome))
 
         # Total category results
         _append_file(writer, structure, category.get("totalResultsPdf"), get_file_bytes)
@@ -119,9 +136,9 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
     last = structure.get("lastPage", {}) or {}
     if last.get("mode") == "custom" and last.get("fileId"):
         if not _append_file(writer, structure, last["fileId"], get_file_bytes):
-            _append_pdf_bytes(writer, generate_pages.default_last_page())
+            _append_pdf_bytes(writer, generate_pages.default_last_page(chrome))
     else:
-        _append_pdf_bytes(writer, generate_pages.default_last_page())
+        _append_pdf_bytes(writer, generate_pages.default_last_page(chrome))
 
     out = io.BytesIO()
     writer.write(out)

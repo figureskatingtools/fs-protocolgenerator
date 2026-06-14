@@ -72,6 +72,8 @@ export interface Structure {
   event: EventInfo;
   coverPage: PageRef;
   lastPage: PageRef;
+  header: PageRef;
+  footer: PageRef;
   scheduleParsed: boolean;
   files: Record<string, FileMeta>;
   categories: Category[];
@@ -83,6 +85,8 @@ export interface SlotTarget {
   kind:
     | 'cover'
     | 'lastPage'
+    | 'header'
+    | 'footer'
     | 'tray'
     | 'categoryTitle'
     | 'totalResults'

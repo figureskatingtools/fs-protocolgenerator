@@ -414,6 +414,21 @@ input[type="checkbox"] { accent-color: var(--ink); }
 .category-head-lead { display: flex; align-items: center; gap: 0.75rem; flex: 1; overflow: hidden; }
 .category-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .category-head-tail { display: flex; align-items: center; gap: 1rem; flex-shrink: 0; }
+
+/* Per-category readiness badge ("3/10 uploaded" / "✓ 10/10 uploaded"). */
+.cat-ready {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  padding: 0.12rem 0.45rem;
+  border-radius: 0.25rem;
+  background: var(--gold-tint);
+  color: var(--gold);
+  border: 1px solid var(--gold-bright);
+  white-space: nowrap;
+}
+.cat-ready.is-ready { background: var(--success-tint); color: var(--success-color); border-color: var(--success-color); }
 .toggle-icon { font-size: 0.75rem; color: var(--ink-muted); transition: transform 0.2s; }
 .category-content { padding: 1rem 1.25rem 1.25rem; }
 
@@ -511,6 +526,9 @@ input[type="checkbox"] { accent-color: var(--ink); }
 }
 .slot.dragover { border-color: var(--rink); border-style: solid; background: var(--rink-tint); }
 .slot.is-filled { border-color: var(--success-color); }
+/* A required slot still waiting for its file — highlighted so it's easy to spot. */
+.slot.is-missing { border-color: var(--gold); border-style: dashed; background: var(--gold-tint); }
+.slot.is-missing .slot-empty { border-color: var(--gold-bright); color: var(--gold); }
 .slot-label { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); display: flex; align-items: center; gap: 0.4rem; }
 .slot-label .req { color: var(--rink); }
 .slot-empty { color: var(--ink-faint); font-size: 0.78rem; font-style: italic; border: 1px dashed var(--line); border-radius: 0.35rem; padding: 0.45rem 0.5rem; text-align: center; }

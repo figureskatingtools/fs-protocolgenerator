@@ -39,6 +39,10 @@ def new_structure(comp_id: str, name: str, dates: str, created_by: str, created_
         },
         "coverPage": {"mode": "default", "fileId": None},
         "lastPage": {"mode": "default", "fileId": None},
+        # Optional competition-wide page chrome, stamped on every generated page.
+        # When no custom graphic is uploaded a generic placeholder band is drawn.
+        "header": {"mode": "default", "fileId": None},
+        "footer": {"mode": "default", "fileId": None},
         "scheduleParsed": False,
         # fileId -> {"filename", "kind" (pdf|image|xml), "size", "uploadedAt"}
         "files": {},
@@ -138,6 +142,9 @@ def clear_file(structure: dict, file_id: str):
         structure["coverPage"] = {"mode": "default", "fileId": None}
     if structure["lastPage"].get("fileId") == file_id:
         structure["lastPage"] = {"mode": "default", "fileId": None}
+    for chrome_key in ("header", "footer"):
+        if (structure.get(chrome_key) or {}).get("fileId") == file_id:
+            structure[chrome_key] = {"mode": "default", "fileId": None}
     for cat in structure.get("categories", []):
         if cat.get("titlePdf") == file_id:
             cat["titlePdf"] = None
@@ -160,8 +167,8 @@ def assign_file(structure: dict, target: dict, file_id):
     file_id is None). A file is first removed from any slot it already occupies, so
     assignment also implements drag-and-drop *moves* between slots.
 
-    target = {"kind": "cover"|"lastPage"|"tray"|"categoryTitle"|"totalResults"
-                       |"podiumPhoto"|"teamPhoto"|"teamRoster"|"segment", ...ids}
+    target = {"kind": "cover"|"lastPage"|"header"|"footer"|"tray"|"categoryTitle"
+                       |"totalResults"|"podiumPhoto"|"teamPhoto"|"teamRoster"|"segment", ...ids}
     """
     if file_id is not None:
         clear_file(structure, file_id)
@@ -174,6 +181,9 @@ def assign_file(structure: dict, target: dict, file_id):
         return
     if kind == "lastPage":
         structure["lastPage"] = {"mode": "custom" if file_id else "default", "fileId": file_id}
+        return
+    if kind in ("header", "footer"):
+        structure[kind] = {"mode": "custom" if file_id else "default", "fileId": file_id}
         return
 
     cat = find_category(structure, target.get("categoryId"))
@@ -206,7 +216,9 @@ def assign_file(structure: dict, target: dict, file_id):
 def assigned_file_ids(structure: dict) -> set:
     """All fileIds currently referenced by a slot."""
     ids = set()
-    for ref in (structure["coverPage"].get("fileId"), structure["lastPage"].get("fileId")):
+    for ref in (structure["coverPage"].get("fileId"), structure["lastPage"].get("fileId"),
+                (structure.get("header") or {}).get("fileId"),
+                (structure.get("footer") or {}).get("fileId")):
         if ref:
             ids.add(ref)
     for cat in structure.get("categories", []):
