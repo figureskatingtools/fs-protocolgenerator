@@ -1,0 +1,762 @@
+import azure.functions as func
+import logging
+import os
+import io
+import json
+from datetime import datetime, timedelta, timezone
+
+from azure.core.exceptions import ResourceNotFoundError
+from azure.data.tables import UpdateMode
+
+import storage_helpers as sh
+import structure as st
+from schedule_parser import parse_schedule_data
+from dt_partic import parse_participants, parse_team_rosters, distinct_events, event_label
+from assemble import assemble_protocol
+
+app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+
+# ── small helpers ─────────────────────────────────────────────────────────────
+
+def _require_user(req):
+    return sh.get_user_email_from_header(req)
+
+
+def _resolve(comp_id):
+    """Return (entity, folder_path) for a competition id, or (None, None)."""
+    entity = sh.get_competition_entity(comp_id)
+    if not entity:
+        return None, None
+    return entity, entity.get("FolderPath", entity["RowKey"])
+
+
+def _kind_for(filename: str) -> str:
+    lower = filename.lower()
+    if lower.endswith(".pdf"):
+        return "pdf"
+    if lower.endswith(".xml"):
+        return "xml"
+    if lower.endswith(IMAGE_EXTS):
+        return "image"
+    return "other"
+
+
+def _file_bytes_getter(folder_path, structure):
+    """Build a get_file_bytes(file_id) closure for the assembler."""
+    container = sh.get_container_client()
+
+    def _get(file_id):
+        meta = structure.get("files", {}).get(file_id)
+        if not meta or not meta.get("blob"):
+            return None
+        blob = container.get_blob_client(meta["blob"])
+        if not blob.exists():
+            return None
+        return blob.download_blob().readall()
+
+    return _get
+
+
+# ── competition registry ──────────────────────────────────────────────────────
+
+@app.route(route="check_user_permission", auth_level=func.AuthLevel.ANONYMOUS)
+def check_user_permission(req: func.HttpRequest) -> func.HttpResponse:
+    email = _require_user(req)
+    if not email:
+        return sh.json_response({"allowed": False, "email": None}, 401)
+    return sh.json_response({"allowed": True, "email": email})
+
+
+@app.route(route="list_competitions", auth_level=func.AuthLevel.ANONYMOUS)
+def list_competitions(req: func.HttpRequest) -> func.HttpResponse:
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    try:
+        comp_table = sh.get_table_client("competitions")
+        if not comp_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        try:
+            comp_table.create_table()
+        except Exception:
+            pass
+
+        competitions = []
+        for entity in list(comp_table.query_entities("PartitionKey eq 'GLOBAL'")):
+            if entity.get("Visible") is False:
+                continue
+            sh.ensure_deletion_date(comp_table, entity)
+            competitions.append({
+                "id": entity["RowKey"],
+                "name": entity.get("Name", entity["RowKey"]),
+                "createdBy": entity.get("CreatedBy", "-"),
+                "createdDate": entity.get("CreatedDate", "-"),
+                "deletionDate": entity.get("DeletionDate", "-"),
+            })
+        return sh.json_response(competitions)
+    except Exception as e:
+        logging.error(f"Error listing competitions: {e}")
+        return sh.json_response({"error": "Internal server error"}, 500)
+
+
+@app.route(route="create_competition", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET", "POST"])
+def create_competition(req: func.HttpRequest) -> func.HttpResponse:
+    email = _require_user(req)
+    if not email:
+        return func.HttpResponse("Unauthorized", status_code=401)
+
+    name = req.params.get('name')
+    dates = req.params.get('dates', '')
+    if not name:
+        return func.HttpResponse("Missing name parameter", status_code=400)
+    safe_name = sh.sanitize_name(name)
+    if not safe_name:
+        return func.HttpResponse("Invalid name", status_code=400)
+
+    try:
+        comp_table = sh.get_table_client("competitions")
+        if not comp_table:
+            return func.HttpResponse("Storage configuration invalid", status_code=500)
+        try:
+            comp_table.create_table()
+        except Exception:
+            pass
+
+        new_id = sh.generate_competition_id(comp_table)
+        folder_path = f"{safe_name}-{new_id}"
+        now = datetime.utcnow()
+        created_date = f"{now.isoformat()}Z"
+
+        structure = st.new_structure(new_id, safe_name, dates, email, created_date)
+        sh.write_structure(folder_path, structure)
+
+        comp_table.create_entity({
+            "PartitionKey": "GLOBAL",
+            "RowKey": new_id,
+            "Name": safe_name,
+            "FolderPath": folder_path,
+            "Visible": True,
+            "CreatedBy": email,
+            "CreatedDate": created_date,
+            "DeletionDate": f"{(now + timedelta(days=sh.DELETION_RETENTION_DAYS)).isoformat()}Z",
+        })
+        return sh.json_response({"id": new_id, "name": safe_name})
+    except Exception as e:
+        logging.error(f"Error creating competition: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+def _delete_competition_data(entity, deleted_by):
+    comp_id = entity["RowKey"]
+    folder_path = entity.get("FolderPath", comp_id)
+    container = sh.get_container_client()
+    if not container:
+        raise RuntimeError("Storage configuration invalid")
+    count = 0
+    for blob in container.list_blobs(name_starts_with=f"{folder_path}/"):
+        container.delete_blob(blob.name)
+        count += 1
+    try:
+        table_client = sh.get_table_client()
+        if table_client:
+            safe_pk = comp_id.replace("'", "''")
+            for paper in table_client.query_entities(f"PartitionKey eq '{safe_pk}'"):
+                table_client.delete_entity(partition_key=paper['PartitionKey'], row_key=paper['RowKey'])
+    except Exception as e:
+        logging.warning(f"Error deleting generated rows: {e}")
+    comp_table = sh.get_table_client("competitions")
+    comp_table.update_entity({
+        "PartitionKey": "GLOBAL", "RowKey": comp_id, "Visible": False,
+        "DeletedDate": f"{datetime.utcnow().isoformat()}Z", "DeletedBy": deleted_by,
+    }, mode=UpdateMode.MERGE)
+    return count
+
+
+@app.route(route="delete_competition", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET", "POST"])
+def delete_competition(req: func.HttpRequest) -> func.HttpResponse:
+    email = _require_user(req)
+    if not email:
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('id')
+    if not comp_id:
+        return func.HttpResponse("Missing id parameter", status_code=400)
+    try:
+        entity = sh.get_competition_entity(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        count = _delete_competition_data(entity, email)
+        return sh.json_response({"deleted": count})
+    except Exception as e:
+        logging.error(f"Error deleting competition: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="extend_competition_deletion", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST", "GET"])
+def extend_competition_deletion(req: func.HttpRequest) -> func.HttpResponse:
+    email = _require_user(req)
+    if not email:
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('id')
+    if not comp_id:
+        return func.HttpResponse("Missing id parameter", status_code=400)
+    try:
+        comp_table = sh.get_table_client("competitions")
+        entity = sh.get_competition_entity(comp_id)
+        if not entity or entity.get("Visible") is False:
+            return func.HttpResponse("Competition not found", status_code=404)
+        sh.ensure_deletion_date(comp_table, entity)
+        now = datetime.now(timezone.utc)
+        current = sh.parse_iso_utc(entity.get("DeletionDate")) or now
+        new_deletion = max(current, now) + timedelta(days=sh.DELETION_EXTENSION_DAYS)
+        new_str = f"{new_deletion.replace(tzinfo=None).isoformat()}Z"
+        comp_table.update_entity({
+            "PartitionKey": "GLOBAL", "RowKey": comp_id, "DeletionDate": new_str,
+        }, mode=UpdateMode.MERGE)
+        return sh.json_response({"deletionDate": new_str})
+    except Exception as e:
+        logging.error(f"Error extending deletion date: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.timer_trigger(schedule="0 0 3 * * *", arg_name="timer", run_on_startup=False)
+def auto_delete_expired_competitions(timer: func.TimerRequest) -> None:
+    try:
+        comp_table = sh.get_table_client("competitions")
+        if not comp_table:
+            return
+        now = datetime.now(timezone.utc)
+        for entity in list(comp_table.query_entities("PartitionKey eq 'GLOBAL'")):
+            if entity.get("Visible") is False or "FolderPath" not in entity:
+                continue
+            sh.ensure_deletion_date(comp_table, entity)
+            deletion = sh.parse_iso_utc(entity.get("DeletionDate"))
+            if deletion is None or deletion > now:
+                continue
+            try:
+                _delete_competition_data(entity, sh.AUTO_CLEANUP_ACTOR)
+            except Exception as e:
+                logging.error(f"Auto-deletion failed for {entity['RowKey']}: {e}")
+    except Exception as e:
+        logging.error(f"Auto-deletion sweep error: {e}")
+
+
+# ── details / event settings ──────────────────────────────────────────────────
+
+@app.route(route="get_competition_details", auth_level=func.AuthLevel.ANONYMOUS)
+def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('id')
+    if not comp_id:
+        return func.HttpResponse("Missing id parameter", status_code=400)
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+        if structure is None:
+            return func.HttpResponse("Competition data missing", status_code=404)
+
+        assigned = st.assigned_file_ids(structure)
+        unassigned = [fid for fid in structure.get("files", {}) if fid not in assigned]
+
+        # Generated protocol download links
+        generated = []
+        try:
+            table_client = sh.get_table_client()
+            if table_client:
+                safe_pk = comp_id.replace("'", "''")
+                for ent in table_client.query_entities(f"PartitionKey eq '{safe_pk}'"):
+                    generated.append({
+                        "fileName": ent.get("FileName"),
+                        "url": ent.get("Url"),
+                        "description": ent.get("Description"),
+                        "expiration": ent.get("ExpirationDate"),
+                        "size": ent.get("FileSize"),
+                    })
+        except Exception as e:
+            logging.warning(f"Could not fetch generated links: {e}")
+
+        return sh.json_response({
+            "structure": structure,
+            "unassigned": unassigned,
+            "generatedFiles": generated,
+        })
+    except Exception as e:
+        logging.error(f"Error getting details: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="save_event_settings", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def save_event_settings(req: func.HttpRequest) -> func.HttpResponse:
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    try:
+        body = req.get_json()
+        comp_id = body.get('id')
+        event = body.get('event', {})
+    except ValueError:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    if not comp_id:
+        return func.HttpResponse("Missing id", status_code=400)
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+        allowed = ("title", "organization", "authorization", "city", "rink", "dates")
+        for key in allowed:
+            if key in event:
+                structure["event"][key] = event[key]
+        sh.write_structure(folder_path, structure)
+        return sh.json_response({"event": structure["event"]})
+    except Exception as e:
+        logging.error(f"Error saving event settings: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+# ── files: upload / fetch / assign / delete ───────────────────────────────────
+
+@app.route(route="upload_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def upload_file(req: func.HttpRequest) -> func.HttpResponse:
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('competition')
+    filename = req.params.get('filename')
+    if not comp_id or not filename:
+        return func.HttpResponse("Missing competition or filename", status_code=400)
+    filename = os.path.basename(filename)
+    kind = _kind_for(filename)
+    if kind == "other":
+        return func.HttpResponse("Unsupported file type (PDF, image or XML only)", status_code=400)
+
+    content_length = req.headers.get('Content-Length')
+    if content_length and int(content_length) > sh.MAX_UPLOAD_SIZE:
+        return func.HttpResponse(f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB).", status_code=413)
+    body = req.get_body()
+    if len(body) > sh.MAX_UPLOAD_SIZE:
+        return func.HttpResponse(f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB).", status_code=413)
+
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+
+        file_id = st.new_id("file")
+        blob_path = f"{folder_path}/uploads/{file_id}_{filename}"
+        container = sh.get_container_client()
+        container.upload_blob(blob_path, body, overwrite=True)
+
+        structure.setdefault("files", {})[file_id] = {
+            "filename": filename,
+            "kind": kind,
+            "size": len(body),
+            "uploadedAt": f"{datetime.utcnow().isoformat()}Z",
+            "blob": blob_path,
+        }
+
+        # Optional immediate slot assignment from query params.
+        slot_kind = req.params.get('slotKind')
+        if slot_kind:
+            target = {"kind": slot_kind}
+            for p in ("categoryId", "segmentId", "teamId", "role"):
+                if req.params.get(p):
+                    target[p] = req.params.get(p)
+            try:
+                st.assign_file(structure, target, file_id)
+            except KeyError as ke:
+                logging.warning(f"Upload assign failed: {ke}")
+
+        sh.write_structure(folder_path, structure)
+        return sh.json_response({"fileId": file_id, "file": structure["files"][file_id]})
+    except Exception as e:
+        logging.error(f"Error uploading file: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="get_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
+def get_file(req: func.HttpRequest) -> func.HttpResponse:
+    """Stream an uploaded file's bytes (for hover previews and downloads)."""
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('competition')
+    file_id = req.params.get('fileId')
+    if not comp_id or not file_id:
+        return func.HttpResponse("Missing competition or fileId", status_code=400)
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+        meta = structure.get("files", {}).get(file_id)
+        if not meta or not meta.get("blob"):
+            return func.HttpResponse("File not found", status_code=404)
+        container = sh.get_container_client()
+        blob = container.get_blob_client(meta["blob"])
+        if not blob.exists():
+            return func.HttpResponse("File not found", status_code=404)
+        data = blob.download_blob().readall()
+        mime = {
+            "pdf": "application/pdf",
+            "image": "image/jpeg",
+            "xml": "application/xml",
+        }.get(meta.get("kind"), "application/octet-stream")
+        if meta.get("kind") == "image":
+            name = meta.get("filename", "").lower()
+            if name.endswith(".png"):
+                mime = "image/png"
+            elif name.endswith(".gif"):
+                mime = "image/gif"
+            elif name.endswith(".webp"):
+                mime = "image/webp"
+        return func.HttpResponse(body=data, status_code=200, mimetype=mime,
+                                 headers={"Cache-Control": "private, max-age=60"})
+    except Exception as e:
+        logging.error(f"Error fetching file: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="assign_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def assign_file(req: func.HttpRequest) -> func.HttpResponse:
+    """Move a file into a slot (drag-and-drop). fileId may be null to clear."""
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    try:
+        body = req.get_json()
+        comp_id = body.get('id')
+        file_id = body.get('fileId')   # may be None to clear the target slot
+        target = body.get('target')
+    except ValueError:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    if not comp_id or not target:
+        return func.HttpResponse("Missing id or target", status_code=400)
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+        if file_id and file_id not in structure.get("files", {}):
+            return func.HttpResponse("Unknown fileId", status_code=400)
+        st.assign_file(structure, target, file_id)
+        sh.write_structure(folder_path, structure)
+        return sh.json_response({"ok": True})
+    except KeyError as ke:
+        return func.HttpResponse(f"Invalid target: {ke}", status_code=400)
+    except Exception as e:
+        logging.error(f"Error assigning file: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="delete_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["DELETE", "POST"])
+def delete_file(req: func.HttpRequest) -> func.HttpResponse:
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('competition')
+    file_id = req.params.get('fileId')
+    if not comp_id or not file_id:
+        return func.HttpResponse("Missing competition or fileId", status_code=400)
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+        meta = structure.get("files", {}).get(file_id)
+        if not meta:
+            return func.HttpResponse("File not found", status_code=404)
+        container = sh.get_container_client()
+        if meta.get("blob") and container.get_blob_client(meta["blob"]).exists():
+            container.delete_blob(meta["blob"])
+        st.clear_file(structure, file_id)
+        structure["files"].pop(file_id, None)
+        sh.write_structure(folder_path, structure)
+        return sh.json_response({"status": "deleted"})
+    except Exception as e:
+        logging.error(f"Error deleting file: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+# ── schedule + roster ──────────────────────────────────────────────────────────
+
+@app.route(route="parse_schedule", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
+    """Upload + parse the schedule PDF; build the category/segment structure."""
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('competition')
+    force = req.params.get('force') in ('1', 'true', 'yes')
+    if not comp_id:
+        return func.HttpResponse("Missing competition", status_code=400)
+    body = req.get_body()
+    if not body:
+        return func.HttpResponse("Missing schedule PDF body", status_code=400)
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+
+        if structure.get("categories") and not force:
+            return func.HttpResponse(
+                "Competition already has categories. Re-parse with force=true to rebuild.",
+                status_code=409)
+
+        # Keep the source schedule (PDF or DT_SCHEDULE XML) for re-parsing.
+        is_xml = body[:2000].lstrip()[:5] == b"<?xml" or b"OdfBody" in body[:2000]
+        sh.get_container_client().upload_blob(
+            f"{folder_path}/schedule.{'xml' if is_xml else 'pdf'}", body, overwrite=True)
+
+        rows, categories, meta = parse_schedule_data(body)
+        structure["schedule"] = rows
+        structure["categories"] = categories
+        structure["scheduleParsed"] = True
+        # Auto-fill event fields the XML gives us, without clobbering user input.
+        if meta.get("rink") and not structure["event"].get("rink"):
+            structure["event"]["rink"] = meta["rink"]
+        if meta.get("dates") and not structure["event"].get("dates"):
+            structure["event"]["dates"] = meta["dates"]
+        sh.write_structure(folder_path, structure)
+        return sh.json_response({
+            "rows": len(rows),
+            "categories": len(structure["categories"]),
+            "structure": structure,
+        })
+    except Exception as e:
+        logging.error(f"Error parsing schedule: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="import_rosters", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
+    """Import synchro team rosters into a category from a DT_PARTIC_TEAMS file
+    joined with a DT_PARTIC file (both passed as XML strings in the JSON body).
+
+    Body: {id, categoryId, teamsXml, particXml, eventCode?}.
+    A TEAMS file usually spans several events; when more than one is present and
+    no eventCode is given, responds 409 with the event list so the caller can
+    choose which event's teams belong to this category.
+    """
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    try:
+        body = req.get_json()
+        comp_id = body.get('id')
+        category_id = body.get('categoryId')
+        teams_xml = body.get('teamsXml')
+        partic_xml = body.get('particXml')
+        event_code = body.get('eventCode')
+    except ValueError:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    if not comp_id or not category_id or not teams_xml:
+        return func.HttpResponse("Missing id, categoryId or teamsXml", status_code=400)
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+        category = st.find_category(structure, category_id)
+        if not category:
+            return func.HttpResponse("Category not found", status_code=404)
+
+        participants = parse_participants(partic_xml.encode("utf-8")) if partic_xml else {}
+        teams = parse_team_rosters(teams_xml.encode("utf-8"), participants)
+        if not teams:
+            return func.HttpResponse("No teams found in DT_PARTIC_TEAMS", status_code=422)
+
+        events = distinct_events(teams)
+        if not event_code:
+            if len(events) == 1:
+                event_code = events[0]["code"]
+            else:
+                return sh.json_response({"needEvent": True, "events": events}, 409)
+
+        selected = [t for t in teams if t.get("event") == event_code]
+        if not selected:
+            return func.HttpResponse("No teams for the chosen event", status_code=422)
+
+        # Keep the source XML files for the record (not draggable upload chips).
+        container = sh.get_container_client()
+        container.upload_blob(f"{folder_path}/rosters/teams.xml", teams_xml.encode("utf-8"), overwrite=True)
+        if partic_xml:
+            container.upload_blob(f"{folder_path}/rosters/partic.xml", partic_xml.encode("utf-8"), overwrite=True)
+
+        existing = category.setdefault("teams", [])
+
+        def _match(parsed):
+            if parsed.get("code"):
+                for t in existing:
+                    if t.get("code") == parsed["code"]:
+                        return t
+            pn = (parsed.get("name") or "").casefold().strip()
+            for t in existing:
+                if pn and (t.get("name") or "").casefold().strip() == pn:
+                    return t
+            return None
+
+        for parsed in selected:
+            team = _match(parsed)
+            if not team:
+                team = st.new_team(parsed.get("org", ""), parsed.get("name", ""))
+                existing.append(team)
+            team["code"] = parsed.get("code", "")
+            team["event"] = parsed.get("event", "")
+            team["members"] = parsed.get("members", [])
+            if parsed.get("org"):
+                team["org"] = parsed["org"]
+            if parsed.get("name"):
+                team["name"] = parsed["name"]
+
+        category["discipline"] = "synchro"
+        sh.write_structure(folder_path, structure)
+        return sh.json_response({
+            "imported": len(selected),
+            "event": event_label(event_code),
+            "structure": structure,
+        })
+    except Exception as e:
+        logging.error(f"Error importing rosters: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+# ── structure editing (manual add/remove/update) ──────────────────────────────
+
+@app.route(route="edit_structure", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
+    """Manual structure edits via a small command set so the tool is usable and
+    correctable even before/without schedule parsing.
+
+    Body: {id, op, ...}. Ops:
+      add_category {name, discipline}
+      remove_category {categoryId}
+      set_category {categoryId, name?, discipline?, order?}
+      add_segment {categoryId, name}
+      remove_segment {categoryId, segmentId}
+      set_segment {categoryId, segmentId, name?, order?}
+      add_team {categoryId, org?, name?}
+      remove_team {categoryId, teamId}
+      set_team {categoryId, teamId, org?, name?, members?}
+      set_podium {categoryId, names:[..]}
+      set_page_mode {slot:'cover'|'lastPage', mode:'default'}
+    """
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    try:
+        body = req.get_json()
+    except ValueError:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    comp_id = body.get('id')
+    op = body.get('op')
+    if not comp_id or not op:
+        return func.HttpResponse("Missing id or op", status_code=400)
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+        cats = structure.setdefault("categories", [])
+
+        def cat():
+            c = st.find_category(structure, body.get("categoryId"))
+            if not c:
+                raise KeyError("category")
+            return c
+
+        if op == "add_category":
+            order = len(cats)
+            cats.append(st.new_category(body.get("name", "New Category"),
+                                        body.get("discipline", "single"), order))
+        elif op == "remove_category":
+            structure["categories"] = [c for c in cats if c["id"] != body.get("categoryId")]
+        elif op == "set_category":
+            c = cat()
+            for k in ("name", "discipline", "order"):
+                if k in body:
+                    c[k] = body[k]
+        elif op == "add_segment":
+            c = cat()
+            c["segments"].append(st.new_segment(body.get("name", "Segment"), len(c["segments"])))
+        elif op == "remove_segment":
+            c = cat()
+            c["segments"] = [s for s in c["segments"] if s["id"] != body.get("segmentId")]
+        elif op == "set_segment":
+            c = cat()
+            s = st.find_segment(c, body.get("segmentId"))
+            if not s:
+                raise KeyError("segment")
+            for k in ("name", "order"):
+                if k in body:
+                    s[k] = body[k]
+        elif op == "add_team":
+            c = cat()
+            c.setdefault("teams", []).append(st.new_team(body.get("org", ""), body.get("name", "")))
+        elif op == "remove_team":
+            c = cat()
+            c["teams"] = [t for t in c.get("teams", []) if t["id"] != body.get("teamId")]
+        elif op == "set_team":
+            c = cat()
+            t = st.find_team(c, body.get("teamId"))
+            if not t:
+                raise KeyError("team")
+            for k in ("org", "name", "members"):
+                if k in body:
+                    t[k] = body[k]
+        elif op == "set_podium":
+            c = cat()
+            names = (list(body.get("names", [])) + ["", "", ""])[:3]
+            c.setdefault("podium", {"photo": None, "names": ["", "", ""]})["names"] = names
+        elif op == "set_page_mode":
+            slot = body.get("slot")
+            if slot in ("coverPage", "lastPage", "cover", "last"):
+                key = "coverPage" if slot in ("cover", "coverPage") else "lastPage"
+                structure[key] = {"mode": "default", "fileId": None}
+        else:
+            return func.HttpResponse(f"Unknown op: {op}", status_code=400)
+
+        sh.write_structure(folder_path, structure)
+        return sh.json_response({"structure": structure})
+    except KeyError as ke:
+        return func.HttpResponse(f"Not found: {ke}", status_code=404)
+    except Exception as e:
+        logging.error(f"Error editing structure: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+# ── generate ───────────────────────────────────────────────────────────────────
+
+@app.route(route="generate_protocol", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
+    email = _require_user(req)
+    if not email:
+        return func.HttpResponse("Unauthorized", status_code=401)
+    try:
+        body = req.get_json()
+        comp_id = body.get('id')
+    except ValueError:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    if not comp_id:
+        return func.HttpResponse("Missing id", status_code=400)
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+
+        get_bytes = _file_bytes_getter(folder_path, structure)
+        pdf_bytes = assemble_protocol(structure, get_bytes)
+
+        safe_name = sh.sanitize_name(structure.get("name", "protocol")).replace(" ", "_") or "protocol"
+        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        out_name = f"protocol_{safe_name}_{stamp}.pdf"
+        blob_name = f"{folder_path}/protocols/{out_name}"
+
+        blob_service_client = sh.get_blob_service_client()
+        container = blob_service_client.get_container_client(sh.CONTAINER_NAME)
+        container.upload_blob(blob_name, pdf_bytes, overwrite=True)
+
+        sh.create_and_store_sas_link(blob_service_client, blob_name, comp_id, out_name, len(pdf_bytes))
+        return sh.json_response({"fileName": out_name, "size": len(pdf_bytes)})
+    except Exception as e:
+        logging.error(f"Error generating protocol: {e}", exc_info=True)
+        return func.HttpResponse("Error generating protocol. Check server logs.", status_code=500)

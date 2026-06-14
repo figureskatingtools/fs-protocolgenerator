@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Project Data & Output
+uploads/
+protocols/
+
+# Build Artifacts
+*.zip
+backend_build/
+
+# Azure Functions
+local.settings.json
+.func/
+
+# Frontend
+node_modules/
+dist/
+.env
+.env.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
