@@ -172,8 +172,28 @@ def default_cover_page(title: str, dates: str) -> bytes:
     return _finish(buf, c)
 
 
-def event_info_page(event: dict, chrome=None) -> bytes:
-    """ISU-style event description page (page 2 of a protocol)."""
+def event_info_page(event: dict, chrome=None, stats=None) -> bytes:
+    """Competition-information page (page 2 of a protocol). Uses the approved
+    brand layout when the brand fonts are available, else a plain fallback.
+    `stats` (optional) carries the competition-wide counts drawn as the stat row."""
+    if branding.fonts_available():
+        try:
+            buf, c = _new_canvas()
+            _draw_chrome(c, chrome)
+            branding.draw_event_info(
+                c,
+                name=event.get("title", ""),
+                organization=event.get("organization", ""),
+                authorization=event.get("authorization", ""),
+                location=event.get("city", ""),
+                venue=event.get("rink", ""),
+                dates=event.get("dates", ""),
+                stats=stats,
+            )
+            return _finish(buf, c)
+        except Exception as e:
+            logging.warning(f"Branded event-info page failed, using plain: {e}")
+
     buf, c = _new_canvas()
     _draw_chrome(c, chrome)
     y = PAGE_H - 70 * mm
@@ -256,7 +276,19 @@ def time_schedule_page(rows, chrome=None) -> bytes:
 
 def podium_page(category_name: str, photo_bytes, names, chrome=None) -> bytes:
     """Podium photo + the top three arranged like a real podium: 1st in the centre
-    (highest), 2nd on the left (a step lower), 3rd on the right (lower still)."""
+    (highest), 2nd on the left (a step lower), 3rd on the right (lower still). Uses
+    the approved brand layout when the brand fonts are available, else a plain
+    fallback. When no photo is supplied the photo area is left as white space."""
+    if branding.fonts_available():
+        try:
+            buf, c = _new_canvas()
+            _draw_chrome(c, chrome)
+            branding.draw_podium(c, category_name=category_name,
+                                 photo_bytes=photo_bytes, entries=names)
+            return _finish(buf, c)
+        except Exception as e:
+            logging.warning(f"Branded podium page failed, using plain: {e}")
+
     buf, c = _new_canvas()
     _draw_chrome(c, chrome)
     _centered(c, "Podium", CONTENT_TOP - 7 * mm, "Times-Bold", 18, INK)

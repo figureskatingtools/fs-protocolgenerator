@@ -12,7 +12,7 @@ import storage_helpers as sh
 import structure as st
 from schedule_parser import parse_schedule_data
 from dt_partic import parse_participants, parse_team_rosters, distinct_events, event_label
-from results_parser import parse_top_three
+from results_parser import parse_top_three, count_result_rows
 from assemble import assemble_protocol
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
@@ -84,6 +84,39 @@ def _fill_podium_from_results(structure, category):
         if not (names[i] or "").strip() and i < len(top) and top[i]:
             names[i] = top[i]
     podium["names"] = names
+
+
+def _coerce_count(value):
+    """Normalise a user-entered unit count to a non-negative int, or None when
+    blank/invalid (so a cleared field reverts to 'unknown')."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _fill_segment_count_from_results(structure, segment):
+    """Read a segment's results PDF and pre-fill its `unitCount` (number of
+    competition units that performed the segment) when it is still unset. A
+    user-entered count is kept."""
+    if segment is None or segment.get("unitCount") is not None:
+        return
+    file_id = segment.get("resultsPdf")
+    meta = structure.get("files", {}).get(file_id) if file_id else None
+    if not meta or meta.get("kind") != "pdf" or not meta.get("blob"):
+        return
+    try:
+        blob = sh.get_container_client().get_blob_client(meta["blob"])
+        if not blob.exists():
+            return
+        count = count_result_rows(blob.download_blob().readall())
+    except Exception as e:
+        logging.warning(f"Segment unit-count autofill failed: {e}")
+        return
+    if count > 0:
+        segment["unitCount"] = count
 
 
 # ── competition registry ──────────────────────────────────────────────────────
@@ -397,6 +430,10 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
                     cat = st.find_category(structure, target.get("categoryId"))
                     if cat:
                         _fill_podium_from_results(structure, cat)
+                elif slot_kind == "segment" and target.get("role") == "results":
+                    cat = st.find_category(structure, target.get("categoryId"))
+                    seg = st.find_segment(cat, target.get("segmentId")) if cat else None
+                    _fill_segment_count_from_results(structure, seg)
             except KeyError as ke:
                 logging.warning(f"Upload assign failed: {ke}")
 
@@ -475,6 +512,10 @@ def assign_file(req: func.HttpRequest) -> func.HttpResponse:
             cat = st.find_category(structure, target.get("categoryId"))
             if cat:
                 _fill_podium_from_results(structure, cat)
+        elif target.get("kind") == "segment" and target.get("role") == "results" and file_id:
+            cat = st.find_category(structure, target.get("categoryId"))
+            seg = st.find_segment(cat, target.get("segmentId")) if cat else None
+            _fill_segment_count_from_results(structure, seg)
         sh.write_structure(folder_path, structure)
         return sh.json_response({"ok": True})
     except KeyError as ke:
@@ -686,7 +727,7 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
       set_category {categoryId, name?, discipline?, order?}
       add_segment {categoryId, name}
       remove_segment {categoryId, segmentId}
-      set_segment {categoryId, segmentId, name?, order?}
+      set_segment {categoryId, segmentId, name?, order?, unitCount?}
       add_team {categoryId, org?, name?}
       remove_team {categoryId, teamId}
       set_team {categoryId, teamId, org?, name?, members?}
@@ -741,6 +782,8 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
             for k in ("name", "order"):
                 if k in body:
                     s[k] = body[k]
+            if "unitCount" in body:
+                s["unitCount"] = _coerce_count(body["unitCount"])
         elif op == "add_team":
             c = cat()
             c.setdefault("teams", []).append(st.new_team(body.get("org", ""), body.get("name", "")))

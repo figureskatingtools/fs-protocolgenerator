@@ -71,6 +71,10 @@ def new_segment(name: str, order: int) -> dict:
         "id": new_id("seg"),
         "name": name,
         "order": order,
+        # Competition units (skaters/pairs/teams) that performed this segment.
+        # Auto-filled from the segment's results PDF, user-correctable; None = unknown.
+        # Drives the information page's Competition Units / Performances counts.
+        "unitCount": None,
         "resultsPdf": None,
         "panelPdf": None,
         "judgesDetailsPdf": None,

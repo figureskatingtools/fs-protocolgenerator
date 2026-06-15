@@ -25,6 +25,7 @@ from pypdf import PdfReader, PdfWriter
 
 import branding
 import generate_pages
+import results_parser
 from structure import sorted_categories, sorted_segments
 
 
@@ -73,6 +74,56 @@ def _chrome_band(structure: dict, key: str, get_file_bytes):
     if ref.get("mode") == "custom" and ref.get("fileId"):
         return _photo_bytes(structure, ref.get("fileId"), get_file_bytes)
     return None
+
+
+def _result_pdf_bytes(structure: dict, file_id, get_file_bytes):
+    """Bytes of a result PDF slot (skips images and missing files)."""
+    if not file_id or _file_kind(structure, file_id) == "image":
+        return None
+    return get_file_bytes(file_id)
+
+
+def _segment_count(structure: dict, segment: dict, get_file_bytes):
+    """Competition units in a segment: the stored (auto-filled, user-correctable)
+    `unitCount` when set, else a live count of the segment's results PDF."""
+    n = segment.get("unitCount")
+    if isinstance(n, int) and n >= 0:
+        return n
+    data = _result_pdf_bytes(structure, segment.get("resultsPdf"), get_file_bytes)
+    return results_parser.count_result_rows(data) if data else 0
+
+
+def _competition_stats(structure: dict, get_file_bytes) -> dict:
+    """Tally competition-wide counts for the information page: number of
+    categories, competition units (skaters/pairs/teams) and performances (one per
+    unit per segment).
+
+    Per-segment unit counts are the source of truth (each stored on the segment,
+    auto-filled from its results PDF and user-correctable). Performances are their
+    sum; a category's units is its largest segment (the full-field segment — later
+    segments hold a subset). When a category has no segment counts the units fall
+    back to its total-results sheet or the synchro team count, and performances to
+    the unit count."""
+    cats = sorted_categories(structure)
+    units = performances = 0
+    for cat in cats:
+        seg_counts = [n for n in (_segment_count(structure, s, get_file_bytes)
+                                  for s in sorted_segments(cat)) if n > 0]
+        cat_perfs = sum(seg_counts)
+        cat_units = max(seg_counts) if seg_counts else 0
+
+        if cat_units == 0:
+            total = _result_pdf_bytes(structure, cat.get("totalResultsPdf"), get_file_bytes)
+            if total:
+                cat_units = results_parser.count_result_rows(total)
+            elif cat.get("discipline") == "synchro":
+                cat_units = len(cat.get("teams") or [])
+        if cat_perfs == 0:
+            cat_perfs = cat_units
+
+        units += cat_units
+        performances += cat_perfs
+    return {"categories": len(cats), "units": units, "performances": performances}
 
 
 def _append_branded_cover(writer: PdfWriter, structure: dict, event: dict):
@@ -129,8 +180,9 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
     else:
         _append_branded_cover(writer, structure, event)
 
-    # 2. Event info page
-    _append_pdf_bytes(writer, generate_pages.event_info_page(event, chrome))
+    # 2. Event info page (with competition-wide counts read from the result PDFs)
+    stats = _competition_stats(structure, get_file_bytes)
+    _append_pdf_bytes(writer, generate_pages.event_info_page(event, chrome, stats))
 
     # 3. Time schedule page
     _append_pdf_bytes(writer, generate_pages.time_schedule_page(structure.get("schedule") or [], chrome))

@@ -30,9 +30,10 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
 except Exception:  # pragma: no cover
     Image = None
+    ImageOps = None
 
 PAGE_W, PAGE_H = A4
 PX = 72.0 / 96.0  # CSS px -> pt
@@ -126,6 +127,12 @@ def _text(c, x, top, text, font, size, color, char_space=0.0):
         to.setCharSpace(char_space)
     to.textLine(text)
     c.drawText(to)
+
+
+def _text_center(c, cx, top, text, font, size, color, char_space=0.0):
+    """Draw a single line centred on `cx` (letter-spacing aware)."""
+    w = _str_w(text, font, size, char_space)
+    _text(c, cx - w / 2, top, text, font, size, color, char_space)
 
 
 def _str_w(text, font, size, char_space=0.0):
@@ -342,3 +349,251 @@ def draw_default_footer(c):
         c.drawImage(img, 0, 0, PAGE_W, FOOTER_H, preserveAspectRatio=False, mask='auto')
     except Exception as e:
         logging.warning(f"footer band image failed: {e}")
+
+
+# ── competition-information page (page 2) ──────────────────────────────────────
+#
+# Reproduces competitionInformation.html: the eyebrow, big competition name with a
+# short gradient rule, then a list of label/value detail rows. The designer's art
+# is a 440×622 box scaled to fill A4, so design px map to points via SX/SY. The
+# running header/footer bands are stamped by the caller (generate_pages._draw_chrome);
+# this only draws the body between them.
+
+def draw_event_info(c, *, name="", organization="", authorization="",
+                    location="", venue="", dates="", stats=None):
+    """Render the branded competition-information body onto canvas `c`.
+
+    Rows are emitted only when their value is present: Organiser, Authorised by
+    (the "with the authorization of" party), Held in (City, Country), Venue and
+    Dates. When `stats` (categories/units/performances, computed from the uploaded
+    result PDFs) carries non-zero counts, a Categories · Competition Units ·
+    Performances stat row is drawn beneath."""
+    _register_fonts()
+    SX = PAGE_W / 440.0
+    SY = PAGE_H / 622.0
+    pad_l = 40 * SX
+
+    # Faint skate watermark, bottom-right (opacity .05), partly off-page.
+    try:
+        wm = _faint_skate(0.05)
+        iw, ih = wm.getSize()
+        wm_w = 230 * SX
+        wm_h = wm_w * ih / iw
+        c.drawImage(wm, (440 + 50) * SX - wm_w, PAGE_H - 578 * SY, wm_w, wm_h,
+                    preserveAspectRatio=True, mask='auto')
+    except Exception as e:
+        logging.warning(f"event-info watermark failed: {e}")
+
+    # Eyebrow.
+    _text(c, pad_l, 96 * SY, "COMPETITION INFORMATION",
+          F_MANROPE_SEMI, 11 * SX, SLATE, char_space=3 * SX)
+
+    # Competition name (balanced wrap within the content width).
+    top = 121 * SY
+    name_size = 31 * SX
+    name_ls = -0.6 * SX
+    lines = _layout_lines(name or "—", F_OUTFIT_BOLD, name_size, 360 * SX, name_ls)
+    line_h = 31 * 1.1 * SY
+    for line in lines:
+        _text(c, pad_l, top, line, F_OUTFIT_BOLD, name_size, INK, char_space=name_ls)
+        top += line_h
+
+    # Gradient rule.
+    top += 18 * SY
+    _grad_h(c, pad_l, PAGE_H - top - 5 * SY, 58 * SX, 5 * SY)
+    top += 5 * SY + 24 * SY
+
+    # Detail rows.
+    rows = []
+    if organization:
+        rows.append(("ORGANISER", organization))
+    if authorization:
+        rows.append(("AUTHORISED BY", authorization))
+    if location:
+        rows.append(("HELD IN", location))
+    if venue:
+        rows.append(("VENUE", venue))
+    if dates:
+        rows.append(("DATES", dates))
+
+    value_x = pad_l + 120 * SX
+    value_w = (PAGE_W - pad_l) - value_x
+    row_h = 45 * SY
+    for label, value in rows:
+        _text(c, pad_l, top + 16 * SY, label, F_MANROPE_SEMI, 10 * SX, MUTED,
+              char_space=1.2 * SX)
+        # Shrink an over-long value to fit its column rather than overflow.
+        vfs = 16 * SX
+        while vfs > 11 * SX and _str_w(value, F_OUTFIT_MED, vfs) > value_w:
+            vfs -= 0.5
+        _text(c, value_x, top + 13 * SY, value, F_OUTFIT_MED, vfs, INK)
+        line_y = PAGE_H - (top + row_h)
+        c.setStrokeColor(HexColor("#EEF0F3"))
+        c.setLineWidth(1)
+        c.line(pad_l, line_y, PAGE_W - pad_l, line_y)
+        top += row_h
+
+    # Stat row (Categories · Competition Units · Performances), only when the
+    # counts read from the result PDFs are meaningful.
+    stats = stats or {}
+    if stats.get("units") or stats.get("performances"):
+        top += 26 * SY
+        col_w = (PAGE_W - 2 * pad_l) / 3.0
+        cells = (
+            ("CATEGORIES", stats.get("categories", 0)),
+            ("COMPETITION UNITS", stats.get("units", 0)),
+            ("PERFORMANCES", stats.get("performances", 0)),
+        )
+        for i, (label, value) in enumerate(cells):
+            cell_x = pad_l + i * col_w
+            _text(c, cell_x, top, str(value), F_OUTFIT_BOLD, 30 * SX, INK)
+            _text(c, cell_x, top + 30 * SY + 7 * SY, label,
+                  F_MANROPE_SEMI, 9 * SX, MUTED, char_space=1.4 * SX)
+
+
+# ── podium page ────────────────────────────────────────────────────────────────
+#
+# Reproduces podium.html: a centred eyebrow + category name, an optional podium
+# photo, then the top three on a 2-1-3 rostrum (1st centre/highest on the brand
+# gradient, 2nd left, 3rd right). Our data carries each medallist as a single
+# "<club> - <name>" string and no scores, so the score pill is omitted. When no
+# photo is supplied the photo area is left as plain white space (per design).
+
+def _load_reader(img_bytes):
+    """ImageReader for a photo plus its pixel size (EXIF-rotated, RGB)."""
+    try:
+        if Image is not None:
+            im = Image.open(io.BytesIO(img_bytes))
+            try:
+                im = ImageOps.exif_transpose(im)
+            except Exception:
+                pass
+            if im.mode not in ("RGB", "L"):
+                im = im.convert("RGB")
+            iw, ih = im.size
+            out = io.BytesIO()
+            im.save(out, format="JPEG", quality=88)
+            out.seek(0)
+            return ImageReader(out), iw, ih
+        reader = ImageReader(io.BytesIO(img_bytes))
+        iw, ih = reader.getSize()
+        return reader, iw, ih
+    except Exception as e:
+        logging.warning(f"podium photo load failed: {e}")
+        return None, 0, 0
+
+
+def _rounded_cover_image(c, img_bytes, x, y, w, h, radius):
+    """Draw a photo to *cover* a rounded box (centre-cropped), with the brand
+    gradient hairline along the top edge."""
+    reader, iw, ih = _load_reader(img_bytes)
+    if reader is None or iw == 0 or ih == 0:
+        return
+    c.saveState()
+    p = c.beginPath()
+    p.roundRect(x, y, w, h, radius)
+    c.clipPath(p, stroke=0, fill=0)
+    scale = max(w / iw, h / ih)
+    dw, dh = iw * scale, ih * scale
+    c.drawImage(reader, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh, mask='auto')
+    # Gradient hairline along the top; _grad_h clips to the bar and intersects the
+    # rounded clip already in effect, so the corners stay rounded.
+    bar_h = 5 * (h / 134.0)
+    _grad_h(c, x, y + h - bar_h, w, bar_h)
+    c.restoreState()
+
+
+def _split_medallist(entry):
+    """Split a "<club> - <name>" results string into (name, club)."""
+    entry = (entry or "").strip()
+    if " - " in entry:
+        club, name = entry.split(" - ", 1)
+        return name.strip(), club.strip()
+    return entry, ""
+
+
+def draw_podium(c, *, category_name="", photo_bytes=None, entries=None):
+    """Render the branded podium body onto canvas `c`."""
+    _register_fonts()
+    SX = PAGE_W / 440.0
+    SY = PAGE_H / 622.0
+    pad = 34 * SX
+
+    _text_center(c, PAGE_W / 2, 90 * SY, "PODIUM",
+                 F_MANROPE_SEMI, 11 * SX, SLATE, char_space=3.5 * SX)
+    if category_name:
+        # Shrink an over-long category name to fit the content width on one line.
+        tfs = 30 * SX
+        max_w = PAGE_W - 2 * pad
+        while tfs > 16 * SX and _str_w(category_name, F_OUTFIT_BOLD, tfs, -0.6 * SX) > max_w:
+            tfs -= 0.5
+        _text_center(c, PAGE_W / 2, 111 * SY, category_name,
+                     F_OUTFIT_BOLD, tfs, INK, char_space=-0.6 * SX)
+
+    # Podium photo — drawn only when supplied; otherwise the area stays white.
+    if photo_bytes:
+        box_top, box_h = 161 * SY, 134 * SY
+        _rounded_cover_image(c, photo_bytes, pad, PAGE_H - box_top - box_h,
+                             PAGE_W - 2 * pad, box_h, radius=14 * SX)
+
+    # Top three: 1st centre/highest, 2nd left, 3rd right.
+    ranks = (list(entries or []) + [None, None, None])[:3]
+    parsed = [_split_medallist(e) for e in ranks]
+
+    PED_BOTTOM = 580.0  # design-px (from top) of the rostrum's base line
+    gap = 16
+    # left→right: (rank, pedestal h, column w, circle d, name size, name font,
+    #              circle colour, numeral size)
+    cols = [
+        (1, 60, 118, 30, 13, F_OUTFIT_SEMI, HexColor("#B8C0C9"), 15),
+        (0, 86, 124, 36, 14, F_OUTFIT_BOLD, HexColor("#E3B23C"), 18),
+        (2, 46, 118, 30, 13, F_OUTFIT_SEMI, HexColor("#C58A5B"), 15),
+    ]
+    x_cursor = (440 - (118 + 124 + 118 + 2 * gap)) / 2.0
+    for rank, ped_h, col_w, circ_d, name_fs, name_font, circ_color, num_fs in cols:
+        center_px = x_cursor + col_w / 2.0
+        cx = center_px * SX
+        name, club = parsed[rank]
+
+        # Pedestal block (1st on the brand gradient, others a soft grey).
+        ped_x = (center_px - col_w / 2.0) * SX
+        ped_y = PAGE_H - PED_BOTTOM * SY
+        ped_w, ped_h_pt = col_w * SX, ped_h * SY
+        if rank == 0:
+            c.saveState()
+            p = c.beginPath()
+            p.roundRect(ped_x, ped_y, ped_w, ped_h_pt, 9 * SX)
+            c.clipPath(p, stroke=0, fill=0)
+            c.linearGradient(ped_x, ped_y, ped_x + ped_w, ped_y + ped_h_pt,
+                             GRAD_COLORS, GRAD_POS, extend=True)
+            c.restoreState()
+        else:
+            c.setFillColor(HexColor("#E7EAEF"))
+            c.roundRect(ped_x, ped_y, ped_w, ped_h_pt, 9 * SX, stroke=0, fill=1)
+
+        # Club, then name, stacked above the pedestal.
+        club_bottom_px = (PED_BOTTOM - ped_h) - 12
+        if club:
+            club_h_px = 9.5 * 1.3
+            club_top_px = club_bottom_px - club_h_px
+            _text_center(c, cx, club_top_px * SY, club, F_MANROPE_MED, 9.5 * SX, SLATE)
+            name_bottom_px = club_top_px - 3
+        else:
+            name_bottom_px = club_bottom_px
+        name_top_px = name_bottom_px - name_fs * 1.2
+        fs = name_fs * SX
+        label = name or "—"
+        while fs > 8 and _str_w(label, name_font, fs) > (col_w - 4) * SX:
+            fs -= 0.5
+        _text_center(c, cx, name_top_px * SY, label, name_font, fs, INK)
+
+        # Rank medallion above the name.
+        circ_top_px = (name_top_px - 9) - circ_d
+        circ_cy = PAGE_H - (circ_top_px + circ_d / 2.0) * SY
+        c.setFillColor(circ_color)
+        c.circle(cx, circ_cy, circ_d / 2.0 * SX, stroke=0, fill=1)
+        c.setFillColor(HexColor("#FFFFFF"))
+        c.setFont(F_OUTFIT_BOLD, num_fs * SX)
+        c.drawCentredString(cx, circ_cy - num_fs * SX * 0.35, str(rank + 1))
+
+        x_cursor += col_w + gap

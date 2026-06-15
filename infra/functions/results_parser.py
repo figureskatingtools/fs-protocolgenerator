@@ -60,6 +60,29 @@ def _format_row(rest: str) -> str:
     return f"{code} - {name}" if name else code
 
 
+def count_result_rows(pdf_bytes) -> int:
+    """Count the placement rows in a results PDF (one row per competition unit —
+    skater, pair or team). Used to tally competition-wide counts for the
+    information page: a total-results sheet yields the category's unit count, a
+    segment-results sheet yields that segment's performance count. Heuristic, same
+    row shape as parse_top_three; counts rows whose remainder reads as a name."""
+    try:
+        text = _read_text(pdf_bytes)
+    except Exception as e:
+        logging.warning(f"Could not read results PDF for row count: {e}")
+        return 0
+    count = 0
+    for line in text.split("\n"):
+        m = _RANK.match(line)
+        if not m:
+            continue
+        if not (1 <= int(m.group(1)) <= 99):
+            continue
+        if _format_row(m.group(2)):
+            count += 1
+    return count
+
+
 def parse_top_three(pdf_bytes) -> list:
     """Return ['<code> - <name>', …] for ranks 1-3 (a 3-element list, '' when a
     placement can't be read). Empty list when the PDF can't be parsed at all."""

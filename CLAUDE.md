@@ -63,9 +63,27 @@ lockup, watermark, "OFFICIAL PROTOCOL" eyebrow, then dynamic competition name
 (balanced wrap), dates, location and organizer — using the bundled **Outfit** and
 **Manrope** TTFs. The fully-static **last page** is the designer's HTML pre-rendered
 once to `assets/last_page.pdf` and inserted as-is. Header/footer are the PNG bands.
-A custom uploaded cover/last page/header/footer still overrides the brand default;
-`generate_pages.default_cover_page`/`default_last_page` remain as plain fallbacks
-only if fonts/assets are missing.
+The **competition-information page** (`branding.draw_event_info`, from
+`competitionInformation.html`) and the **podium page** (`branding.draw_podium`,
+from `podium.html`) are likewise reproduced in reportlab: the page-2 eyebrow +
+title + gradient rule, label/value rows (Organiser, Authorised by, Held in,
+Venue, Dates — each row drawn only when its value is set) and a Categories ·
+Competition Units · Performances stat row (`assemble._competition_stats`, shown
+only when non-zero). The source of truth is each segment's `unitCount` — the
+competition units that performed it, auto-filled from the segment's results PDF on
+upload/assign (`function_app._fill_segment_count_from_results`, mirroring the
+podium autofill) and user-correctable via `edit_structure` `set_segment`
+(`unitCount`) / the per-segment "Units" input. Performances = Σ segment counts;
+a category's units = its largest segment; both fall back to a live
+`results_parser.count_result_rows` parse (then the synchro team count) when a
+category has no segment counts. The podium's 2-1-3
+rostrum (1st centre/highest on the brand gradient, rank medallions, "<club> -
+<name>" split into name + club, photo cover-cropped into a rounded box with a
+gradient hairline, or plain white space when no photo). `generate_pages.event_info_page`
+/`podium_page` delegate to these when `branding.fonts_available()` and fall back to
+the plain ISU-style layouts otherwise. A custom uploaded cover/last page/header/footer
+still overrides the brand default; `generate_pages.default_cover_page`/`default_last_page`
+remain as plain fallbacks only if fonts/assets are missing.
 
 ## Backend routes (`function_app.py`)
 
@@ -105,6 +123,9 @@ timer.
   is often glued to the name in layout extraction ("1Lotta TERHO …"), and the
   nation/club is the last non-numeric column (often mixed-case: "KaTa", "PoriTa").
   Still heuristic — refine against synchro totals when a sample is available.
+  `count_result_rows(pdf_bytes)` reuses the same row shape to tally a sheet's
+  placement rows (units from a total-results sheet, performances from a segment
+  sheet) for the information-page stat row.
 
 ## Defaults / backups
 

@@ -37,6 +37,9 @@ export interface Segment {
   id: string;
   name: string;
   order: number;
+  /** Competition units that performed this segment (auto-filled from the results
+   * PDF, user-correctable; null = unknown). Feeds the information-page counts. */
+  unitCount: number | null;
   resultsPdf: string | null;
   panelPdf: string | null;
   judgesDetailsPdf: string | null;

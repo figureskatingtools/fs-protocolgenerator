@@ -270,6 +270,12 @@ function segmentHtml(cat: Category, seg: Segment): string {
       <div class="segment-head">
         <input class="form-input segment-name" style="max-width: 320px;" value="${escapeHtml(seg.name)}"
                data-edit="set_segment" data-cat="${cat.id}" data-seg="${seg.id}" data-field="name">
+        <label class="segment-units" title="Competition units (skaters/pairs/teams) that performed this segment. Auto-filled from the results PDF; correct it here if needed. Drives the competition-information page counts.">
+          Units
+          <input class="form-input" type="number" min="0" inputmode="numeric" placeholder="—"
+                 value="${seg.unitCount ?? ''}"
+                 data-edit="set_segment" data-cat="${cat.id}" data-seg="${seg.id}" data-field="unitCount">
+        </label>
         <button class="btn btn-xs btn-ghost btn-ghost--danger" data-rm-seg="${seg.id}" data-cat="${cat.id}">Remove segment</button>
       </div>
       <div class="segment-roles">
@@ -470,11 +476,11 @@ function renderDetails() {
       <p class="section-sub">Select the competition's <strong>DT_PARTIC_TEAMS</strong> and <strong>DT_PARTIC</strong> XML files together — one pair covers the whole competition. Teams are matched to their synchro category automatically.</p>
     </div>` : ''}
 
-    <div class=”section”>
-      <div class=”section-head”>
-        <h3>Categories<span class=”help-icon” tabindex=”0” role=”button” aria-label=”Required files help”>?<span class=”help-pop”>
-          <strong>Required files</strong> (marked <span class=”req”>•</span>) drive each category's
-          <em>”n/n uploaded”</em> badge — it turns green with a ✓ when all are present.
+    <div class="section">
+      <div class="section-head">
+        <h3>Categories<span class="help-icon" tabindex="0" role="button" aria-label="Required files help">?<span class="help-pop">
+          <strong>Required files</strong> (marked <span class="req">•</span>) drive each category's
+          <em>"n/n uploaded"</em> badge — it turns green with a ✓ when all are present.
           <ul>
             <li>Every category needs a <strong>Protocol Head Page</strong> and <strong>Total Results</strong>.</li>
             <li>The <strong>Podium Photo</strong> is optional — left empty, the podium page simply shows blank space.</li>
@@ -483,7 +489,7 @@ function renderDetails() {
             <li>With <strong>a single segment</strong>, those two are optional: the lone segment's results would just repeat the Total Results, and for beginner-level competitors or local judging systems the detail scores might not be published — so they aren't required.</li>
           </ul>
         </span></span></h3>
-        <button class=”btn btn-xs btn-primary” id=”btn-add-cat”>Add category</button>
+        <button class="btn btn-xs btn-primary" id="btn-add-cat">Add category</button>
       </div>
       ${(s.categories || []).slice().sort((a, b) => a.order - b.order).map(categoryHtml).join('')
         || '<p class="section-sub">No categories yet. Upload a schedule or add one manually.</p>'}

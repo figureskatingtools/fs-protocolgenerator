@@ -590,8 +590,10 @@ input[type="checkbox"] { accent-color: var(--ink); }
 
 /* ── Segment block ── */
 .segment-block { border-top: 1px solid var(--line); padding-top: 0.85rem; margin-top: 0.85rem; }
-.segment-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.55rem; }
+.segment-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.55rem; }
 .segment-name { font-weight: 600; font-size: 0.92rem; }
+.segment-units { display: inline-flex; align-items: center; gap: 0.4rem; margin-left: auto; font-size: 0.78rem; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.segment-units input { width: 4.5rem; }
 .segment-roles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.6rem; }
 
 /* ── Category meta row ── */
