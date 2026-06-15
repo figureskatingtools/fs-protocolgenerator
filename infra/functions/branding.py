@@ -448,7 +448,149 @@ def draw_event_info(c, *, name="", organization="", authorization="",
             cell_x = pad_l + i * col_w
             _text(c, cell_x, top, str(value), F_OUTFIT_BOLD, 30 * SX, INK)
             _text(c, cell_x, top + 30 * SY + 7 * SY, label,
-                  F_MANROPE_SEMI, 9 * SX, MUTED, char_space=1.4 * SX)
+                  F_MANROPE_SEMI, 7.5 * SX, MUTED, char_space=1.1 * SX)
+
+
+# ── time-schedule page ─────────────────────────────────────────────────────────
+#
+# Reproduces schedule.html: a "Time Schedule" title + gradient rule, then the events
+# grouped by day (a gradient dot + day label + "N EVENTS" count), each event a row
+# of time · category · segment pill separated by hairlines. Fonts are kept a touch
+# smaller than the HTML so more rows fit. The running header/footer bands are
+# stamped by the caller; pagination is handled here via the `new_page` callback.
+
+def _schedule_pill_style(segment: str):
+    """Pill colours for a segment label: Short Program in brand blue, else grey."""
+    s = (segment or "").lower()
+    if "short" in s:
+        return HexColor("#EAF1FB"), BLUE
+    return HexColor("#F3F5F8"), SLATE
+
+
+def draw_schedule(c, rows, *, new_page=None):
+    """Render the branded time-schedule body onto canvas `c`.
+
+    `rows` are the flat schedule entries (date_display / start_time /
+    category_name / segment_name). `new_page()` is invoked after the canvas page
+    break to re-stamp the running chrome; the active day header repeats atop each
+    continued page so context is kept."""
+    _register_fonts()
+    SX = PAGE_W / 440.0
+    SY = PAGE_H / 622.0
+    pad_x = 34.0
+    content_r = (440.0 - 34.0) * SX          # right content edge (pt)
+    event_x = (pad_x + 52.0) * SX            # time col (40) + gap (12)
+    TOP_PX, BOTTOM_PX, ROW_H = 70.0, 590.0, 15.0
+
+    rows = list(rows or [])
+    day_counts = {}
+    for r in rows:
+        d = r.get("date_display") or ""
+        day_counts[d] = day_counts.get(d, 0) + 1
+
+    top = TOP_PX
+
+    # Title + gradient rule.
+    _text(c, pad_x * SX, top * SY, "Time Schedule", F_OUTFIT_BOLD, 18 * SX,
+          INK, char_space=-0.4 * SX)
+    top += 27
+    _grad_h(c, pad_x * SX, PAGE_H - (top + 4) * SY, 50 * SX, 4 * SY)
+    top += 4 + 14
+
+    def emit_day(label, count):
+        nonlocal top
+        # Gradient dot + day label + right-aligned "N EVENTS".
+        _grad_circle(c, (pad_x + 3.5) * SX, PAGE_H - (top + 7) * SY, 3.5 * SX)
+        _text(c, (pad_x + 15) * SX, top * SY, label, F_OUTFIT_SEMI, 11 * SX, INK)
+        if count:
+            tag = f"{count} EVENT" + ("S" if count != 1 else "")
+            tw = _str_w(tag, F_MANROPE_SEMI, 7 * SX, 0.6 * SX)
+            _text(c, content_r - tw, (top + 1) * SY, tag, F_MANROPE_SEMI,
+                  7 * SX, MUTED, char_space=0.6 * SX)
+        top += 18
+
+    def page_break(active_day):
+        nonlocal top
+        c.showPage()
+        if new_page:
+            new_page()
+        top = TOP_PX
+        if active_day:
+            emit_day(active_day, day_counts.get(active_day, 0))
+
+    cur_day = None
+    for row in rows:
+        day = row.get("date_display") or ""
+        new_day = day and day != cur_day
+
+        # Space needed: a day header (if the day changes) plus one row.
+        needed = (18 if new_day else 0) + ROW_H
+        if top + needed > BOTTOM_PX:
+            page_break(cur_day if not new_day else None)
+
+        if new_day:
+            top += 10
+            emit_day(day, day_counts.get(day, 0))
+            cur_day = day
+
+        # Row hairline (top border).
+        c.setStrokeColor(HexColor("#F0F2F5"))
+        c.setLineWidth(1)
+        ly = PAGE_H - top * SY
+        c.line(pad_x * SX, ly, content_r, ly)
+
+        text_top = top + 2.5
+        time = row.get("start_time") or ""
+        _text(c, pad_x * SX, text_top * SY, time, F_OUTFIT_SEMI, 9.5 * SX, INK)
+
+        # Segment pill, right-aligned; sized to its label.
+        seg = row.get("segment_name") or ""
+        avail_r = content_r
+        if seg:
+            seg_fs = 7 * SX
+            seg_tw = _str_w(seg, F_MANROPE_SEMI, seg_fs)
+            pad_h = 7 * SX
+            pw = seg_tw + 2 * pad_h
+            ph = 13 * SY
+            px = content_r - pw
+            py = PAGE_H - (top + 1 + 13) * SY
+            bg, fg = _schedule_pill_style(seg)
+            c.setFillColor(bg)
+            c.roundRect(px, py, pw, ph, ph / 2.0, stroke=0, fill=1)
+            _text_center(c, px + pw / 2.0, (top + 4) * SY, seg,
+                         F_MANROPE_SEMI, seg_fs, fg)
+            avail_r = px - 10 * SX
+
+        # Category name, shrunk then ellipsised to clear the pill. stringWidth
+        # under-measures these TTFs by a few percent, so a fudge factor keeps a
+        # real gap rather than a hairline (borderline names overlapped without it).
+        label = row.get("category_name") or row.get("event_name") or ""
+        avail = avail_r - event_x
+
+        def _fits(s, fs):
+            return _str_w(s, F_MANROPE_MED, fs) * 1.10 <= avail
+
+        ev_fs = 9.5 * SX
+        while ev_fs > 8 * SX and not _fits(label, ev_fs):
+            ev_fs -= 0.5
+        if not _fits(label, ev_fs):
+            while label and not _fits(label + "…", ev_fs):
+                label = label[:-1]
+            label = (label + "…") if label else ""
+        _text(c, event_x, text_top * SY, label, F_MANROPE_MED, ev_fs, INK)
+
+        top += ROW_H
+
+
+def schedule_page(rows) -> bytes:
+    from reportlab.pdfgen import canvas
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    draw_schedule(c, rows)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ── podium page ────────────────────────────────────────────────────────────────
@@ -483,24 +625,28 @@ def _load_reader(img_bytes):
         return None, 0, 0
 
 
-def _rounded_cover_image(c, img_bytes, x, y, w, h, radius):
-    """Draw a photo to *cover* a rounded box (centre-cropped), with the brand
-    gradient hairline along the top edge."""
+def _rounded_fit_image(c, img_bytes, x, top_y, w, max_h, radius):
+    """Draw the *whole* photo (no crop) into a rounded box that hugs the scaled
+    image: fit to the available width, capped at `max_h`, centred horizontally.
+    `top_y` is the top edge of the area; returns the actual box height drawn."""
     reader, iw, ih = _load_reader(img_bytes)
     if reader is None or iw == 0 or ih == 0:
-        return
+        return 0.0
+    scale = min(w / iw, max_h / ih)
+    dw, dh = iw * scale, ih * scale
+    bx = x + (w - dw) / 2.0
+    by = top_y - dh
     c.saveState()
     p = c.beginPath()
-    p.roundRect(x, y, w, h, radius)
+    p.roundRect(bx, by, dw, dh, radius)
     c.clipPath(p, stroke=0, fill=0)
-    scale = max(w / iw, h / ih)
-    dw, dh = iw * scale, ih * scale
-    c.drawImage(reader, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh, mask='auto')
+    c.drawImage(reader, bx, by, dw, dh, mask='auto')
     # Gradient hairline along the top; _grad_h clips to the bar and intersects the
     # rounded clip already in effect, so the corners stay rounded.
-    bar_h = 5 * (h / 134.0)
-    _grad_h(c, x, y + h - bar_h, w, bar_h)
+    bar_h = 5 * (dh / 134.0)
+    _grad_h(c, bx, by + dh - bar_h, dw, bar_h)
     c.restoreState()
+    return dh
 
 
 def _split_medallist(entry):
@@ -531,10 +677,12 @@ def draw_podium(c, *, category_name="", photo_bytes=None, entries=None):
                      F_OUTFIT_BOLD, tfs, INK, char_space=-0.6 * SX)
 
     # Podium photo — drawn only when supplied; otherwise the area stays white.
+    # Show the whole picture (no crop): fit to the content width, capped so the
+    # box stays clear of the rostrum medallions below.
     if photo_bytes:
-        box_top, box_h = 161 * SY, 134 * SY
-        _rounded_cover_image(c, photo_bytes, pad, PAGE_H - box_top - box_h,
-                             PAGE_W - 2 * pad, box_h, radius=14 * SX)
+        box_top = 161 * SY
+        _rounded_fit_image(c, photo_bytes, pad, PAGE_H - box_top,
+                           PAGE_W - 2 * pad, 225 * SY, radius=14 * SX)
 
     # Top three: 1st centre/highest, 2nd left, 3rd right.
     ranks = (list(entries or []) + [None, None, None])[:3]

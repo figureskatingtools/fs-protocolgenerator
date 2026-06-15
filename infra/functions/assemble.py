@@ -100,17 +100,17 @@ def _competition_stats(structure: dict, get_file_bytes) -> dict:
 
     Per-segment unit counts are the source of truth (each stored on the segment,
     auto-filled from its results PDF and user-correctable). Performances are their
-    sum; a category's units is its largest segment (the full-field segment — later
-    segments hold a subset). When a category has no segment counts the units fall
-    back to its total-results sheet or the synchro team count, and performances to
-    the unit count."""
+    sum; a category's units come from its first segment (which always holds the
+    full field — later segments hold a subset). When a category has no segment
+    counts the units fall back to its total-results sheet or the synchro team
+    count, and performances to the unit count."""
     cats = sorted_categories(structure)
     units = performances = 0
     for cat in cats:
         seg_counts = [n for n in (_segment_count(structure, s, get_file_bytes)
                                   for s in sorted_segments(cat)) if n > 0]
         cat_perfs = sum(seg_counts)
-        cat_units = max(seg_counts) if seg_counts else 0
+        cat_units = seg_counts[0] if seg_counts else 0
 
         if cat_units == 0:
             total = _result_pdf_bytes(structure, cat.get("totalResultsPdf"), get_file_bytes)

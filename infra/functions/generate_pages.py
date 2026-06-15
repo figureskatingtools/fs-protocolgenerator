@@ -226,7 +226,19 @@ def event_info_page(event: dict, chrome=None, stats=None) -> bytes:
 
 
 def time_schedule_page(rows, chrome=None) -> bytes:
-    """Modernised time-schedule table: Date · Time · Event."""
+    """Modernised time-schedule page. Uses the approved brand layout (events
+    grouped by day, time · category · segment pill) when the brand fonts are
+    available, else the plain Date · Time · Event table below."""
+    if branding.fonts_available():
+        try:
+            buf, c = _new_canvas()
+            _draw_chrome(c, chrome)
+            branding.draw_schedule(c, rows or [],
+                                   new_page=lambda: _draw_chrome(c, chrome))
+            return _finish(buf, c)
+        except Exception as e:
+            logging.warning(f"Branded time-schedule page failed, using plain: {e}")
+
     buf, c = _new_canvas()
     _draw_chrome(c, chrome)
     x = MARGIN
