@@ -43,6 +43,7 @@ def new_structure(comp_id: str, name: str, dates: str, created_by: str, created_
         # When no custom graphic is uploaded a generic placeholder band is drawn.
         "header": {"mode": "default", "fileId": None},
         "footer": {"mode": "default", "fileId": None},
+        "footerEnabled": True,   # draw the footer band on every page (toggleable)
         "scheduleParsed": False,
         # fileId -> {"filename", "kind" (pdf|image|xml), "size", "uploadedAt"}
         "files": {},

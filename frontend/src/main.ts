@@ -440,11 +440,15 @@ function renderDetails() {
 
     <div class="section">
       <div class="section-head"><h3>Header &amp; footer</h3></div>
-      <p class="section-sub">Optional. Stamped on every generated page. Leave empty to use the generic placeholder band (<code>EXAMPLE HEADER</code> / <code>EXAMPLE FOOTER</code>).</p>
+      <p class="section-sub">Stamped on every interior page. Leave empty to use the Figureskatingtools brand bands — the header automatically prints the competition name, dates and location. Upload an image to override either band.</p>
       <div class="page-slot-row">
         ${slotHtml('Competition header (image)', { kind: 'header' }, s.header?.fileId || null)}
         ${slotHtml('Competition footer (image)', { kind: 'footer' }, s.footer?.fileId || null)}
       </div>
+      <label class="footer-toggle">
+        <input type="checkbox" id="footer-enabled" ${s.footerEnabled !== false ? 'checked' : ''}>
+        Show the footer band on every page
+      </label>
     </div>
 
     <div class="section">
@@ -619,6 +623,13 @@ function wireDetail() {
   // Delete a generated protocol file.
   body.querySelectorAll<HTMLElement>('[data-del-protocol]').forEach(b =>
     b.addEventListener('click', () => deleteProtocol(b.dataset.delProtocol!)));
+
+  // Footer band toggle.
+  document.getElementById('footer-enabled')?.addEventListener('change', e => {
+    const enabled = (e.target as HTMLInputElement).checked;
+    if (details) details.structure.footerEnabled = enabled;
+    editStructure({ op: 'set_footer_enabled', enabled }, false);
+  });
 
   // Generate.
   document.getElementById('btn-generate')?.addEventListener('click', generate);

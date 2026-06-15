@@ -18,6 +18,8 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
+import branding
+
 try:
     from PIL import Image, ImageOps
 except Exception:  # pragma: no cover
@@ -51,33 +53,30 @@ def _new_canvas():
 def _draw_chrome(c, chrome):
     """Stamp the competition header/footer band on the current page.
 
-    `chrome` is {"header": bytes|None, "footer": bytes|None, "name": str} (or
-    None). A custom graphic fills its band edge-to-edge; otherwise a generic
-    placeholder band ("EXAMPLE HEADER: <name>" / "EXAMPLE FOOTER") is drawn so the
-    real designs can be dropped in later without touching layout."""
+    `chrome` carries optional custom band images plus the dynamic header text:
+    {"header": bytes|None, "footer": bytes|None, "footer_enabled": bool,
+     "name": str, "dates": str, "location": str}. A custom graphic fills its band
+    edge-to-edge; otherwise the approved brand band (branding.py) is drawn — the
+    header with the competition name + dates·location to the right of its divider.
+    The footer is omitted entirely when footer_enabled is False."""
     chrome = chrome or {}
-    name = chrome.get("name") or ""
 
     # Header band (top of page).
     header_bytes = chrome.get("header")
     if header_bytes:
         _draw_photo(c, header_bytes, 0, PAGE_H - HEADER_H, PAGE_W, HEADER_H, "")
     else:
-        _centered(c, f"EXAMPLE HEADER: {name}".strip().rstrip(":"),
-                  PAGE_H - HEADER_H / 2 - 3, "Helvetica-Bold", 11, MUTED)
-        c.setStrokeColorRGB(*GOLD)
-        c.setLineWidth(0.8)
-        c.line(MARGIN, PAGE_H - HEADER_H + 5 * mm, PAGE_W - MARGIN, PAGE_H - HEADER_H + 5 * mm)
+        branding.draw_default_header(c, name=chrome.get("name", ""),
+                                     dates=chrome.get("dates", ""),
+                                     location=chrome.get("location", ""))
 
-    # Footer band (bottom of page).
-    footer_bytes = chrome.get("footer")
-    if footer_bytes:
-        _draw_photo(c, footer_bytes, 0, 0, PAGE_W, FOOTER_H, "")
-    else:
-        c.setStrokeColorRGB(*LINE)
-        c.setLineWidth(0.6)
-        c.line(MARGIN, FOOTER_H - 4 * mm, PAGE_W - MARGIN, FOOTER_H - 4 * mm)
-        _centered(c, "EXAMPLE FOOTER", FOOTER_H / 2 - 5, "Helvetica", 8, MUTED)
+    # Footer band (bottom of page) — only when enabled.
+    if chrome.get("footer_enabled", True):
+        footer_bytes = chrome.get("footer")
+        if footer_bytes:
+            _draw_photo(c, footer_bytes, 0, 0, PAGE_W, FOOTER_H, "")
+        else:
+            branding.draw_default_footer(c)
 
 
 def _finish(buf, c) -> bytes:
@@ -159,10 +158,9 @@ def _draw_photo(c, img_bytes, x, y, w, h, placeholder_label):
 
 # ── pages ──────────────────────────────────────────────────────────────────────
 
-def default_cover_page(title: str, dates: str, chrome=None) -> bytes:
-    """White placeholder cover: 'PROTOCOL' + competition title + dates."""
+def default_cover_page(title: str, dates: str) -> bytes:
+    """Plain fallback cover (used only if the branded cover can't be drawn)."""
     buf, c = _new_canvas()
-    _draw_chrome(c, chrome)
     _centered(c, "PROTOCOL", PAGE_H - 95 * mm, "Times-Bold", 30, INK)
     c.setStrokeColorRGB(*GOLD)
     c.setLineWidth(1)
@@ -285,15 +283,19 @@ def podium_page(category_name: str, photo_bytes, names, chrome=None) -> bytes:
     if photo_bytes and box_h > 30 * mm:
         _draw_photo(c, photo_bytes, box_x, box_y, avail_w, box_h, "")
 
+    from reportlab.pdfbase.pdfmetrics import stringWidth
     labels = ["1st", "2nd", "3rd"]
     for col, (place, height) in enumerate(steps):
         cx = MARGIN + col * col_w + col_w / 2
         px = cx - ped_w / 2
-        # Name above the pedestal.
-        c.setFillColorRGB(*INK)
-        c.setFont("Times-Roman", 11.5)
+        # Name centred over this column's pedestal, shrunk to fit the column.
         name = names[place] or "—"
-        _centered(c, name, base_y + height + 6 * mm, "Times-Roman", 11.5, INK)
+        fs = 11.5
+        while fs > 7 and stringWidth(name, "Times-Roman", fs) > col_w - 4 * mm:
+            fs -= 0.5
+        c.setFillColorRGB(*INK)
+        c.setFont("Times-Roman", fs)
+        c.drawCentredString(cx, base_y + height + 6 * mm, name)
         # Pedestal block.
         c.setFillColorRGB(0.93, 0.95, 0.97)
         c.setStrokeColorRGB(*LINE)
@@ -354,10 +356,9 @@ def synchro_team_page(team: dict, photo_bytes, chrome=None) -> bytes:
     return _finish(buf, c)
 
 
-def default_last_page(chrome=None) -> bytes:
-    """Placeholder last page (to be replaced with a finished design)."""
+def default_last_page() -> bytes:
+    """Plain fallback last page (used only if the branded last page is missing)."""
     buf, c = _new_canvas()
-    _draw_chrome(c, chrome)
     _centered(c, "the last page placeholder", PAGE_H / 2, "Helvetica", 14, MUTED)
     return _finish(buf, c)
 

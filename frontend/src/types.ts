@@ -74,6 +74,7 @@ export interface Structure {
   lastPage: PageRef;
   header: PageRef;
   footer: PageRef;
+  footerEnabled: boolean;
   scheduleParsed: boolean;
   files: Record<string, FileMeta>;
   categories: Category[];

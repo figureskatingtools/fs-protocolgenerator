@@ -45,12 +45,27 @@ page PDF (the category's `titlePdf` slot; "Protocol Head Page" in the UI) →
 podium page (when a photo or name exists) → total results PDF → per segment
 (results → panel → judges details) → last page (custom or default).
 
-Every *generated* page (not the inserted result PDFs) is stamped with a
-competition-wide **header/footer band** — see `generate_pages._draw_chrome`. The
-band uses the competition's uploaded `header`/`footer` graphic (drawn edge-to-edge)
-when present, else a generic placeholder ("EXAMPLE HEADER: <name>" / "EXAMPLE
-FOOTER") to be replaced by finished AI-designed art later. `assemble._chrome_band`
-resolves those graphics' bytes once and passes a `chrome` dict to each page builder.
+Every *generated interior* page (event-info, schedule, podium, synchro team — not
+the cover/last page, not inserted result PDFs) is stamped with a competition-wide
+**header/footer band** — see `generate_pages._draw_chrome`. The band uses the
+competition's uploaded `header`/`footer` graphic (drawn edge-to-edge) when present,
+else the approved brand bands from `branding.py` (`assets/header.png` with the
+competition name + dates·location printed to the right of its divider;
+`assets/footer.png` slogan). The footer is omitted when `structure.footerEnabled`
+is false (UI checkbox). `assemble._chrome_band` resolves any custom graphics' bytes
+once and passes a `chrome` dict (custom bytes, footer_enabled, name, dates,
+location) to each page builder.
+
+**Branding (`branding.py` + `assets/` + `fonts/`).** The approved Figureskatingtools
+brand kit (from the designer's `final/` folder): the **cover** is reproduced in
+reportlab (`branding.cover_page`) from `cover.html` — gradient hairline, skate
+lockup, watermark, "OFFICIAL PROTOCOL" eyebrow, then dynamic competition name
+(balanced wrap), dates, location and organizer — using the bundled **Outfit** and
+**Manrope** TTFs. The fully-static **last page** is the designer's HTML pre-rendered
+once to `assets/last_page.pdf` and inserted as-is. Header/footer are the PNG bands.
+A custom uploaded cover/last page/header/footer still overrides the brand default;
+`generate_pages.default_cover_page`/`default_last_page` remain as plain fallbacks
+only if fonts/assets are missing.
 
 ## Backend routes (`function_app.py`)
 
@@ -93,11 +108,12 @@ timer.
 
 ## Defaults / backups
 
-Generated in `generate_pages.py`: white "PROTOCOL" cover, "the last page
-placeholder", the generic header/footer band, and neutral placeholder boxes for
-missing podium/team photos. The podium page lays the top three out in podium shape
-(1st centre/highest, 2nd left, 3rd right). These are deliberately simple — the real
-cover, last page and header/footer art are to be designed and swapped in later.
+The real cover, last page and header/footer art are now the approved brand kit (see
+**Branding** above). `generate_pages.py` still holds the plain fallbacks
+(`default_cover_page`, `default_last_page`) used only when the brand fonts/assets
+are unavailable, plus neutral placeholder boxes for missing team photos. The podium
+page lays the top three out in podium shape (1st centre/highest, 2nd left, 3rd
+right) and leaves the photo area empty (no placeholder) when no podium photo is set.
 
 ## Local development
 

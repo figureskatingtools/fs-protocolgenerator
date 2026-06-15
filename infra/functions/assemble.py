@@ -23,6 +23,7 @@ import logging
 
 from pypdf import PdfReader, PdfWriter
 
+import branding
 import generate_pages
 from structure import sorted_categories, sorted_segments
 
@@ -74,28 +75,59 @@ def _chrome_band(structure: dict, key: str, get_file_bytes):
     return None
 
 
+def _append_branded_cover(writer: PdfWriter, structure: dict, event: dict):
+    """The approved brand cover (reportlab, dynamic text); falls back to the plain
+    cover only if the brand fonts/assets are unavailable."""
+    name = event.get("title") or structure.get("name", "")
+    org = event.get("organization", "")
+    organizer = f"Organized by {org}" if org else ""
+    location = event.get("city") or event.get("rink") or ""
+    try:
+        if branding.fonts_available():
+            _append_pdf_bytes(writer, branding.cover_page(
+                name=name, dates=event.get("dates", ""),
+                location=location, organizer=organizer))
+            return
+    except Exception as e:
+        logging.warning(f"Branded cover failed, using plain cover: {e}")
+    _append_pdf_bytes(writer, generate_pages.default_cover_page(name, event.get("dates", "")))
+
+
+def _append_branded_last_page(writer: PdfWriter):
+    """The approved brand last page (pre-rendered PDF); falls back to the plain
+    last page only if the bundled asset is missing."""
+    try:
+        if _append_pdf_bytes(writer, branding.last_page_pdf()):
+            return
+    except Exception as e:
+        logging.warning(f"Branded last page failed, using plain last page: {e}")
+    _append_pdf_bytes(writer, generate_pages.default_last_page())
+
+
 def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
     """Build the merged protocol PDF and return its bytes."""
     writer = PdfWriter()
     event = structure.get("event", {}) or {}
 
-    # Competition-wide page chrome (custom graphic or generic placeholder band),
-    # stamped on every generated page.
+    # Competition-wide page chrome (custom band image or the approved brand band),
+    # stamped on every generated interior page. The header also prints the
+    # competition name + dates·location; the footer can be toggled off.
     chrome = {
         "header": _chrome_band(structure, "header", get_file_bytes),
         "footer": _chrome_band(structure, "footer", get_file_bytes),
+        "footer_enabled": structure.get("footerEnabled", True),
         "name": event.get("title") or structure.get("name", ""),
+        "dates": event.get("dates", ""),
+        "location": event.get("city") or event.get("rink") or "",
     }
 
-    # 1. Cover page
+    # 1. Cover page (custom upload, else the branded cover)
     cover = structure.get("coverPage", {}) or {}
     if cover.get("mode") == "custom" and cover.get("fileId"):
         if not _append_file(writer, structure, cover["fileId"], get_file_bytes):
-            _append_pdf_bytes(writer, generate_pages.default_cover_page(
-                event.get("title", structure.get("name", "")), event.get("dates", ""), chrome))
+            _append_branded_cover(writer, structure, event)
     else:
-        _append_pdf_bytes(writer, generate_pages.default_cover_page(
-            event.get("title", structure.get("name", "")), event.get("dates", ""), chrome))
+        _append_branded_cover(writer, structure, event)
 
     # 2. Event info page
     _append_pdf_bytes(writer, generate_pages.event_info_page(event, chrome))
@@ -132,13 +164,13 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
             _append_file(writer, structure, segment.get("panelPdf"), get_file_bytes)
             _append_file(writer, structure, segment.get("judgesDetailsPdf"), get_file_bytes)
 
-    # 5. Last page
+    # 5. Last page (custom upload, else the branded last page)
     last = structure.get("lastPage", {}) or {}
     if last.get("mode") == "custom" and last.get("fileId"):
         if not _append_file(writer, structure, last["fileId"], get_file_bytes):
-            _append_pdf_bytes(writer, generate_pages.default_last_page(chrome))
+            _append_branded_last_page(writer)
     else:
-        _append_pdf_bytes(writer, generate_pages.default_last_page(chrome))
+        _append_branded_last_page(writer)
 
     out = io.BytesIO()
     writer.write(out)

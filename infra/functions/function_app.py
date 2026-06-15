@@ -764,6 +764,8 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
             if slot in ("coverPage", "lastPage", "cover", "last"):
                 key = "coverPage" if slot in ("cover", "coverPage") else "lastPage"
                 structure[key] = {"mode": "default", "fileId": None}
+        elif op == "set_footer_enabled":
+            structure["footerEnabled"] = bool(body.get("enabled", True))
         else:
             return func.HttpResponse(f"Unknown op: {op}", status_code=400)
 
