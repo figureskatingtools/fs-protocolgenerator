@@ -560,8 +560,9 @@ def draw_schedule(c, rows, *, new_page=None):
             bg, fg = _schedule_pill_style(seg)
             c.setFillColor(bg)
             c.roundRect(px, py, pw, ph, ph / 2.0, stroke=0, fill=1)
-            _text_center(c, px + pw / 2.0, (top + 4) * SY, seg,
-                         F_MANROPE_SEMI, seg_fs, fg)
+            # Centre on the *rendered* width (pad_h either side); _text_center
+            # would use the un-fudged width and sit the label left of centre.
+            _text(c, px + pad_h, (top + 4) * SY, seg, F_MANROPE_SEMI, seg_fs, fg)
             avail_r = px - 10 * SX
 
         # Category name, shrunk then ellipsised to clear the pill. stringWidth

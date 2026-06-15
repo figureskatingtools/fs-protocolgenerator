@@ -103,6 +103,17 @@ appElement.innerHTML = `
             <div class="view-header-lead">
               <button id="btn-back-list" class="btn btn-sm btn-ghost">← Back</button>
               <h2 id="detail-title">Competition</h2>
+              <span class="help-icon" tabindex="0" role="button" aria-label="How to use the Protocol Generator">?<span class="help-pop">
+                <strong>How to use the Protocol Generator</strong>
+                <ul>
+                  <li>Upload the competition's <strong>schedule</strong> (PDF or DT_SCHEDULE XML) — it builds the categories and segments automatically.</li>
+                  <li>Fill in the <strong>event details</strong> (organiser, venue, dates); they feed the cover and information pages.</li>
+                  <li>Drop each category's result PDFs and photos onto their <strong>slots</strong>; drag between slots to fix placements, and hover a file to preview it.</li>
+                  <li>Required files (marked <span class="req">•</span>) drive each category's <em>"n/n uploaded"</em> readiness badge.</li>
+                  <li>For synchronized skating, import the <strong>DT_PARTIC</strong> team rosters to add team pages.</li>
+                  <li>Press <strong>Generate Protocol</strong> to build the bound PDF; download or delete generated protocols from the list below.</li>
+                </ul>
+              </span></span>
             </div>
           </div>
           <div id="detail-body"></div>
@@ -641,16 +652,19 @@ function wireDetail() {
   document.getElementById('btn-generate')?.addEventListener('click', generate);
 }
 
-async function deleteProtocol(fileName: string) {
+function deleteProtocol(fileName: string) {
   if (!currentId) return;
-  if (!confirm(`Delete the generated protocol "${fileName}"? This cannot be undone.`)) return;
-  try {
-    const resp = await fetch(
-      `/api/delete_protocol?competition=${encodeURIComponent(currentId)}&fileName=${encodeURIComponent(fileName)}`,
-      { method: 'DELETE' });
-    if (!resp.ok) { alert('Delete failed: ' + (await resp.text())); return; }
-    await loadDetails();
-  } catch { alert('Could not delete protocol.'); }
+  openConfirmModal({
+    title: 'Delete protocol?',
+    message: `Delete the generated protocol <strong>${escapeHtml(fileName)}</strong>? This cannot be undone.`,
+    onConfirm: async () => {
+      const resp = await fetch(
+        `/api/delete_protocol?competition=${encodeURIComponent(currentId!)}&fileName=${encodeURIComponent(fileName)}`,
+        { method: 'DELETE' });
+      if (!resp.ok) { alert('Delete failed: ' + (await resp.text())); throw new Error('delete failed'); }
+      await loadDetails();
+    },
+  });
 }
 
 // ── mutations ──
@@ -801,27 +815,40 @@ async function generate() {
 }
 
 // ── delete competition modal ──
-function confirmDeleteCompetition(id: string, name: string) {
+// Graphical confirmation modal (reuses the #modal-overlay component) — a single
+// place for destructive confirmations so they're consistent and not JS popups.
+function openConfirmModal(opts: {
+  title: string; message: string; confirmLabel?: string;
+  onConfirm: () => Promise<void> | void;
+}) {
   const overlay = document.getElementById('modal-overlay')!;
-  document.getElementById('modal-title')!.textContent = 'Delete competition?';
-  document.getElementById('modal-message')!.innerHTML =
-    `Delete <strong>${escapeHtml(name)}</strong>? This permanently removes its files.`;
+  document.getElementById('modal-title')!.textContent = opts.title;
+  document.getElementById('modal-message')!.innerHTML = opts.message;
   document.getElementById('modal-extra')!.innerHTML = '';
   const confirm = document.getElementById('modal-confirm') as HTMLButtonElement;
   const cancel = document.getElementById('modal-cancel') as HTMLButtonElement;
   confirm.className = 'btn btn-danger btn-sm';
-  confirm.textContent = 'Delete';
+  confirm.textContent = opts.confirmLabel || 'Delete';
   overlay.classList.remove('hidden');
   const close = () => overlay.classList.add('hidden');
   cancel.onclick = close;
   confirm.onclick = async () => {
     confirm.disabled = true;
-    try {
-      await apiGet(`/api/delete_competition?id=${encodeURIComponent(id)}`);
-      close(); loadCompetitions();
-    } catch { alert('Delete failed.'); }
+    try { await opts.onConfirm(); close(); }
+    catch { /* the action surfaced its own error; keep the modal open */ }
     finally { confirm.disabled = false; }
   };
+}
+
+function confirmDeleteCompetition(id: string, name: string) {
+  openConfirmModal({
+    title: 'Delete competition?',
+    message: `Delete <strong>${escapeHtml(name)}</strong>? This permanently removes its files.`,
+    onConfirm: async () => {
+      await apiGet(`/api/delete_competition?id=${encodeURIComponent(id)}`);
+      loadCompetitions();
+    },
+  });
 }
 
 // ── create competition ──
