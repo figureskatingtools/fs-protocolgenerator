@@ -548,8 +548,11 @@ def draw_schedule(c, rows, *, new_page=None):
         avail_r = content_r
         if seg:
             seg_fs = 7 * SX
-            seg_tw = _str_w(seg, F_MANROPE_SEMI, seg_fs)
-            pad_h = 7 * SX
+            # stringWidth under-measures the TTF advance by a few percent, so the
+            # pill must be widened to the real rendered width or the label spills
+            # past the rounded background.
+            seg_tw = _str_w(seg, F_MANROPE_SEMI, seg_fs) * 1.10
+            pad_h = 8 * SX
             pw = seg_tw + 2 * pad_h
             ph = 13 * SY
             px = content_r - pw
