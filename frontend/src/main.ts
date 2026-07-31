@@ -314,9 +314,34 @@ function teamHtml(cat: Category, team: Category['teams'][number]): string {
       <div class="team-body">
         <div class="slot-grid">
           ${slotHtml('Team photo', { kind: 'teamPhoto', categoryId: cat.id, teamId: team.id }, team.photo)}
+          ${slotHtml('Fallback picture', { kind: 'teamPhotoFallback', categoryId: cat.id, teamId: team.id }, team.photoFallback ?? null)}
         </div>
         <div class="team-roster">SKATERS (${team.members?.length || 0})${roster}</div>
       </div>
+    </div>`;
+}
+
+/** Flat all-teams overview under "Team rosters": every synchro team with its
+ * competition-photo slot (the very same target object teamHtml uses, so drops,
+ * chips and one-file-one-slot stay consistent across both views) plus a dot
+ * when an accreditation fallback picture is present. */
+function teamOverviewHtml(cats: Category[]): string {
+  const groups = cats
+    .filter(c => c.discipline === 'synchro' && (c.teams || []).length)
+    .slice()
+    .sort((a, b) => a.order - b.order);
+  if (!groups.length) return '<p class="section-sub">No teams yet — import the rosters to list them here.</p>';
+  return `<div class="team-overview">
+      ${groups.map(cat => `
+        <div class="team-overview-group">
+          <span class="micro-label team-overview-cat">${escapeHtml(cat.name || '(unnamed)')}</span>
+          ${(cat.teams || []).map(t => `
+            <div class="team-overview-row">
+              <span class="team-overview-name">${escapeHtml(t.name || '(unnamed)')}${
+                t.photoFallback ? '<span class="fallback-dot" title="Fallback picture available">●</span>' : ''}</span>
+              ${slotHtml('Team photo', { kind: 'teamPhoto', categoryId: cat.id, teamId: t.id }, t.photo)}
+            </div>`).join('')}
+        </div>`).join('')}
     </div>`;
 }
 
@@ -482,9 +507,14 @@ function renderDetails() {
     ${(s.categories || []).some(c => c.discipline === 'synchro') ? `
     <div class="section">
       <div class="section-head"><h3>Team rosters</h3>
-        <button class="btn btn-xs btn-ghost" id="btn-import-rosters">Import teams (DT_PARTIC)…</button>
+        <div class="section-head-actions">
+          <button class="btn btn-xs btn-ghost" id="btn-import-rosters">Import teams (DT_PARTIC)…</button>
+          <button class="btn btn-xs btn-ghost" id="btn-upload-fallbacks">Upload fallback pictures (ZIP)…</button>
+        </div>
       </div>
       <p class="section-sub">Select the competition's <strong>DT_PARTIC_TEAMS</strong> and <strong>DT_PARTIC</strong> XML files together — one pair covers the whole competition. Teams are matched to their synchro category automatically.</p>
+      <p class="section-sub">Accreditation pictures can be imported in bulk from one <strong>ZIP</strong>: folders named like the categories, files named <code>Team-Name_Club-Name.jpeg</code>. They are only used when a team has no competition photo; images that match no team land in the Uploads tray.</p>
+      ${teamOverviewHtml(s.categories || [])}
     </div>` : ''}
 
     <div class="section">
@@ -611,6 +641,14 @@ function wireDetail() {
 
   // Roster import (two DT_PARTIC XML files, one pair for the whole competition).
   document.getElementById('btn-import-rosters')?.addEventListener('click', () => pickRosters());
+
+  // Fallback (accreditation) pictures — one ZIP for the whole competition.
+  document.getElementById('btn-upload-fallbacks')?.addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.zip';
+    inp.onchange = () => { if (inp.files?.[0]) uploadFallbackZip(inp.files[0]); };
+    inp.click();
+  });
 
   // Schedule upload.
   const schedBrowse = document.getElementById('schedule-browse');
@@ -777,6 +815,28 @@ async function importRosters(teamsXml: string, particXml: string) {
     }
     flash(parts.join(' — ') + '.');
   } catch { alert('Network error importing rosters.'); }
+}
+
+/** Bulk-import accreditation pictures from one ZIP (folders ≈ categories, files
+ * "Team-Name_Club-Name.jpeg"). Matched images become the team's fallback
+ * picture; anything unmatched stays in the Uploads tray and is reported. */
+async function uploadFallbackZip(file: File) {
+  if (!currentId) return;
+  try {
+    const resp = await apiRaw(
+      '/api/upload_fallback_photos?' + new URLSearchParams({ competition: currentId }), file);
+    if (!resp.ok) { alert('Fallback picture import failed: ' + (await resp.text())); return; }
+    const data = await resp.json();
+    await loadDetails();
+    const parts = [`Matched ${data.matched} fallback picture(s)`];
+    if (Array.isArray(data.unmatchedFiles) && data.unmatchedFiles.length) {
+      parts.push(`no team matched: ${data.unmatchedFiles.join(', ')}`);
+    }
+    if (Array.isArray(data.rejected) && data.rejected.length) {
+      parts.push(`rejected: ${data.rejected.join(', ')}`);
+    }
+    flash(parts.join(' — ') + '.');
+  } catch { alert('Network error importing fallback pictures.'); }
 }
 
 /** Brief transient status toast reusing the upload-status look. */

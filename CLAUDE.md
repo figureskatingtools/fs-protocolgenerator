@@ -37,6 +37,17 @@ A file lives in **at most one slot**; files in no slot are "unassigned" (the UI
 tray). Drag-and-drop = `assign_file`, which clears the file from its old slot and
 sets it in the new one (`structure.assign_file`).
 
+Synchro teams carry two photo slots: `team.photo` (the competition / kiss'n'cry
+picture, slot kind `teamPhoto`) and `team.photoFallback` (an accreditation
+fallback, slot kind `teamPhotoFallback`). Fallbacks are bulk-imported from one
+optional ZIP (`upload_fallback_photos`, see `fallback_photos.py`): folders named
+like categories (`SM-seniorit/`) holding `Team-Name_Club-Name.jpeg` images.
+Matching is by normalized team name across the whole competition, with the club
+part and the folder-vs-category name only as ranking hints; matched images are
+re-encoded (≤2000 px JPEG) and assigned to `photoFallback` (replacing any prior
+fallback file), unmatched ones land in the tray and are reported. Generation uses
+photo → fallback → placeholder.
+
 ## Assembly order (`assemble.py`)
 
 cover (custom or default) → event-info page → time-schedule page → for each
@@ -89,7 +100,8 @@ remain as plain fallbacks only if fonts/assets are missing.
 
 `list/create/delete/extend_competition`, `get_competition_details`,
 `save_event_settings`, `upload_file`, `get_file` (streams bytes for previews),
-`assign_file`, `delete_file`, `parse_schedule`, `upload_roster`, `edit_structure`
+`assign_file`, `delete_file`, `parse_schedule`, `import_rosters`,
+`upload_fallback_photos` (bulk fallback-picture ZIP), `edit_structure`
 (manual add/remove/set ops), `generate_protocol`, plus the daily auto-deletion
 timer.
 
@@ -135,6 +147,9 @@ The real cover, last page and header/footer art are now the approved brand kit (
 are unavailable, plus neutral placeholder boxes for missing team photos. The podium
 page lays the top three out in podium shape (1st centre/highest, 2nd left, 3rd
 right) and leaves the photo area empty (no placeholder) when no podium photo is set.
+The synchro team page sizes its photo box dynamically — roster rows (2 columns,
+3 past 44 skaters) are reserved first so up to 32 names always fit above the
+footer band, and the photo takes the remaining height (clamped 60–130 mm).
 
 ## Local development
 

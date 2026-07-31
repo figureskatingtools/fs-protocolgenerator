@@ -194,7 +194,10 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
         # Synchronized skating: a team-presentation page per team, first.
         if category.get("discipline") == "synchro":
             for team in category.get("teams", []):
-                photo = _photo_bytes(structure, team.get("photo"), get_file_bytes)
+                # Competition photo first, then the accreditation fallback picture
+                # (imported from the optional ZIP); neither → placeholder box.
+                photo = (_photo_bytes(structure, team.get("photo"), get_file_bytes)
+                         or _photo_bytes(structure, team.get("photoFallback"), get_file_bytes))
                 _append_pdf_bytes(writer, generate_pages.synchro_team_page(team, photo, chrome))
 
         # Category protocol head page PDF

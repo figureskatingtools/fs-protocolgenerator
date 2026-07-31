@@ -89,6 +89,9 @@ def new_team(org: str = "", name: str = "") -> dict:
         "org": org,
         "name": name,
         "photo": None,
+        # Accreditation photo imported from the optional fallback-pictures ZIP;
+        # used at generation only when the team has no competition photo.
+        "photoFallback": None,
         "members": [],
     }
 
@@ -161,6 +164,8 @@ def clear_file(structure: dict, file_id: str):
         for team in cat.get("teams", []):
             if team.get("photo") == file_id:
                 team["photo"] = None
+            if team.get("photoFallback") == file_id:
+                team["photoFallback"] = None
         for seg in cat.get("segments", []):
             for key in ROLE_KEYS.values():
                 if seg.get(key) == file_id:
@@ -173,7 +178,8 @@ def assign_file(structure: dict, target: dict, file_id):
     assignment also implements drag-and-drop *moves* between slots.
 
     target = {"kind": "cover"|"lastPage"|"header"|"footer"|"tray"|"categoryTitle"
-                       |"totalResults"|"podiumPhoto"|"teamPhoto"|"teamRoster"|"segment", ...ids}
+                       |"totalResults"|"podiumPhoto"|"teamPhoto"|"teamPhotoFallback"
+                       |"segment", ...ids}
     """
     if file_id is not None:
         clear_file(structure, file_id)
@@ -206,6 +212,11 @@ def assign_file(structure: dict, target: dict, file_id):
         if not team:
             raise KeyError("team not found")
         team["photo"] = file_id
+    elif kind == "teamPhotoFallback":
+        team = find_team(cat, target.get("teamId"))
+        if not team:
+            raise KeyError("team not found")
+        team["photoFallback"] = file_id
     elif kind == "segment":
         seg = find_segment(cat, target.get("segmentId"))
         if not seg:
@@ -233,6 +244,8 @@ def assigned_file_ids(structure: dict) -> set:
         for team in cat.get("teams", []):
             if team.get("photo"):
                 ids.add(team["photo"])
+            if team.get("photoFallback"):
+                ids.add(team["photoFallback"])
         for seg in cat.get("segments", []):
             for key in ROLE_KEYS.values():
                 if seg.get(key):

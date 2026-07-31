@@ -30,6 +30,9 @@ export interface Team {
   org: string;
   name: string;
   photo: string | null;
+  /** Accreditation picture bulk-imported from a ZIP — used at generation only
+   * when the team has no competition (kiss'n'cry) photo. */
+  photoFallback?: string | null;
   members: string[];
 }
 
@@ -96,6 +99,7 @@ export interface SlotTarget {
     | 'totalResults'
     | 'podiumPhoto'
     | 'teamPhoto'
+    | 'teamPhotoFallback'
     | 'segment';
   categoryId?: string;
   segmentId?: string;

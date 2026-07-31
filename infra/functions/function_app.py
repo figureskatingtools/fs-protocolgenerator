@@ -3,6 +3,7 @@ import logging
 import os
 import io
 import json
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 from azure.core.exceptions import ResourceNotFoundError
@@ -12,6 +13,7 @@ import storage_helpers as sh
 import structure as st
 from schedule_parser import parse_schedule_data
 from dt_partic import parse_participants, parse_team_rosters, distinct_events, event_label
+import fallback_photos
 from results_parser import parse_top_three, count_result_rows
 from assemble import assemble_protocol
 
@@ -711,6 +713,106 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
         })
     except Exception as e:
         logging.error(f"Error importing rosters: {e}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
+def _drop_file(structure, container, file_id):
+    """Delete an uploaded file completely: its blob, every slot referencing it and
+    its registry entry (the same trio as delete_file)."""
+    meta = structure.get("files", {}).get(file_id)
+    if not meta:
+        return
+    try:
+        if meta.get("blob") and container.get_blob_client(meta["blob"]).exists():
+            container.delete_blob(meta["blob"])
+    except Exception as e:
+        logging.warning(f"Could not delete replaced fallback blob: {e}")
+    st.clear_file(structure, file_id)
+    structure["files"].pop(file_id, None)
+
+
+@app.route(route="upload_fallback_photos", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def upload_fallback_photos(req: func.HttpRequest) -> func.HttpResponse:
+    """Import one ZIP of accreditation photos as *fallback* team pictures.
+
+    Body: the raw ZIP. Folders loosely name categories, files are
+    `Team-Name_Club-Name.jpeg` (see fallback_photos). Every picture is re-encoded
+    and registered as a normal uploaded image; those whose team could be
+    identified are assigned to that team's `teamPhotoFallback` slot (replacing —
+    and deleting — any previous fallback so no orphans accumulate), the rest stay
+    unassigned in the Uploads tray and are reported back.
+    """
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('competition')
+    if not comp_id:
+        return func.HttpResponse("Missing competition", status_code=400)
+
+    content_length = req.headers.get('Content-Length')
+    if content_length and int(content_length) > sh.MAX_UPLOAD_SIZE:
+        return func.HttpResponse(f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB).", status_code=413)
+    body = req.get_body()
+    if len(body) > sh.MAX_UPLOAD_SIZE:
+        return func.HttpResponse(f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB).", status_code=413)
+    if not body:
+        return func.HttpResponse("Missing ZIP body", status_code=400)
+
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return func.HttpResponse("Competition not found", status_code=404)
+        structure = sh.read_structure(folder_path)
+
+        try:
+            images, rejected = fallback_photos.parse_zip(body)
+        except zipfile.BadZipFile:
+            return func.HttpResponse("Not a valid ZIP file", status_code=400)
+        if not images:
+            return func.HttpResponse("No usable pictures in the ZIP", status_code=422)
+
+        container = sh.get_container_client()
+        matched = 0
+        unmatched_files = []
+        for img in images:
+            category, team = fallback_photos.match_team(
+                structure, img["team_norm"], img["club_norm"],
+                fallback_photos.normalize(img["folder"] or ""))
+
+            # Register the picture either way, so an unmatched file is still
+            # draggable from the tray.
+            file_id = st.new_id("file")
+            filename = f"{os.path.splitext(img['filename'])[0]}.jpg"   # re-encoded
+            blob_path = f"{folder_path}/uploads/{file_id}_{filename}"
+            container.upload_blob(blob_path, img["jpeg"], overwrite=True)
+            structure.setdefault("files", {})[file_id] = {
+                "filename": filename,
+                "kind": "image",
+                "size": len(img["jpeg"]),
+                "uploadedAt": f"{datetime.utcnow().isoformat()}Z",
+                "blob": blob_path,
+            }
+
+            if not team:
+                unmatched_files.append(img["filename"])
+                continue
+            # Replace, don't orphan: a re-uploaded ZIP shouldn't grow the registry.
+            previous = team.get("photoFallback")
+            if previous and previous in structure.get("files", {}):
+                _drop_file(structure, container, previous)
+            st.assign_file(structure, {"kind": "teamPhotoFallback",
+                                       "categoryId": category["id"],
+                                       "teamId": team["id"]}, file_id)
+            matched += 1
+
+        sh.write_structure(folder_path, structure)
+        return sh.json_response({
+            "matched": matched,
+            "unmatchedFiles": unmatched_files,
+            "rejected": rejected,
+            "structure": structure,
+        })
+    except Exception as e:
+        logging.error(f"Error importing fallback photos: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
 
 

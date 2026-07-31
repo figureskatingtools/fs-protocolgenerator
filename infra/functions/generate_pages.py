@@ -12,6 +12,7 @@ last page are placeholders for now and will be replaced with finished designs.
 """
 import io
 import logging
+import math
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -352,13 +353,129 @@ def podium_page(category_name: str, photo_bytes, names, chrome=None) -> bytes:
     return _finish(buf, c)
 
 
+# Synchro team page: the roster is laid out *first* (a full 32-skater team must
+# always fit above the footer band) and the photo box then takes whatever vertical
+# space is left, within sane bounds.
+ROSTER_ROW_H = 5.5 * mm
+ROSTER_LABEL_H = 19 * mm     # the "SKATERS" label block between photo and names
+ROSTER_PAD = 4 * mm          # breathing room under the last roster row
+PHOTO_MIN_H = 60 * mm
+PHOTO_MAX_H = 130 * mm
+
+
+def _roster_grid(count: int):
+    """(columns, rows) for a roster of `count` names: two columns normally, three
+    as a safety valve for the rare oversized list."""
+    cols = 3 if count > 44 else 2
+    return cols, max(1, math.ceil(count / cols))
+
+
+def _team_photo_box_h(photo_top: float, rows: int) -> float:
+    """Height for the team photo box: everything between `photo_top` and the roster
+    the page still has to fit, clamped so the box neither collapses nor dominates."""
+    avail = photo_top - CONTENT_BOTTOM - ROSTER_LABEL_H - rows * ROSTER_ROW_H - ROSTER_PAD
+    return max(PHOTO_MIN_H, min(PHOTO_MAX_H, avail))
+
+
+def _draw_roster(c, members, cols: int, start_y: float, font: str, size: float):
+    """Draw the skater names down `cols` equal columns from `start_y`."""
+    if not members:
+        return
+    c.setFont(font, size)
+    per_col = math.ceil(len(members) / cols)
+    col_w = (PAGE_W - 2 * MARGIN) / cols
+    for ci in range(cols):
+        cy = start_y
+        cx = MARGIN + ci * col_w
+        for member in members[ci * per_col:(ci + 1) * per_col]:
+            if cy < CONTENT_BOTTOM:      # last-resort guard
+                break
+            c.drawString(cx, cy, member)
+            cy -= ROSTER_ROW_H
+
+
+def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
+    """Brand-styled team body: eyebrow, team name + gradient rule, club, the photo
+    in a rounded box with the gradient hairline (matching the podium page), then the
+    roster. Same deterministic sizing as the plain layout."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    box_w = PAGE_W - 2 * MARGIN
+
+    # Eyebrow.
+    y = CONTENT_TOP - 9 * mm
+    to = c.beginText(MARGIN, y)
+    to.setFont(branding.F_MANROPE_SEMI, 8)
+    to.setCharSpace(2.2)
+    c.setFillColor(branding.SLATE)
+    to.textLine("TEAM")
+    c.drawText(to)
+
+    # Team name, shrunk to one line.
+    y -= 8 * mm
+    fs = 20
+    while fs > 12 and stringWidth(name, branding.F_OUTFIT_BOLD, fs) > box_w:
+        fs -= 0.5
+    c.setFillColor(branding.INK)
+    c.setFont(branding.F_OUTFIT_BOLD, fs)
+    c.drawString(MARGIN, y, name)
+
+    # Short gradient rule under the name.
+    y -= 4.5 * mm
+    branding._grad_h(c, MARGIN, y, 22 * mm, 1.6 * mm)
+
+    # Club.
+    y -= 5.5 * mm
+    if org:
+        c.setFillColor(branding.SLATE)
+        c.setFont(branding.F_MANROPE_MED, 10.5)
+        c.drawString(MARGIN, y, org)
+        y -= 4 * mm
+
+    # Photo: rounded, gradient hairline; a plain placeholder when none was given.
+    photo_top = y - 2 * mm
+    cols, rows = _roster_grid(len(members))
+    box_h = _team_photo_box_h(photo_top, rows)
+    drawn = 0.0
+    if photo_bytes:
+        drawn = branding._rounded_fit_image(c, photo_bytes, MARGIN, photo_top,
+                                           box_w, box_h, radius=10)
+    if not drawn:
+        _placeholder_box(c, MARGIN, photo_top - box_h, box_w, box_h,
+                         "Team photo (not provided)")
+        drawn = box_h
+
+    # Roster.
+    y = photo_top - drawn - 12 * mm
+    to = c.beginText(MARGIN, y)
+    to.setFont(branding.F_MANROPE_SEMI, 8)
+    to.setCharSpace(1.5)
+    c.setFillColor(branding.MUTED)
+    to.textLine("SKATERS")
+    c.drawText(to)
+    c.setFillColor(branding.INK)
+    _draw_roster(c, members, cols, y - 7 * mm, branding.F_MANROPE_MED, 9.5)
+
+
 def synchro_team_page(team: dict, photo_bytes, chrome=None) -> bytes:
-    """Team-presentation page: organization + team name, photo, and roster."""
-    buf, c = _new_canvas()
-    _draw_chrome(c, chrome)
+    """Team-presentation page: organization + team name, photo, and roster. Uses
+    the brand fonts/rounded photo when the brand fonts are available, else the plain
+    layout below. Both size the photo box from the roster length so a full
+    32-skater team always fits above the footer band."""
     name = team.get("name") or "Team"
     org = team.get("org") or ""
     members = team.get("members") or []
+
+    if branding.fonts_available():
+        try:
+            buf, c = _new_canvas()
+            _draw_chrome(c, chrome)
+            _draw_branded_team(c, name, org, members, photo_bytes)
+            return _finish(buf, c)
+        except Exception as e:
+            logging.warning(f"Branded team page failed, using plain: {e}")
+
+    buf, c = _new_canvas()
+    _draw_chrome(c, chrome)
 
     y = CONTENT_TOP - 8 * mm
     c.setFillColorRGB(*INK)
@@ -372,7 +489,8 @@ def synchro_team_page(team: dict, photo_bytes, chrome=None) -> bytes:
     y -= 6 * mm
 
     box_w = PAGE_W - 2 * MARGIN
-    box_h = 95 * mm
+    cols, rows = _roster_grid(len(members))
+    box_h = _team_photo_box_h(y, rows)
     box_y = y - box_h
     _draw_photo(c, photo_bytes, MARGIN, box_y, box_w, box_h, "Team photo (not provided)")
 
@@ -382,21 +500,8 @@ def synchro_team_page(team: dict, photo_bytes, chrome=None) -> bytes:
     c.drawString(MARGIN, y, "SKATERS")
     y -= 7 * mm
 
-    # Two-column roster
     c.setFillColorRGB(*INK)
-    c.setFont("Helvetica", 10)
-    col_w = (PAGE_W - 2 * MARGIN) / 2
-    half = (len(members) + 1) // 2
-    columns = [members[:half], members[half:]]
-    start_y = y
-    for ci, col in enumerate(columns):
-        cy = start_y
-        cx = MARGIN + ci * col_w
-        for member in col:
-            if cy < CONTENT_BOTTOM:
-                break
-            c.drawString(cx, cy, member)
-            cy -= 5.5 * mm
+    _draw_roster(c, members, cols, y, "Helvetica", 10)
     return _finish(buf, c)
 
 
