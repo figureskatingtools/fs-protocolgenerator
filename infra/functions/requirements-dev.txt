@@ -1,0 +1,8 @@
+# Test dependencies: the runtime requirements (the tests import the real
+# modules — function_app pulls in azure.functions, storage_helpers the storage
+# SDKs, assemble reportlab/pypdf, fallback_photos pillow) plus pytest.
+#
+#   cd infra/functions
+#   uv run --with-requirements requirements-dev.txt python -m pytest tests -q
+-r requirements.txt
+pytest~=8.3

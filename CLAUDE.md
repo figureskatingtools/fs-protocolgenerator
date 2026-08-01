@@ -40,10 +40,13 @@ sets it in the new one (`structure.assign_file`).
 Synchro teams carry two photo slots: `team.photo` (the competition / kiss'n'cry
 picture, slot kind `teamPhoto`) and `team.photoFallback` (an accreditation
 fallback, slot kind `teamPhotoFallback`). Fallbacks are bulk-imported from one
-optional ZIP (`upload_fallback_photos`, see `fallback_photos.py`): folders named
-like categories (`SM-seniorit/`) holding `Team-Name_Club-Name.jpeg` images.
-Matching is by normalized team name across the whole competition, with the club
-part and the folder-vs-category name only as ranking hints; matched images are
+optional ZIP (`upload_fallback_photos`, see `fallback_photos.py`, size cap
+`MAX_ZIP_UPLOAD_SIZE` 100 MiB ≈ the platform HTTP limit): folders named like
+categories or events (`SM-seniorit/`, `Aikuiset/`) holding
+`Team-Name_Club-Name.jpeg` images. Matching is by normalized team name across the
+whole competition — NFKD diacritic-folded, so ASCII filenames ("Helsinki-JaaLeidit")
+match XML names ("Helsinki JääLeidit") — with the club part and the
+folder-vs-category name only as ranking hints; matched images are
 re-encoded (≤2000 px JPEG) and assigned to `photoFallback` (replacing any prior
 fallback file), unmatched ones land in the tray and are reported. Generation uses
 photo → fallback → placeholder.
@@ -118,26 +121,38 @@ timer.
     SCHEDULE" export: glued start/finish times, 2-space category|segment columns,
     multi-day segment merge, and synchro detected from the document title
     ("MUODOSTELMALUISTELUN…") via `structure.discipline_signal`.
-- `dt_partic.py` — calibrated against real ISU OdfBody files. Joins
+- `dt_partic.py` — calibrated against real ISU/TAIKKARI OdfBody files. Joins
   **DT_PARTIC_TEAMS** (`<Team>`/`<Composition>`/`<Athlete Code>`) with
   **DT_PARTIC** (`<Participant Code GivenName FamilyName>`) on athlete `Code`.
-  One TEAMS + one PARTIC file cover the **whole competition**: `import_rosters`
-  groups teams by `RegisteredEvent` and distributes each event's teams to the
-  matching category (`function_app._category_for_event` matches by the category's
-  stored `code` first, then by event label vs. a synchro category name); events
-  with no matching category are returned as `unmatched`. Names render
-  "FAMILY Given", rosters sorted alphabetically.
-- `results_parser.py` — `parse_top_three(pdf_bytes)` reads ranks 1–3 from a
-  category's total-results PDF and returns "<nation/club> - <name>" strings (e.g.
-  "SCT - Lotta TERHO", "HTK - Helsinki Finettes"). When a totalResults slot is
-  filled (`assign_file`/`upload_file`), the backend pre-fills *empty* podium name
-  fields. Calibrated against a real ISU singles sheet (Tikkurila Trophy): the place
-  is often glued to the name in layout extraction ("1Lotta TERHO …"), and the
-  nation/club is the last non-numeric column (often mixed-case: "KaTa", "PoriTa").
-  Still heuristic — refine against synchro totals when a sample is available.
-  `count_result_rows(pdf_bytes)` reuses the same row shape to tally a sheet's
-  placement rows (units from a total-results sheet, performances from a segment
-  sheet) for the information-page stat row.
+  One TEAMS + one PARTIC file cover the **whole competition**. Names render
+  "FAMILY Given", rosters sorted alphabetically; Name/Organisation are stripped
+  (real exports carry trailing spaces).
+- `roster_matching.py` — pure team→category placement, used by `import_rosters`.
+  Teams register per **event** (`RegisteredEvent="…MLAIKU----"`) but often compete
+  per **block** ("Aikuiset, Mupi L1"/"L2"; DT_SCHEDULE codes `…MLAIKU--01`), and
+  block membership exists *only* in each block's total-results PDF. So matching is
+  **results-first**: `match_teams` places a team into the category whose result
+  rows name it (exact normalized name, then word-subset fuzzy — "JääLeidit" ⊂
+  "Helsinki JääLeidit" — with the club abbreviation as tiebreak), and only falls
+  back to the registered event when that maps to exactly one category
+  (`categories_for_event`: trailing-dash-stripped code prefix → event-token
+  fragment vs. category-name words, "MLAIKU"→"Aikuiset…" → ISU/Finnish label).
+  Everything else is *reported*, never guessed: `withdrawn` (registered, on no
+  sheet, all blocks parsed) or `unmatched` with an actionable reason. The report
+  persists as `structure["rosterImport"]` (UI panel), the XMLs are archived under
+  `rosters/`, and filling a `totalResults` slot triggers an automatic re-match
+  (`_rematch_after_results`; the auto pass never moves an already-placed team on
+  a non-exact hit). `_upsert_team` matches competition-wide and *moves* teams
+  (keeping id/photos) so re-imports never duplicate.
+- `results_parser.py` — `parse_result_rows(pdf_bytes)` extracts every placement
+  row (`{rank, name, club}`; first occurrence per rank) and feeds podium pre-fill
+  (`parse_top_three` → "<nation/club> - <name>", e.g. "HTK - Helsinki Finettes"),
+  the info-page tallies (`count_result_rows`) and roster matching. When a
+  totalResults slot is filled (`assign_file`/`upload_file`), the backend pre-fills
+  *empty* podium name fields. Calibrated against real singles (Tikkurila Trophy)
+  and synchro sheets: the place is often glued to the name in layout extraction
+  ("1Shadows ETK 69.29 1"), and the nation/club is the last non-numeric column
+  (often mixed-case: "KaTa", "SeiTL").
 
 ## Defaults / backups
 
@@ -156,6 +171,13 @@ footer band, and the photo takes the remaining height (clamped 60–130 mm).
 ```bash
 cd frontend && NODE_AUTH_TOKEN=$(gh auth token) npm install   # shared-ui from GH Packages
 ./start_locally.sh    # Azurite + func + vite + SWA auth emulator
+```
+
+Backend tests (synthetic fixtures only — never commit real competition data,
+the OdfBody exports contain minors' personal data):
+
+```bash
+cd infra/functions && uv run --with-requirements requirements-dev.txt python -m pytest tests -q
 ```
 
 ## Deploy

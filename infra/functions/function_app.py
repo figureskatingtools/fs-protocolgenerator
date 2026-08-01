@@ -12,9 +12,10 @@ from azure.data.tables import UpdateMode
 import storage_helpers as sh
 import structure as st
 from schedule_parser import parse_schedule_data
-from dt_partic import parse_participants, parse_team_rosters, distinct_events, event_label
+from dt_partic import parse_participants, parse_team_rosters
 import fallback_photos
-from results_parser import parse_top_three, count_result_rows
+import roster_matching
+from results_parser import parse_top_three, count_result_rows, parse_result_rows
 from assemble import assemble_protocol
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
@@ -432,6 +433,7 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
                     cat = st.find_category(structure, target.get("categoryId"))
                     if cat:
                         _fill_podium_from_results(structure, cat)
+                    _rematch_after_results(structure, folder_path)
                 elif slot_kind == "segment" and target.get("role") == "results":
                     cat = st.find_category(structure, target.get("categoryId"))
                     seg = st.find_segment(cat, target.get("segmentId")) if cat else None
@@ -514,6 +516,7 @@ def assign_file(req: func.HttpRequest) -> func.HttpResponse:
             cat = st.find_category(structure, target.get("categoryId"))
             if cat:
                 _fill_podium_from_results(structure, cat)
+            _rematch_after_results(structure, folder_path)
         elif target.get("kind") == "segment" and target.get("role") == "results" and file_id:
             cat = st.find_category(structure, target.get("categoryId"))
             seg = st.find_segment(cat, target.get("segmentId")) if cat else None
@@ -605,43 +608,73 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
-def _norm_event(code: str) -> str:
-    return (code or "").replace("-", "").strip().casefold()
+def _result_rows_for_categories(structure, container, folder_path) -> dict:
+    """categoryId -> the placement rows of that category's total-results PDF.
+
+    Roster matching is results-first (see `roster_matching`), so every category
+    that already has a Total Results PDF contributes the names it lists. A sheet
+    that cannot be read (blob gone, unparsable PDF) simply yields no rows, which
+    the matcher treats as "no results for this category yet"."""
+    rows_by_cat = {}
+    by_blob = {}
+    files = structure.get("files", {})
+    for cat in structure.get("categories", []):
+        file_id = cat.get("totalResultsPdf")
+        meta = files.get(file_id) if file_id else None
+        if not meta or meta.get("kind") != "pdf" or not meta.get("blob"):
+            continue
+        path = meta["blob"]
+        if path not in by_blob:
+            by_blob[path] = []
+            try:
+                blob = container.get_blob_client(path)
+                if blob.exists():
+                    by_blob[path] = parse_result_rows(blob.download_blob().readall())
+            except Exception as e:
+                logging.warning(f"Could not read total results {path} in {folder_path}: {e}")
+        if by_blob[path]:
+            rows_by_cat[cat["id"]] = by_blob[path]
+    return rows_by_cat
 
 
-def _category_for_event(structure: dict, event_code: str):
-    """Find the category an ISU event code belongs to. A DT_SCHEDULE import stores
-    each category's event code, so an exact/prefix code match is tried first; we
-    then fall back to matching the event's human label against a synchro category
-    name."""
-    ec = _norm_event(event_code)
-    if ec:
-        for c in structure.get("categories", []):
-            cc = _norm_event(c.get("code"))
-            if cc and (cc == ec or cc.startswith(ec) or ec.startswith(cc)):
-                return c
-    label = (event_label(event_code) or "").casefold().strip()
-    if label:
-        for c in structure.get("categories", []):
-            if c.get("discipline") == "synchro" and label in (c.get("name") or "").casefold():
-                return c
-    return None
+def _find_team_anywhere(structure: dict, parsed: dict):
+    """`(category, team)` for a parsed DT_PARTIC_TEAMS team's current placement —
+    matched on the DT_PARTIC_TEAMS code first, then on the normalised name, across
+    *all* categories. `(None, None)` when the team isn't in the structure yet."""
+    cats = structure.get("categories") or []
+    code = (parsed.get("code") or "").strip()
+    if code:
+        for cat in cats:
+            for team in cat.get("teams", []):
+                if (team.get("code") or "").strip() == code:
+                    return cat, team
+    name = parsed.get("name") or ""
+    if name:
+        for cat in cats:
+            for team in cat.get("teams", []):
+                if roster_matching.same_name(team.get("name") or "", name):
+                    return cat, team
+    return None, None
 
 
-def _merge_team_into(category: dict, parsed: dict):
-    """Merge one parsed team dict into a category's team list (match on code, then
-    name), updating roster/org/name in place."""
-    existing = category.setdefault("teams", [])
-    team = None
-    if parsed.get("code"):
-        team = next((t for t in existing if t.get("code") == parsed["code"]), None)
-    if not team:
-        pn = (parsed.get("name") or "").casefold().strip()
-        if pn:
-            team = next((t for t in existing if (t.get("name") or "").casefold().strip() == pn), None)
-    if not team:
+def _upsert_team(structure: dict, category: dict, parsed: dict) -> bool:
+    """Place one parsed team into `category`, wherever it currently sits.
+
+    The lookup is competition-wide, so a re-import never duplicates a team and a
+    team the previous pass put in the wrong block is *moved* — keeping its id and
+    both photo slots. Roster/code/event are always refreshed; org and name only
+    when the XML actually carries them. Returns True when the team moved between
+    categories."""
+    teams = category.setdefault("teams", [])
+    old_cat, team = _find_team_anywhere(structure, parsed)
+    moved = False
+    if team is None:
         team = st.new_team(parsed.get("org", ""), parsed.get("name", ""))
-        existing.append(team)
+        teams.append(team)
+    elif old_cat is not category:
+        old_cat["teams"] = [t for t in old_cat.get("teams", []) if t is not team]
+        teams.append(team)
+        moved = True
     team["code"] = parsed.get("code", "")
     team["event"] = parsed.get("event", "")
     team["members"] = parsed.get("members", [])
@@ -649,6 +682,103 @@ def _merge_team_into(category: dict, parsed: dict):
         team["org"] = parsed["org"]
     if parsed.get("name"):
         team["name"] = parsed["name"]
+    return moved
+
+
+def _apply_assignments(structure: dict, report: dict, auto: bool = False):
+    """Apply a `roster_matching.match_teams` report; returns
+    `(imported, moved, touched_category_ids)`.
+
+    An `auto` pass is the background re-match triggered by a Total Results PDF: it
+    may *place* a team that is in no category yet, but it may only move an already
+    placed team on a tier-1 exact results hit — a manual placement is never
+    overridden by a fuzzy guess."""
+    imported, moved, touched = 0, 0, set()
+    for assignment in report.get("assignments", []):
+        category = st.find_category(structure, assignment.get("categoryId"))
+        if not category:
+            continue
+        parsed = assignment.get("team") or {}
+        if auto and assignment.get("method") != "results":
+            old_cat, existing = _find_team_anywhere(structure, parsed)
+            if existing is not None and old_cat is not category:
+                continue
+        if _upsert_team(structure, category, parsed):
+            moved += 1
+        imported += 1
+        category["discipline"] = "synchro"
+        touched.add(category["id"])
+    return imported, moved, touched
+
+
+def _as_bytes(xml):
+    """XML as bytes, whether it came from a JSON body (str) or a blob (bytes)."""
+    return xml.encode("utf-8") if isinstance(xml, str) else xml
+
+
+def _roster_blob(container, folder_path: str, name: str):
+    """Blob client for an archived roster XML (`rosters/teams.xml`/`partic.xml`)."""
+    return container.get_blob_client(f"{folder_path}/rosters/{name}")
+
+
+def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_xml=None):
+    """Match every registered team onto a category and apply the result in place.
+
+    Shared by the `import_rosters` route and the automatic re-match that runs when
+    a Total Results PDF arrives. A fresh `teams_xml` (+ optional `partic_xml`) is
+    archived under `rosters/`, which is exactly what lets the re-match run later
+    without re-uploading: without `teams_xml` the archived copy is used and the
+    pass is treated as automatic (see `_apply_assignments`).
+
+    The structure is mutated (the caller persists it) and the report is stored in
+    `structure["rosterImport"]` for the UI. Returns the summary, or None when
+    there is nothing to match (no archived roster, or no teams in the XML)."""
+    auto = teams_xml is None
+    if auto:
+        blob = _roster_blob(container, folder_path, "teams.xml")
+        if not blob.exists():
+            return None
+        teams_xml = blob.download_blob().readall()
+        partic = _roster_blob(container, folder_path, "partic.xml")
+        partic_xml = partic.download_blob().readall() if partic.exists() else None
+
+    participants = parse_participants(_as_bytes(partic_xml)) if partic_xml else {}
+    teams = parse_team_rosters(_as_bytes(teams_xml), participants)
+    if not teams:
+        return None
+
+    if not auto:
+        # Keep the source XML files for the record (not draggable upload chips)
+        # and for later automatic re-matches.
+        container.upload_blob(f"{folder_path}/rosters/teams.xml", _as_bytes(teams_xml), overwrite=True)
+        if partic_xml:
+            container.upload_blob(f"{folder_path}/rosters/partic.xml", _as_bytes(partic_xml), overwrite=True)
+
+    rows_by_cat = _result_rows_for_categories(structure, container, folder_path)
+    report = roster_matching.match_teams(structure, teams, rows_by_cat)
+    imported, moved, touched = _apply_assignments(structure, report, auto=auto)
+    structure["rosterImport"] = {
+        "at": f"{datetime.utcnow().isoformat()}Z",
+        "imported": imported,
+        "moved": moved,
+        "unmatched": report["unmatched"],
+        "withdrawn": report["withdrawn"],
+    }
+    return {"imported": imported, "moved": moved, "touched": touched, "report": report}
+
+
+def _rematch_after_results(structure, folder_path):
+    """Re-run roster matching after a Total Results PDF landed: its rows name the
+    teams that skated that block, so teams the import could not place (or reported
+    withdrawn) may now find their category. Only worth doing while something is
+    still open, and never fatal — the upload itself must succeed regardless."""
+    previous = structure.get("rosterImport") or {}
+    if not (previous.get("unmatched") or previous.get("withdrawn")):
+        return
+    try:
+        _run_roster_match(structure, sh.get_container_client(), folder_path)
+    except Exception as e:
+        logging.warning(f"Automatic roster re-match failed: {e}")
 
 
 @app.route(route="import_rosters", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
@@ -656,11 +786,16 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
     """Import synchro team rosters for the *whole competition* from one
     DT_PARTIC_TEAMS file joined with one DT_PARTIC file (XML strings in the body).
 
-    Body: {id, teamsXml, particXml}.
-    A single TEAMS file spans every synchro event in the competition; teams are
-    grouped by their RegisteredEvent and distributed to the matching category
-    (by event code, then by event label). Events with no matching category are
-    reported back as `unmatched` so the operator can fix the category up.
+    Body: {id, teamsXml?, particXml?} — without `teamsXml` the roster archived by
+    an earlier import is re-matched instead (409 when nothing was imported yet).
+
+    One TEAMS file spans every synchro event, but teams register per *event* and
+    compete per *block*: which block a team skated in shows up only in that block's
+    total-results PDF. So placement is results-first (`roster_matching.match_teams`)
+    — a team named on a category's result sheet goes there, otherwise its
+    registered event decides when it maps to exactly one category. Anything else is
+    reported (unmatched with an actionable reason, or withdrawn) instead of guessed,
+    and assigning the missing Total Results PDFs re-runs the match automatically.
     """
     if not _require_user(req):
         return func.HttpResponse("Unauthorized", status_code=401)
@@ -671,44 +806,29 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
         partic_xml = body.get('particXml')
     except ValueError:
         return func.HttpResponse("Invalid JSON body", status_code=400)
-    if not comp_id or not teams_xml:
-        return func.HttpResponse("Missing id or teamsXml", status_code=400)
+    if not comp_id:
+        return func.HttpResponse("Missing id", status_code=400)
     try:
         entity, folder_path = _resolve(comp_id)
         if not entity:
             return func.HttpResponse("Competition not found", status_code=404)
         structure = sh.read_structure(folder_path)
-
-        participants = parse_participants(partic_xml.encode("utf-8")) if partic_xml else {}
-        teams = parse_team_rosters(teams_xml.encode("utf-8"), participants)
-        if not teams:
-            return func.HttpResponse("No teams found in DT_PARTIC_TEAMS", status_code=422)
-
-        # Keep the source XML files for the record (not draggable upload chips).
         container = sh.get_container_client()
-        container.upload_blob(f"{folder_path}/rosters/teams.xml", teams_xml.encode("utf-8"), overwrite=True)
-        if partic_xml:
-            container.upload_blob(f"{folder_path}/rosters/partic.xml", partic_xml.encode("utf-8"), overwrite=True)
 
-        imported = 0
-        touched = set()
-        unmatched = []
-        for evt in distinct_events(teams):
-            category = _category_for_event(structure, evt["code"])
-            if not category:
-                unmatched.append(evt["label"])
-                continue
-            for parsed in [t for t in teams if t.get("event") == evt["code"]]:
-                _merge_team_into(category, parsed)
-                imported += 1
-            category["discipline"] = "synchro"
-            touched.add(category["id"])
+        if not teams_xml and not _roster_blob(container, folder_path, "teams.xml").exists():
+            return func.HttpResponse("No roster files imported yet", status_code=409)
+
+        summary = _run_roster_match(structure, container, folder_path,
+                                    teams_xml=teams_xml or None, partic_xml=partic_xml or None)
+        if summary is None:
+            return func.HttpResponse("No teams found in DT_PARTIC_TEAMS", status_code=422)
 
         sh.write_structure(folder_path, structure)
         return sh.json_response({
-            "imported": imported,
-            "categories": len(touched),
-            "unmatched": unmatched,
+            "imported": summary["imported"],
+            "moved": summary["moved"],
+            "categories": len(summary["touched"]),
+            "report": summary["report"],
             "structure": structure,
         })
     except Exception as e:
@@ -749,11 +869,11 @@ def upload_fallback_photos(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Missing competition", status_code=400)
 
     content_length = req.headers.get('Content-Length')
-    if content_length and int(content_length) > sh.MAX_UPLOAD_SIZE:
-        return func.HttpResponse(f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB).", status_code=413)
+    if content_length and int(content_length) > sh.MAX_ZIP_UPLOAD_SIZE:
+        return func.HttpResponse(f"File too large (max {sh.MAX_ZIP_UPLOAD_SIZE // (1024*1024)} MB).", status_code=413)
     body = req.get_body()
-    if len(body) > sh.MAX_UPLOAD_SIZE:
-        return func.HttpResponse(f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB).", status_code=413)
+    if len(body) > sh.MAX_ZIP_UPLOAD_SIZE:
+        return func.HttpResponse(f"File too large (max {sh.MAX_ZIP_UPLOAD_SIZE // (1024*1024)} MB).", status_code=413)
     if not body:
         return func.HttpResponse("Missing ZIP body", status_code=400)
 

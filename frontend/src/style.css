@@ -646,6 +646,23 @@ input[type="checkbox"] { accent-color: var(--ink); }
 .team-overview-name { font-size: 0.85rem; color: var(--ink); }
 .team-overview-row .slot { flex: 0 0 auto; width: 18rem; min-height: 0; padding: 0.35rem 0.5rem; gap: 0.3rem; }
 
+/* ── Roster import report (quiet status panel under "Team rosters") ── */
+.roster-report {
+  margin-top: 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--paper-tint);
+}
+.roster-report-sum { margin: 0; font-size: 0.85rem; color: var(--ink); }
+.roster-report-when { font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-faint); margin-left: 0.4rem; }
+.roster-report-ok { margin: 0.4rem 0 0; font-size: 0.8rem; color: var(--ink-muted); }
+.roster-report-list { margin-top: 0.7rem; }
+.roster-report-list .micro-label { color: var(--ink-muted); }
+.roster-report-list ul { margin: 0.3rem 0 0; padding-left: 1.1rem; font-size: 0.78rem; color: var(--ink-soft); }
+.roster-report-list li { margin-bottom: 0.15rem; }
+.roster-report-org { color: var(--ink-faint); }
+
 /* ── Generate / download ── */
 .action-bar { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; border-top: 1px solid var(--line); padding-top: 1.5rem; margin-top: 1.5rem; }
 .gen-list { display: flex; flex-direction: column; gap: 0.5rem; flex: 1; }

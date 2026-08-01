@@ -61,6 +61,31 @@ export interface Category {
   segments: Segment[];
 }
 
+/** A registered team the matcher could not place into a category. */
+export interface RosterUnmatched {
+  name: string;
+  org: string;
+  eventLabel: string;
+  reason: string;
+}
+
+/** A team that registered for an event but appears in no result sheet. */
+export interface RosterWithdrawn {
+  name: string;
+  org: string;
+  eventLabel: string;
+}
+
+/** Outcome of the last roster import (or automatic re-match), persisted in
+ * metadata.json so the UI can show it long after the import request. */
+export interface RosterImport {
+  at: string;
+  imported: number;
+  moved: number;
+  unmatched: RosterUnmatched[];
+  withdrawn: RosterWithdrawn[];
+}
+
 export interface EventInfo {
   title: string;
   organization: string;
@@ -84,6 +109,7 @@ export interface Structure {
   scheduleParsed: boolean;
   files: Record<string, FileMeta>;
   categories: Category[];
+  rosterImport?: RosterImport;
   schedule?: any[];
 }
 

@@ -345,6 +345,47 @@ function teamOverviewHtml(cats: Category[]): string {
     </div>`;
 }
 
+/** Persistent status panel for the last roster import (or automatic re-match).
+ * The backend stores the report in metadata.json, so it survives reloads and is
+ * refreshed silently whenever a Total Results PDF is assigned. */
+function rosterReportHtml(s: Structure): string {
+  const r = s.rosterImport;
+  if (!r) return '';
+
+  let when = r.at || '';
+  const parsed = r.at ? new Date(r.at) : null;
+  if (parsed && !isNaN(parsed.getTime())) when = parsed.toLocaleString();
+
+  const unmatched = r.unmatched || [];
+  const withdrawn = r.withdrawn || [];
+
+  const list = (title: string, rows: string[]) => `
+      <div class="roster-report-list">
+        <span class="micro-label">${escapeHtml(title)} (${rows.length})</span>
+        <ul>${rows.map(row => `<li>${row}</li>`).join('')}</ul>
+      </div>`;
+
+  const who = (t: { name: string; org: string }) =>
+    escapeHtml(t.name || '(unnamed)') + (t.org ? ` <span class="roster-report-org">(${escapeHtml(t.org)})</span>` : '');
+
+  const blocks: string[] = [];
+  if (withdrawn.length) {
+    blocks.push(list('Registered but not in any result sheet (withdrawn)',
+      withdrawn.map(t => `${who(t)}${t.eventLabel ? ` — ${escapeHtml(t.eventLabel)}` : ''}`)));
+  }
+  if (unmatched.length) {
+    blocks.push(list('Not placed',
+      unmatched.map(t => `${who(t)} — ${escapeHtml(t.reason || 'no matching category')}`)));
+  }
+  if (!blocks.length) blocks.push('<p class="roster-report-ok">All registered teams placed.</p>');
+
+  return `<div class="roster-report">
+      <p class="roster-report-sum">Imported ${r.imported} team(s)${r.moved ? ` · ${r.moved} moved` : ''}${
+        when ? ` <span class="roster-report-when">${escapeHtml(when)}</span>` : ''}</p>
+      ${blocks.join('')}
+    </div>`;
+}
+
 function categoryHtml(cat: Category): string {
   const isOpen = openCats.has(cat.id);
   const isSynchro = cat.discipline === 'synchro';
@@ -504,7 +545,7 @@ function renderDetails() {
       </div>
     </div>
 
-    ${(s.categories || []).some(c => c.discipline === 'synchro') ? `
+    ${(s.categories || []).length ? `
     <div class="section">
       <div class="section-head"><h3>Team rosters</h3>
         <div class="section-head-actions">
@@ -512,9 +553,10 @@ function renderDetails() {
           <button class="btn btn-xs btn-ghost" id="btn-upload-fallbacks">Upload fallback pictures (ZIP)…</button>
         </div>
       </div>
-      <p class="section-sub">Select the competition's <strong>DT_PARTIC_TEAMS</strong> and <strong>DT_PARTIC</strong> XML files together — one pair covers the whole competition. Teams are matched to their synchro category automatically.</p>
-      <p class="section-sub">Accreditation pictures can be imported in bulk from one <strong>ZIP</strong>: folders named like the categories, files named <code>Team-Name_Club-Name.jpeg</code>. They are only used when a team has no competition photo; images that match no team land in the Uploads tray.</p>
+      <p class="section-sub">Assign each category's <strong>Total Results</strong> PDF first — teams register per event but compete per block, and the result sheets are the only place that mapping exists. Then select the competition's <strong>DT_PARTIC_TEAMS</strong> and <strong>DT_PARTIC</strong> XML files together (one pair covers the whole competition): every team is placed into the right block automatically. Assign a missing results PDF later and the teams are re-matched automatically — no need to import again.</p>
+      <p class="section-sub">Accreditation pictures can be imported in bulk from one <strong>ZIP</strong>: files named <code>Team-Name_Club-Name.jpeg</code>, optionally in folders named like the categories (the folder name is only a matching hint, and file names may be ASCII-folded — "Helsinki-JaaLeidit" still matches "Helsinki JääLeidit"). They are only used when a team has no competition photo; images that match no team land in the Uploads tray.</p>
       ${teamOverviewHtml(s.categories || [])}
+      ${rosterReportHtml(s)}
     </div>` : ''}
 
     <div class="section">
@@ -805,15 +847,19 @@ function pickRosters() {
 async function importRosters(teamsXml: string, particXml: string) {
   if (!currentId) return;
   try {
-    const resp = await apiJson('/api/import_rosters', { id: currentId, teamsXml, particXml });
+    // Omit the XML keys entirely when empty — the backend then re-matches from
+    // the archived roster files instead of expecting a fresh upload.
+    const body = {
+      id: currentId,
+      ...(teamsXml ? { teamsXml } : {}),
+      ...(particXml ? { particXml } : {}),
+    };
+    const resp = await apiJson('/api/import_rosters', body);
     if (!resp.ok) { alert('Roster import failed: ' + (await resp.text())); return; }
     const data = await resp.json();
     await loadDetails();
-    const parts = [`Imported ${data.imported} team(s) into ${data.categories} categor${data.categories === 1 ? 'y' : 'ies'}`];
-    if (Array.isArray(data.unmatched) && data.unmatched.length) {
-      parts.push(`no category matched: ${data.unmatched.join(', ')}`);
-    }
-    flash(parts.join(' — ') + '.');
+    // Details (withdrawn / not placed) live in the persistent panel, not here.
+    flash(`Imported ${data.imported} team(s)${data.moved ? `, ${data.moved} moved` : ''} — see the Team rosters section for details.`);
   } catch { alert('Network error importing rosters.'); }
 }
 

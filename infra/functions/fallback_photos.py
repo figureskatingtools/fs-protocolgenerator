@@ -49,12 +49,17 @@ IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
 def normalize(s: str) -> str:
     """Fold a team/club/category name to a comparable form: case-insensitive,
-    `-`/`_` treated as spaces, punctuation dropped, whitespace collapsed.
+    `-`/`_` treated as spaces, punctuation dropped, whitespace collapsed, and
+    diacritic-insensitive.
 
-    Non-ASCII letters are *kept* (Finnish club names like "Hämeenlinnan
-    Taitoluistelijat" must survive intact), so only marks/punctuation/symbols go."""
+    Comparisons must be diacritic-insensitive because the two sides disagree:
+    accreditation ZIP filenames are ASCII-folded ("Creme-de-Ments",
+    "Helsinki-JaaLeidit") while the XML team names carry the diacritics ("Crème de
+    Ments", "Helsinki JääLeidit"). NFKD splits each accented letter into a base
+    letter plus a combining mark, and the letter/number filter below then drops the
+    marks along with the punctuation and symbols."""
     out = []
-    for ch in (s or ""):
+    for ch in unicodedata.normalize("NFKD", s or ""):
         if ch in "-_":
             out.append(" ")
         elif ch.isspace():
