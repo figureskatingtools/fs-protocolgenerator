@@ -136,25 +136,31 @@ def _fit_image_box(img_bytes, box_w, box_h):
         return None, 0, 0
 
 
-def _placeholder_box(c, x, y, w, h, label):
+def _placeholder_box(c, x, y, w, h, label, label_y=None):
+    """`label_y` overrides the label's baseline (kept inside the box) — the team
+    page uses it to put the text at the vertical centre of the page rather than
+    of the box."""
+    if label_y is None:
+        label_y = y + h / 2
+    label_y = min(max(label_y, y + 6 * mm), y + h - 6 * mm)
     c.saveState()
     c.setFillColorRGB(0.93, 0.95, 0.97)
     c.setStrokeColorRGB(*LINE)
     c.rect(x, y, w, h, fill=1, stroke=1)
     c.setFillColorRGB(*MUTED)
     c.setFont("Helvetica", 10)
-    c.drawCentredString(x + w / 2, y + h / 2, label)
+    c.drawCentredString(x + w / 2, label_y, label)
     c.restoreState()
 
 
-def _draw_photo(c, img_bytes, x, y, w, h, placeholder_label):
+def _draw_photo(c, img_bytes, x, y, w, h, placeholder_label, label_y=None):
     if img_bytes:
         reader, dw, dh = _fit_image_box(img_bytes, w, h)
         if reader is not None:
             c.drawImage(reader, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh,
                         preserveAspectRatio=True, mask='auto')
             return
-    _placeholder_box(c, x, y, w, h, placeholder_label)
+    _placeholder_box(c, x, y, w, h, placeholder_label, label_y=label_y)
 
 
 # ── pages ──────────────────────────────────────────────────────────────────────
@@ -370,11 +376,14 @@ def _roster_grid(count: int):
     return cols, max(1, math.ceil(count / cols))
 
 
-def _team_photo_box_h(photo_top: float, rows: int) -> float:
+def _team_photo_box_h(photo_top: float, rows: int, cap: bool = True) -> float:
     """Height for the team photo box: everything between `photo_top` and the roster
-    the page still has to fit, clamped so the box neither collapses nor dominates."""
+    the page still has to fit, clamped so the box neither collapses nor dominates.
+    With `cap=False` (no photo) the box takes all remaining height, so the
+    placeholder area — and its page-centred label — fills the page instead of
+    leaving dead space under the roster."""
     avail = photo_top - CONTENT_BOTTOM - ROSTER_LABEL_H - rows * ROSTER_ROW_H - ROSTER_PAD
-    return max(PHOTO_MIN_H, min(PHOTO_MAX_H, avail))
+    return max(PHOTO_MIN_H, min(PHOTO_MAX_H, avail) if cap else avail)
 
 
 def _draw_roster(c, members, cols: int, start_y: float, font: str, size: float):
@@ -434,14 +443,14 @@ def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
     # Photo: rounded, gradient hairline; a plain placeholder when none was given.
     photo_top = y - 2 * mm
     cols, rows = _roster_grid(len(members))
-    box_h = _team_photo_box_h(photo_top, rows)
+    box_h = _team_photo_box_h(photo_top, rows, cap=bool(photo_bytes))
     drawn = 0.0
     if photo_bytes:
         drawn = branding._rounded_fit_image(c, photo_bytes, MARGIN, photo_top,
                                            box_w, box_h, radius=10)
     if not drawn:
         _placeholder_box(c, MARGIN, photo_top - box_h, box_w, box_h,
-                         "Team photo (not provided)")
+                         "Team photo (not provided)", label_y=PAGE_H / 2)
         drawn = box_h
 
     # Roster.
@@ -490,9 +499,10 @@ def synchro_team_page(team: dict, photo_bytes, chrome=None) -> bytes:
 
     box_w = PAGE_W - 2 * MARGIN
     cols, rows = _roster_grid(len(members))
-    box_h = _team_photo_box_h(y, rows)
+    box_h = _team_photo_box_h(y, rows, cap=bool(photo_bytes))
     box_y = y - box_h
-    _draw_photo(c, photo_bytes, MARGIN, box_y, box_w, box_h, "Team photo (not provided)")
+    _draw_photo(c, photo_bytes, MARGIN, box_y, box_w, box_h, "Team photo (not provided)",
+                label_y=PAGE_H / 2)
 
     y = box_y - 12 * mm
     c.setFillColorRGB(*MUTED)
