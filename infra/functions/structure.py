@@ -120,6 +120,35 @@ def detect_discipline(name: str) -> str:
     return discipline_signal(name) or "single"
 
 
+# ISU protocol head-page PDF filename prefixes ("Protocol Head Page" slot).
+TITLE_PDF_PREFIXES = (
+    ("FSKWSINGLES", "single"),
+    ("FSKMSINGLES", "single"),
+    ("FSKXSYNCHRON", "synchro"),
+    ("FSKXICEDANCE", "dance"),
+    ("FSKMSOLDANCE", "dance"),
+    ("FSKWSOLDANCE", "dance"),
+    ("FSKXPAIRS", "pair"),
+)
+
+
+def discipline_from_title_filename(filename: str):
+    """Discipline encoded in an ISU head-page PDF filename prefix, or None when
+    the name doesn't follow the ISU convention."""
+    n = (filename or "").upper()
+    return next((d for prefix, d in TITLE_PDF_PREFIXES if n.startswith(prefix)), None)
+
+
+def apply_title_discipline(category: dict, filename: str) -> bool:
+    """Set the category's discipline from an ISU head-page filename. The prefix
+    is authoritative ISU coding, so it overrides any name-based guess."""
+    discipline = discipline_from_title_filename(filename)
+    if not category or not discipline or category.get("discipline") == discipline:
+        return False
+    category["discipline"] = discipline
+    return True
+
+
 # ── lookups ───────────────────────────────────────────────────────────────────
 
 def find_category(structure: dict, category_id: str):

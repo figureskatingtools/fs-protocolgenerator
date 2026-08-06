@@ -438,6 +438,9 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
                     cat = st.find_category(structure, target.get("categoryId"))
                     seg = st.find_segment(cat, target.get("segmentId")) if cat else None
                     _fill_segment_count_from_results(structure, seg)
+                elif slot_kind == "categoryTitle":
+                    cat = st.find_category(structure, target.get("categoryId"))
+                    st.apply_title_discipline(cat, filename)
             except KeyError as ke:
                 logging.warning(f"Upload assign failed: {ke}")
 
@@ -521,6 +524,10 @@ def assign_file(req: func.HttpRequest) -> func.HttpResponse:
             cat = st.find_category(structure, target.get("categoryId"))
             seg = st.find_segment(cat, target.get("segmentId")) if cat else None
             _fill_segment_count_from_results(structure, seg)
+        elif target.get("kind") == "categoryTitle" and file_id:
+            cat = st.find_category(structure, target.get("categoryId"))
+            meta = structure.get("files", {}).get(file_id) or {}
+            st.apply_title_discipline(cat, meta.get("filename"))
         sh.write_structure(folder_path, structure)
         return sh.json_response({"ok": True})
     except KeyError as ke:
