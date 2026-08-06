@@ -454,22 +454,7 @@ def draw_event_info(c, *, name="", organization="", authorization="",
     _text(c, pad_l, 96 * SY, "COMPETITION INFORMATION",
           F_RALEWAY_SEMI, 11 * SX, SLATE, char_space=3 * SX)
 
-    # Competition name (balanced wrap within the content width).
-    top = 121 * SY
-    name_size = 31 * SX
-    name_ls = -0.6 * SX
-    lines = _layout_lines(name or "—", F_RALEWAY_BOLD, name_size, 360 * SX, name_ls)
-    line_h = 31 * 1.1 * SY
-    for line in lines:
-        _text(c, pad_l, top, line, F_RALEWAY_BOLD, name_size, INK, char_space=name_ls)
-        top += line_h
-
-    # Gradient rule.
-    top += 18 * SY
-    _grad_h(c, pad_l, PAGE_H - top - 5 * SY, 58 * SX, 5 * SY)
-    top += 5 * SY + 24 * SY
-
-    # Detail rows.
+    # Detail rows (built first — the title size adapts to the space they need).
     rows = []
     if organization:
         rows.append(("ORGANISER", organization))
@@ -482,17 +467,46 @@ def draw_event_info(c, *, name="", organization="", authorization="",
     if dates:
         rows.append(("DATES", dates))
 
+    stats = stats or {}
+    has_stats = bool(stats.get("units") or stats.get("performances"))
+
+    # Vertical budget (design units): the body must clear the footer band. A long
+    # competition name wraps to several lines, so shrink it until everything below
+    # fits; past the floor, compress the row heights/gaps instead.
+    body_bottom = 584
+    below_h = 18 + 5 + 24 + len(rows) * 45 + ((26 + 45) if has_stats else 0)
+    name_px = 31.0
+    name_ls = -0.6 * SX
+    while True:
+        lines = _layout_lines(name or "—", F_RALEWAY_BOLD, name_px * SX, 360 * SX, name_ls)
+        title_h = len(lines) * name_px * 1.1
+        if 121 + title_h + below_h <= body_bottom or name_px <= 20:
+            break
+        name_px -= 1.0
+    squeeze = min(1.0, (body_bottom - 121 - title_h) / below_h)
+
+    # Competition name (balanced wrap within the content width).
+    top = 121 * SY
+    for line in lines:
+        _text(c, pad_l, top, line, F_RALEWAY_BOLD, name_px * SX, INK, char_space=name_ls)
+        top += name_px * 1.1 * SY
+
+    # Gradient rule.
+    top += 18 * squeeze * SY
+    _grad_h(c, pad_l, PAGE_H - top - 5 * SY, 58 * SX, 5 * SY)
+    top += (5 + 24 * squeeze) * SY
+
     value_x = pad_l + 120 * SX
     value_w = (PAGE_W - pad_l) - value_x
-    row_h = 45 * SY
+    row_h = 45 * squeeze * SY
     for label, value in rows:
-        _text(c, pad_l, top + 16 * SY, label, F_RALEWAY_SEMI, 10 * SX, MUTED,
+        _text(c, pad_l, top + 16 * squeeze * SY, label, F_RALEWAY_SEMI, 10 * SX, MUTED,
               char_space=1.2 * SX)
         # Shrink an over-long value to fit its column rather than overflow.
         vfs = 16 * SX
         while vfs > 11 * SX and _str_w(value, F_RALEWAY_MED, vfs) > value_w:
             vfs -= 0.5
-        _text(c, value_x, top + 13 * SY, value, F_RALEWAY_MED, vfs, INK)
+        _text(c, value_x, top + 13 * squeeze * SY, value, F_RALEWAY_MED, vfs, INK)
         line_y = PAGE_H - (top + row_h)
         c.setStrokeColor(HexColor("#EEF0F3"))
         c.setLineWidth(1)
@@ -501,9 +515,8 @@ def draw_event_info(c, *, name="", organization="", authorization="",
 
     # Stat row (Categories · Competition Units · Performances), only when the
     # counts read from the result PDFs are meaningful.
-    stats = stats or {}
-    if stats.get("units") or stats.get("performances"):
-        top += 26 * SY
+    if has_stats:
+        top += 26 * squeeze * SY
         col_w = (PAGE_W - 2 * pad_l) / 3.0
         cells = (
             ("CATEGORIES", stats.get("categories", 0)),

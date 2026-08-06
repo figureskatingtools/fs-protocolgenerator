@@ -136,31 +136,27 @@ def _fit_image_box(img_bytes, box_w, box_h):
         return None, 0, 0
 
 
-def _placeholder_box(c, x, y, w, h, label, label_y=None):
-    """`label_y` overrides the label's baseline (kept inside the box) — the team
-    page uses it to put the text at the vertical centre of the page rather than
-    of the box."""
-    if label_y is None:
-        label_y = y + h / 2
-    label_y = min(max(label_y, y + 6 * mm), y + h - 6 * mm)
+def _placeholder_box(c, x, y, w, h, label):
     c.saveState()
     c.setFillColorRGB(0.93, 0.95, 0.97)
     c.setStrokeColorRGB(*LINE)
     c.rect(x, y, w, h, fill=1, stroke=1)
     c.setFillColorRGB(*MUTED)
-    c.setFont("Helvetica", 10)
-    c.drawCentredString(x + w / 2, label_y, label)
+    font = branding.F_RALEWAY if branding.fonts_available() else "Helvetica"
+    c.setFont(font, 10)
+    # Baseline half a cap height below the box centre → optically centred label.
+    c.drawCentredString(x + w / 2, y + h / 2 - 3.5, label)
     c.restoreState()
 
 
-def _draw_photo(c, img_bytes, x, y, w, h, placeholder_label, label_y=None):
+def _draw_photo(c, img_bytes, x, y, w, h, placeholder_label):
     if img_bytes:
         reader, dw, dh = _fit_image_box(img_bytes, w, h)
         if reader is not None:
             c.drawImage(reader, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh,
                         preserveAspectRatio=True, mask='auto')
             return
-    _placeholder_box(c, x, y, w, h, placeholder_label, label_y=label_y)
+    _placeholder_box(c, x, y, w, h, placeholder_label)
 
 
 # ── pages ──────────────────────────────────────────────────────────────────────
@@ -451,7 +447,7 @@ def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
                                            box_w, box_h, radius=10)
     if not drawn:
         _placeholder_box(c, MARGIN, photo_top - box_h, box_w, box_h,
-                         "Team photo (not provided)", label_y=PAGE_H / 2)
+                         "Team photo (not provided)")
         drawn = box_h
 
     # Roster.
@@ -503,8 +499,7 @@ def synchro_team_page(team: dict, photo_bytes, chrome=None) -> bytes:
     cols, rows = _roster_grid(len(members))
     box_h = _team_photo_box_h(y, rows, cap=bool(photo_bytes))
     box_y = y - box_h
-    _draw_photo(c, photo_bytes, MARGIN, box_y, box_w, box_h, "Team photo (not provided)",
-                label_y=PAGE_H / 2)
+    _draw_photo(c, photo_bytes, MARGIN, box_y, box_w, box_h, "Team photo (not provided)")
 
     y = box_y - 12 * mm
     c.setFillColorRGB(*MUTED)
