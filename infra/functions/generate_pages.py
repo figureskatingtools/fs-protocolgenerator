@@ -413,19 +413,20 @@ def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
     # Eyebrow.
     y = CONTENT_TOP - 9 * mm
     to = c.beginText(MARGIN, y)
-    to.setFont(branding.F_MANROPE_SEMI, 8)
+    to.setFont(branding.F_RALEWAY_SEMI, 8)
     to.setCharSpace(2.2)
     c.setFillColor(branding.SLATE)
     to.textLine("TEAM")
+    to.setCharSpace(0)  # Tc is page-level text state — don't leak it
     c.drawText(to)
 
     # Team name, shrunk to one line.
     y -= 8 * mm
     fs = 20
-    while fs > 12 and stringWidth(name, branding.F_OUTFIT_BOLD, fs) > box_w:
+    while fs > 12 and stringWidth(name, branding.F_RALEWAY_BOLD, fs) > box_w:
         fs -= 0.5
     c.setFillColor(branding.INK)
-    c.setFont(branding.F_OUTFIT_BOLD, fs)
+    c.setFont(branding.F_RALEWAY_BOLD, fs)
     c.drawString(MARGIN, y, name)
 
     # Short gradient rule under the name.
@@ -436,7 +437,7 @@ def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
     y -= 5.5 * mm
     if org:
         c.setFillColor(branding.SLATE)
-        c.setFont(branding.F_MANROPE_MED, 10.5)
+        c.setFont(branding.F_RALEWAY_MED, 10.5)
         c.drawString(MARGIN, y, org)
         y -= 4 * mm
 
@@ -456,13 +457,14 @@ def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
     # Roster.
     y = photo_top - drawn - 12 * mm
     to = c.beginText(MARGIN, y)
-    to.setFont(branding.F_MANROPE_SEMI, 8)
+    to.setFont(branding.F_RALEWAY_SEMI, 8)
     to.setCharSpace(1.5)
     c.setFillColor(branding.MUTED)
     to.textLine("SKATERS")
+    to.setCharSpace(0)  # Tc is page-level text state — don't leak it
     c.drawText(to)
     c.setFillColor(branding.INK)
-    _draw_roster(c, members, cols, y - 7 * mm, branding.F_MANROPE_MED, 9.5)
+    _draw_roster(c, members, cols, y - 7 * mm, branding.F_RALEWAY_MED, 9.5)
 
 
 def synchro_team_page(team: dict, photo_bytes, chrome=None) -> bytes:

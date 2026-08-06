@@ -5,12 +5,13 @@ The designer delivered the cover and last page as print-ready HTML and the heade
 footer as transparent PNG bands (see the `final/` brand kit: SPEC.md). Azure
 Functions can't run a headless browser at generation time, so:
 
-  * the fully-static **last page** is the designer's HTML pre-rendered once to
-    `assets/last_page.pdf` (exact, fonts embedded) and inserted as-is;
   * the **cover** carries dynamic text (competition name, dates, location,
     organizer) that reflows by title length, so it is reproduced here in reportlab
-    from `cover.html` — same fonts (Outfit/Manrope, bundled in `fonts/`), colours
+    from `cover.html` — the brand type is set in Raleway (bundled in `fonts/`), colours
     and brand gradient;
+  * the static **last page** is likewise reproduced in reportlab (geometry lifted
+    from the designer's pre-render, which remains at `assets/last_page.pdf` as the
+    fonts-missing fallback);
   * the **header band** (`assets/header.png`) is drawn edge-to-edge with the
     competition name + dates·location printed to the right of its divider, and the
     **footer band** (`assets/footer.png`) is drawn as-is (fully baked slogan).
@@ -56,12 +57,10 @@ GRAD_COLORS = [CYAN, BLUE, VIOLET, PURPLE]
 GRAD_POS = [0.0, 0.30, 0.62, 1.0]
 
 # Font family names registered with reportlab (one per weight).
-F_OUTFIT = "Outfit"
-F_OUTFIT_MED = "Outfit-Medium"
-F_OUTFIT_SEMI = "Outfit-SemiBold"
-F_OUTFIT_BOLD = "Outfit-Bold"
-F_MANROPE_MED = "Manrope-Medium"
-F_MANROPE_SEMI = "Manrope-SemiBold"
+F_RALEWAY = "Raleway"
+F_RALEWAY_MED = "Raleway-Medium"
+F_RALEWAY_SEMI = "Raleway-SemiBold"
+F_RALEWAY_BOLD = "Raleway-Bold"
 
 _FONTS_READY = False
 
@@ -71,12 +70,10 @@ def _register_fonts():
     if _FONTS_READY:
         return
     for name, filename in (
-        (F_OUTFIT, "Outfit-Regular.ttf"),
-        (F_OUTFIT_MED, "Outfit-Medium.ttf"),
-        (F_OUTFIT_SEMI, "Outfit-SemiBold.ttf"),
-        (F_OUTFIT_BOLD, "Outfit-Bold.ttf"),
-        (F_MANROPE_MED, "Manrope-Medium.ttf"),
-        (F_MANROPE_SEMI, "Manrope-SemiBold.ttf"),
+        (F_RALEWAY, "Raleway-Regular.ttf"),
+        (F_RALEWAY_MED, "Raleway-Medium.ttf"),
+        (F_RALEWAY_SEMI, "Raleway-SemiBold.ttf"),
+        (F_RALEWAY_BOLD, "Raleway-Bold.ttf"),
     ):
         try:
             pdfmetrics.registerFont(TTFont(name, os.path.join(FONTS, filename)))
@@ -89,7 +86,7 @@ def fonts_available() -> bool:
     """True when the bundled brand fonts registered — callers fall back to the
     plain placeholder pages otherwise."""
     _register_fonts()
-    return F_OUTFIT_BOLD in pdfmetrics.getRegisteredFontNames()
+    return F_RALEWAY_BOLD in pdfmetrics.getRegisteredFontNames()
 
 
 # ── low-level helpers ────────────────────────────────────────────────────────
@@ -120,12 +117,14 @@ def _grad_circle(c, cx, cy, r):
 def _text(c, x, top, text, font, size, color, char_space=0.0):
     """Draw a single line; `top` is the line-box top (from page top, CSS-style)."""
     c.setFillColor(color)
-    # Baseline ≈ top + ascent; ~0.92·size matches Outfit/Manrope against the HTML.
+    # Baseline ≈ top + ascent; ~0.92·size matches Raleway against the HTML.
     to = c.beginText(x, PAGE_H - top - size * 0.92)
     to.setFont(font, size)
     if char_space:
         to.setCharSpace(char_space)
     to.textLine(text)
+    if char_space:
+        to.setCharSpace(0)  # Tc is page-level text state — don't leak it
     c.drawText(to)
 
 
@@ -228,11 +227,11 @@ def draw_cover(c, *, name: str, dates: str = "", location: str = "", organizer: 
     except Exception as e:
         logging.warning(f"cover skate mark failed: {e}")
 
-    # Dynamic name lines (Outfit Bold 65px, max-width 606px, balanced).
+    # Dynamic name lines (Raleway Bold 65px, max-width 606px, balanced).
     name_size = 65 * PX
     name_ls = -1 * PX
     name_lh = 65 * PX * 1.12
-    lines = _layout_lines(name, F_OUTFIT_BOLD, name_size, 606 * PX, name_ls)
+    lines = _layout_lines(name, F_RALEWAY_BOLD, name_size, 606 * PX, name_ls)
     n = max(1, len(lines))
 
     # Block heights (px → pt), mirroring cover.html spacing.
@@ -258,12 +257,12 @@ def draw_cover(c, *, name: str, dates: str = "", location: str = "", organizer: 
     dot_cy = PAGE_H - (top + eyebrow_h / 2)
     _grad_circle(c, dot_cx, dot_cy, dot_r)
     _text(c, pad_x + 14 * PX + 16 * PX, top - 2 * PX, "OFFICIAL PROTOCOL",
-          F_MANROPE_SEMI, 21 * PX, SLATE, char_space=6.3 * PX)
+          F_RALEWAY_SEMI, 21 * PX, SLATE, char_space=6.3 * PX)
     top += eyebrow_h + name_gap
 
     # Competition name.
     for line in lines:
-        _text(c, pad_x, top, line, F_OUTFIT_BOLD, name_size, INK, char_space=name_ls)
+        _text(c, pad_x, top, line, F_RALEWAY_BOLD, name_size, INK, char_space=name_ls)
         top += name_lh
 
     # Gradient rule.
@@ -273,10 +272,10 @@ def draw_cover(c, *, name: str, dates: str = "", location: str = "", organizer: 
 
     # Dates / location.
     if dates:
-        _text(c, pad_x, top, dates, F_OUTFIT_MED, 38 * PX, INK)
+        _text(c, pad_x, top, dates, F_RALEWAY_MED, 38 * PX, INK)
     top += dates_h + venue_gap
     if location:
-        _text(c, pad_x, top, location, F_MANROPE_MED, 25 * PX, SLATE)
+        _text(c, pad_x, top, location, F_RALEWAY_MED, 25 * PX, SLATE)
 
     # Organizer pinned above a hairline divider near the foot.
     meta_top = PAGE_H - pad_bottom - meta_h
@@ -285,7 +284,7 @@ def draw_cover(c, *, name: str, dates: str = "", location: str = "", organizer: 
     c.line(pad_x, PAGE_H - meta_top, PAGE_W - pad_x, PAGE_H - meta_top)
     if organizer:
         _text(c, pad_x, meta_top + 1 + 23 * PX, organizer,
-              F_MANROPE_MED, 18 * PX, MUTED, char_space=0.4 * PX)
+              F_RALEWAY_MED, 18 * PX, MUTED, char_space=0.4 * PX)
 
 
 def cover_page(*, name, dates="", location="", organizer="") -> bytes:
@@ -299,10 +298,77 @@ def cover_page(*, name, dates="", location="", organizer="") -> bytes:
     return buf.getvalue()
 
 
-# ── last page (bundled, pre-rendered) ─────────────────────────────────────────
+# ── last page ─────────────────────────────────────────────────────────────────
+
+def draw_last_page(c):
+    """Render the branded 'Thank you' last page onto canvas `c`.
+
+    Reproduces the designer's last page (geometry lifted from the original
+    pre-render): gradient hairlines top and bottom, skate lockup top-centre,
+    'THANK YOU' eyebrow, the two-line 'Created with Figureskatingtools.com'
+    title, a gradient pill rule, the slogan, and a faint watermark running off
+    the bottom edge."""
+    _register_fonts()
+    cx = PAGE_W / 2
+
+    # Faint watermark (bottom-centre, partly off-page) — drawn first (behind).
+    try:
+        wm_w = 540 * PX
+        wm = _faint_skate(0.06)
+        iw, ih = wm.getSize()
+        wm_h = wm_w * ih / iw
+        c.drawImage(wm, cx - wm_w / 2, PAGE_H - 843 * PX - wm_h, wm_w, wm_h,
+                    preserveAspectRatio=True, mask='auto')
+    except Exception as e:
+        logging.warning(f"last page watermark failed: {e}")
+
+    # Gradient hairlines (11px), top and bottom.
+    _grad_h(c, 0, PAGE_H - 11 * PX, PAGE_W, 11 * PX)
+    _grad_h(c, 0, 0, PAGE_W, 11 * PX)
+
+    # Skate lockup, top-centre (height 166px, top 162px).
+    try:
+        mk = ImageReader(_asset("skate_mark.png"))
+        iw, ih = mk.getSize()
+        mark_h = 166 * PX
+        mark_w = mark_h * iw / ih
+        c.drawImage(mk, cx - mark_w / 2, PAGE_H - 162 * PX - mark_h, mark_w, mark_h,
+                    preserveAspectRatio=True, mask='auto')
+    except Exception as e:
+        logging.warning(f"last page skate mark failed: {e}")
+
+    _text_center(c, cx, 540 * PX, "THANK YOU",
+                 F_RALEWAY_SEMI, 21 * PX, SLATE, char_space=6.3 * PX)
+
+    _text_center(c, cx, 588 * PX, "Created with", F_RALEWAY_BOLD, 54 * PX, INK)
+    _text_center(c, cx, 649 * PX, "Figureskatingtools.com", F_RALEWAY_BOLD, 54 * PX, INK)
+
+    # Gradient pill rule, centred (99×9px).
+    rule_w, rule_h = 99 * PX, 9 * PX
+    rule_y = PAGE_H - 752 * PX - rule_h
+    c.saveState()
+    p = c.beginPath()
+    p.roundRect(cx - rule_w / 2, rule_y, rule_w, rule_h, rule_h / 2)
+    c.clipPath(p, stroke=0, fill=0)
+    c.linearGradient(cx - rule_w / 2, rule_y, cx + rule_w / 2, rule_y,
+                     GRAD_COLORS, GRAD_POS, extend=True)
+    c.restoreState()
+
+    _text_center(c, cx, 800 * PX, "Supporting Figure Skating Community",
+                 F_RALEWAY, 33 * PX, SLATE)
+
 
 def last_page_pdf() -> bytes:
-    """The designer's last page, pre-rendered to a self-contained A4 PDF."""
+    """The branded last page as a one-page A4 PDF — rendered live (Raleway) when
+    the brand fonts are available, else the designer's original pre-render."""
+    if fonts_available():
+        from reportlab.pdfgen import canvas
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=A4)
+        draw_last_page(c)
+        c.showPage()
+        c.save()
+        return buf.getvalue()
     with open(_asset("last_page.pdf"), "rb") as f:
         return f.read()
 
@@ -334,11 +400,11 @@ def draw_default_header(c, *, name: str = "", dates: str = "", location: str = "
     meta = " · ".join([p for p in (dates, location) if p]).strip()
     if name:
         c.setFillColor(INK)
-        c.setFont(F_OUTFIT_SEMI, 11)
+        c.setFont(F_RALEWAY_SEMI, 11)
         c.drawString(text_x, centre_y + (1.5 if meta else -3), name)
     if meta:
         c.setFillColor(SLATE)
-        c.setFont(F_MANROPE_MED, 7.5)
+        c.setFont(F_RALEWAY_MED, 7.5)
         c.drawString(text_x, centre_y - 10, meta)
 
 
@@ -386,16 +452,16 @@ def draw_event_info(c, *, name="", organization="", authorization="",
 
     # Eyebrow.
     _text(c, pad_l, 96 * SY, "COMPETITION INFORMATION",
-          F_MANROPE_SEMI, 11 * SX, SLATE, char_space=3 * SX)
+          F_RALEWAY_SEMI, 11 * SX, SLATE, char_space=3 * SX)
 
     # Competition name (balanced wrap within the content width).
     top = 121 * SY
     name_size = 31 * SX
     name_ls = -0.6 * SX
-    lines = _layout_lines(name or "—", F_OUTFIT_BOLD, name_size, 360 * SX, name_ls)
+    lines = _layout_lines(name or "—", F_RALEWAY_BOLD, name_size, 360 * SX, name_ls)
     line_h = 31 * 1.1 * SY
     for line in lines:
-        _text(c, pad_l, top, line, F_OUTFIT_BOLD, name_size, INK, char_space=name_ls)
+        _text(c, pad_l, top, line, F_RALEWAY_BOLD, name_size, INK, char_space=name_ls)
         top += line_h
 
     # Gradient rule.
@@ -420,13 +486,13 @@ def draw_event_info(c, *, name="", organization="", authorization="",
     value_w = (PAGE_W - pad_l) - value_x
     row_h = 45 * SY
     for label, value in rows:
-        _text(c, pad_l, top + 16 * SY, label, F_MANROPE_SEMI, 10 * SX, MUTED,
+        _text(c, pad_l, top + 16 * SY, label, F_RALEWAY_SEMI, 10 * SX, MUTED,
               char_space=1.2 * SX)
         # Shrink an over-long value to fit its column rather than overflow.
         vfs = 16 * SX
-        while vfs > 11 * SX and _str_w(value, F_OUTFIT_MED, vfs) > value_w:
+        while vfs > 11 * SX and _str_w(value, F_RALEWAY_MED, vfs) > value_w:
             vfs -= 0.5
-        _text(c, value_x, top + 13 * SY, value, F_OUTFIT_MED, vfs, INK)
+        _text(c, value_x, top + 13 * SY, value, F_RALEWAY_MED, vfs, INK)
         line_y = PAGE_H - (top + row_h)
         c.setStrokeColor(HexColor("#EEF0F3"))
         c.setLineWidth(1)
@@ -446,9 +512,9 @@ def draw_event_info(c, *, name="", organization="", authorization="",
         )
         for i, (label, value) in enumerate(cells):
             cell_x = pad_l + i * col_w
-            _text(c, cell_x, top, str(value), F_OUTFIT_BOLD, 30 * SX, INK)
+            _text(c, cell_x, top, str(value), F_RALEWAY_BOLD, 30 * SX, INK)
             _text(c, cell_x, top + 30 * SY + 7 * SY, label,
-                  F_MANROPE_SEMI, 7.5 * SX, MUTED, char_space=1.1 * SX)
+                  F_RALEWAY_SEMI, 7.5 * SX, MUTED, char_space=1.1 * SX)
 
 
 # ── time-schedule page ─────────────────────────────────────────────────────────
@@ -491,7 +557,7 @@ def draw_schedule(c, rows, *, new_page=None):
     top = TOP_PX
 
     # Title + gradient rule.
-    _text(c, pad_x * SX, top * SY, "Time Schedule", F_OUTFIT_BOLD, 18 * SX,
+    _text(c, pad_x * SX, top * SY, "Time Schedule", F_RALEWAY_BOLD, 18 * SX,
           INK, char_space=-0.4 * SX)
     top += 27
     _grad_h(c, pad_x * SX, PAGE_H - (top + 4) * SY, 50 * SX, 4 * SY)
@@ -501,11 +567,11 @@ def draw_schedule(c, rows, *, new_page=None):
         nonlocal top
         # Gradient dot + day label + right-aligned "N EVENTS".
         _grad_circle(c, (pad_x + 3.5) * SX, PAGE_H - (top + 7) * SY, 3.5 * SX)
-        _text(c, (pad_x + 15) * SX, top * SY, label, F_OUTFIT_SEMI, 11 * SX, INK)
+        _text(c, (pad_x + 15) * SX, top * SY, label, F_RALEWAY_SEMI, 11 * SX, INK)
         if count:
             tag = f"{count} EVENT" + ("S" if count != 1 else "")
-            tw = _str_w(tag, F_MANROPE_SEMI, 7 * SX, 0.6 * SX)
-            _text(c, content_r - tw, (top + 1) * SY, tag, F_MANROPE_SEMI,
+            tw = _str_w(tag, F_RALEWAY_SEMI, 7 * SX, 0.6 * SX)
+            _text(c, content_r - tw, (top + 1) * SY, tag, F_RALEWAY_SEMI,
                   7 * SX, MUTED, char_space=0.6 * SX)
         top += 18
 
@@ -541,7 +607,7 @@ def draw_schedule(c, rows, *, new_page=None):
 
         text_top = top + 2.5
         time = row.get("start_time") or ""
-        _text(c, pad_x * SX, text_top * SY, time, F_OUTFIT_SEMI, 9.5 * SX, INK)
+        _text(c, pad_x * SX, text_top * SY, time, F_RALEWAY_SEMI, 9.5 * SX, INK)
 
         # Segment pill, right-aligned; sized to its label.
         seg = row.get("segment_name") or ""
@@ -551,7 +617,7 @@ def draw_schedule(c, rows, *, new_page=None):
             # stringWidth under-measures the TTF advance by a few percent, so the
             # pill must be widened to the real rendered width or the label spills
             # past the rounded background.
-            seg_tw = _str_w(seg, F_MANROPE_SEMI, seg_fs) * 1.10
+            seg_tw = _str_w(seg, F_RALEWAY_SEMI, seg_fs) * 1.10
             pad_h = 8 * SX
             pw = seg_tw + 2 * pad_h
             ph = 13 * SY
@@ -562,7 +628,7 @@ def draw_schedule(c, rows, *, new_page=None):
             c.roundRect(px, py, pw, ph, ph / 2.0, stroke=0, fill=1)
             # Centre on the *rendered* width (pad_h either side); _text_center
             # would use the un-fudged width and sit the label left of centre.
-            _text(c, px + pad_h, (top + 4) * SY, seg, F_MANROPE_SEMI, seg_fs, fg)
+            _text(c, px + pad_h, (top + 4) * SY, seg, F_RALEWAY_SEMI, seg_fs, fg)
             avail_r = px - 10 * SX
 
         # Category name, shrunk then ellipsised to clear the pill. stringWidth
@@ -572,7 +638,7 @@ def draw_schedule(c, rows, *, new_page=None):
         avail = avail_r - event_x
 
         def _fits(s, fs):
-            return _str_w(s, F_MANROPE_MED, fs) * 1.10 <= avail
+            return _str_w(s, F_RALEWAY_MED, fs) * 1.10 <= avail
 
         ev_fs = 9.5 * SX
         while ev_fs > 8 * SX and not _fits(label, ev_fs):
@@ -581,7 +647,7 @@ def draw_schedule(c, rows, *, new_page=None):
             while label and not _fits(label + "…", ev_fs):
                 label = label[:-1]
             label = (label + "…") if label else ""
-        _text(c, event_x, text_top * SY, label, F_MANROPE_MED, ev_fs, INK)
+        _text(c, event_x, text_top * SY, label, F_RALEWAY_MED, ev_fs, INK)
 
         top += ROW_H
 
@@ -670,15 +736,15 @@ def draw_podium(c, *, category_name="", photo_bytes=None, entries=None):
     pad = 34 * SX
 
     _text_center(c, PAGE_W / 2, 90 * SY, "PODIUM",
-                 F_MANROPE_SEMI, 11 * SX, SLATE, char_space=3.5 * SX)
+                 F_RALEWAY_SEMI, 11 * SX, SLATE, char_space=3.5 * SX)
     if category_name:
         # Shrink an over-long category name to fit the content width on one line.
         tfs = 30 * SX
         max_w = PAGE_W - 2 * pad
-        while tfs > 16 * SX and _str_w(category_name, F_OUTFIT_BOLD, tfs, -0.6 * SX) > max_w:
+        while tfs > 16 * SX and _str_w(category_name, F_RALEWAY_BOLD, tfs, -0.6 * SX) > max_w:
             tfs -= 0.5
         _text_center(c, PAGE_W / 2, 111 * SY, category_name,
-                     F_OUTFIT_BOLD, tfs, INK, char_space=-0.6 * SX)
+                     F_RALEWAY_BOLD, tfs, INK, char_space=-0.6 * SX)
 
     # Podium photo — drawn only when supplied; otherwise the area stays white.
     # Show the whole picture (no crop): fit to the content width, capped so the
@@ -697,9 +763,9 @@ def draw_podium(c, *, category_name="", photo_bytes=None, entries=None):
     # left→right: (rank, pedestal h, column w, circle d, name size, name font,
     #              circle colour, numeral size)
     cols = [
-        (1, 60, 118, 30, 13, F_OUTFIT_SEMI, HexColor("#B8C0C9"), 15),
-        (0, 86, 124, 36, 14, F_OUTFIT_BOLD, HexColor("#E3B23C"), 18),
-        (2, 46, 118, 30, 13, F_OUTFIT_SEMI, HexColor("#C58A5B"), 15),
+        (1, 60, 118, 30, 13, F_RALEWAY_SEMI, HexColor("#B8C0C9"), 15),
+        (0, 86, 124, 36, 14, F_RALEWAY_BOLD, HexColor("#E3B23C"), 18),
+        (2, 46, 118, 30, 13, F_RALEWAY_SEMI, HexColor("#C58A5B"), 15),
     ]
     x_cursor = (440 - (118 + 124 + 118 + 2 * gap)) / 2.0
     for rank, ped_h, col_w, circ_d, name_fs, name_font, circ_color, num_fs in cols:
@@ -728,7 +794,7 @@ def draw_podium(c, *, category_name="", photo_bytes=None, entries=None):
         if club:
             club_h_px = 9.5 * 1.3
             club_top_px = club_bottom_px - club_h_px
-            _text_center(c, cx, club_top_px * SY, club, F_MANROPE_MED, 9.5 * SX, SLATE)
+            _text_center(c, cx, club_top_px * SY, club, F_RALEWAY_MED, 9.5 * SX, SLATE)
             name_bottom_px = club_top_px - 3
         else:
             name_bottom_px = club_bottom_px
@@ -745,7 +811,7 @@ def draw_podium(c, *, category_name="", photo_bytes=None, entries=None):
         c.setFillColor(circ_color)
         c.circle(cx, circ_cy, circ_d / 2.0 * SX, stroke=0, fill=1)
         c.setFillColor(HexColor("#FFFFFF"))
-        c.setFont(F_OUTFIT_BOLD, num_fs * SX)
+        c.setFont(F_RALEWAY_BOLD, num_fs * SX)
         c.drawCentredString(cx, circ_cy - num_fs * SX * 0.35, str(rank + 1))
 
         x_cursor += col_w + gap

@@ -74,9 +74,12 @@ location) to each page builder.
 brand kit (from the designer's `final/` folder): the **cover** is reproduced in
 reportlab (`branding.cover_page`) from `cover.html` — gradient hairline, skate
 lockup, watermark, "OFFICIAL PROTOCOL" eyebrow, then dynamic competition name
-(balanced wrap), dates, location and organizer — using the bundled **Outfit** and
-**Manrope** TTFs. The fully-static **last page** is the designer's HTML pre-rendered
-once to `assets/last_page.pdf` and inserted as-is. Header/footer are the PNG bands.
+(balanced wrap), dates, location and organizer — using the bundled **Raleway** TTFs
+(static weights 400/500/600/700, instanced from the Google Fonts variable font).
+The static **last page** is likewise reproduced in reportlab
+(`branding.draw_last_page`, geometry lifted from the designer's pre-render, which
+remains at `assets/last_page.pdf` as the fonts-missing fallback). Header/footer are
+the PNG bands.
 The **competition-information page** (`branding.draw_event_info`, from
 `competitionInformation.html`) and the **podium page** (`branding.draw_podium`,
 from `podium.html`) are likewise reproduced in reportlab: the page-2 eyebrow +
