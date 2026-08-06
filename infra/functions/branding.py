@@ -470,10 +470,11 @@ def draw_event_info(c, *, name="", organization="", authorization="",
     stats = stats or {}
     has_stats = bool(stats.get("units") or stats.get("performances"))
 
-    # Vertical budget (design units): the body must clear the footer band. A long
-    # competition name wraps to several lines, so shrink it until everything below
-    # fits; past the floor, compress the row heights/gaps instead.
-    body_bottom = 584
+    # Vertical budget (design units): the body must clear the footer band with a
+    # visible white gap (~16mm — room for a taller custom footer graphic too). A
+    # long competition name wraps to several lines, so shrink it until everything
+    # below fits; past the floor, compress the row heights/gaps instead.
+    body_bottom = 555
     below_h = 18 + 5 + 24 + len(rows) * 45 + ((26 + 45) if has_stats else 0)
     name_px = 31.0
     name_ls = -0.6 * SX
