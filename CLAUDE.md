@@ -5,21 +5,27 @@ This is a sibling of `fs-judgepapers` and `fs-scoremodifier` on
 from organizer-supplied result PDFs and photos. The tool is mostly *PDF creation
 and connecting files together*; missing graphics fall back to generated defaults.
 
+**This repo is backend-only.** The UI lives in the `figureskatingtools-site` repo
+and is served at `https://figureskatingtools.com/protocolgenerator/`; that site's
+router handles the Entra login and proxies `/protocolgenerator/api/*` to this
+Function App with `x-proxy-secret` + `x-forwarded-user-email` (see
+**PROXY-CONTRACT.md**). The legacy `frontend/` directory is kept for reference
+only — it is not built or deployed anymore.
+
 ## Stack
 
-- **Frontend** — vanilla TypeScript + Vite SPA (`frontend/`), shared nav from
-  `@figureskatingtools/shared-ui`, the shared "Protocol" CSS tokens. No framework.
-  A zero-dependency Node proxy (`frontend/server.js`) serves the build, exposes
-  `/userinfo`, and proxies `/api/*` to the Function App (forwarding the Easy Auth
-  user email + a shared secret).
 - **Backend** — Python Azure Functions (`infra/functions/`), `AuthLevel.ANONYMOUS`
-  behind the proxy. `pypdf` merges PDFs, `reportlab` draws generated pages,
-  `pillow` embeds photos.
+  behind the site router's proxy. `pypdf` merges PDFs, `reportlab` draws generated
+  pages, `pillow` embeds photos.
 - **Storage** — Azure Blob (container `fs-protocolgenerator`) holds each
   competition folder; Tables `competitions` (permanent registry, soft-delete) and
   `generatedprotocols` (SAS download links).
-- **Hosting** — App Service Web App + Flex-Consumption Function App, custom domain
-  `protocols.figureskatingtools.com`. IaC in `infra/` (subscription-scoped Bicep).
+- **Hosting** — Flex-Consumption Function App only (no Web App, no Easy Auth
+  provider, no DNS/custom domain in this repo). IaC in `infra/`
+  (subscription-scoped Bicep: `modules/storage.bicep`, `modules/function.bicep`,
+  `modules/roleassignment.bicep`).
+- **Frontend (elsewhere)** — vanilla TypeScript + Vite, `site/src/protocolgenerator/`
+  in `figureskatingtools-site`.
 
 ## Data model — `metadata.json` (the structure document)
 
@@ -171,10 +177,11 @@ footer band, and the photo takes the remaining height (clamped 60–130 mm).
 
 ## Local development
 
-```bash
-cd frontend && NODE_AUTH_TOKEN=$(gh auth token) npm install   # shared-ui from GH Packages
-./start_locally.sh    # Azurite + func + vite + SWA auth emulator
-```
+Backend only: `cd infra/functions && func start`, then call it with the proxy
+headers (`x-proxy-secret`, `x-forwarded-user-email` — see **PROXY-CONTRACT.md**).
+To drive it from a UI, run the router + Vite dev server in `figureskatingtools-site`
+pointed at this `func start` instance. (`start_locally.sh` and the `frontend/`
+tree still reference the retired standalone SPA.)
 
 Backend tests (synthetic fixtures only — never commit real competition data,
 the OdfBody exports contain minors' personal data):
@@ -185,12 +192,26 @@ cd infra/functions && uv run --with-requirements requirements-dev.txt python -m 
 
 ## Deploy
 
-Push to `main` → prod via `.github/workflows/deploy.yml`. Manual: `deploy_infra.sh`,
-`deploy_backend.sh`, `deploy_frontend.sh`. First-time auth app: `create_auth_app.sh`.
+Push to `main` → prod via `.github/workflows/deploy.yml`; `test` via manual
+`workflow_dispatch`. Two jobs only: **deploy-infra** (`az deployment sub create`
+on `infra/main.bicep`, params `resourceGroupName` + `proxySharedSecret`) and
+**deploy-backend** (zip + `az functionapp deployment source config-zip`). Manual
+equivalents: `deploy_infra.sh`, `deploy_backend.sh`.
 
-## Remaining cross-repo registration (not in this repo)
+Only the **test** environment was ever deployed for this tool — prod never
+existed, so there is no `protocols.figureskatingtools.com` binding, redirect or
+teardown to worry about. `deploy_frontend.sh` and `create_auth_app.sh` are
+leftovers from the standalone-Web-App era and are no longer used.
 
-To list the tool in the site nav + changelog, in `figureskatingtools-site`:
-add `{ id: 'protocolgenerator', label: 'Protocol Generator', subdomain: 'protocols',
-enabled: true }` to `packages/shared-ui/src/nav.ts` `DEFAULT_TOOLS` (bump + publish),
-and add this repo to `site/public/changelog-sources.json`.
+Required GitHub environment config: secrets `AZURE_CLIENT_ID`,
+`PROXY_SHARED_SECRET`; vars `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
+`LOCATION`, `RESOURCE_GROUP_NAME`. (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and
+`CUSTOM_DOMAIN` are gone.)
+
+## Cross-repo handoff (figureskatingtools-site)
+
+The deploy job's summary prints the Function App URL and its system-assigned
+principal id; set them in the site repo's matching GitHub environment as
+`FUNCTION_APP_URL_PROTOCOLGENERATOR` and `TOOL_PRINCIPAL_ID_PROTOCOLGENERATOR`,
+and copy this environment's `PROXY_SHARED_SECRET` there as
+`PROXY_SHARED_SECRET_PROTOCOLGENERATOR`.

@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# OBSOLETE: this repo is backend-only — the Entra login now happens in the
+# figureskatingtools-site router, which owns the app registration. Kept for
+# reference only; the deploy workflow no longer uses AUTH_CLIENT_ID /
+# AUTH_APP_OBJECT_ID. The same applies to deploy_frontend.sh.
+#
 # Usage: ./create_auth_app.sh <AppName> <Hostname>
 # Example: ./create_auth_app.sh "ProtocolGeneratorApp" "protocols.figureskatingtools.com"
 
