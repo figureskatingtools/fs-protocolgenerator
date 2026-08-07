@@ -31,30 +31,37 @@ panel → judges details) → optional last page (custom or default placeholder)
 
 ## Architecture
 
-- **Frontend** — vanilla TypeScript + Vite SPA (`frontend/`), shared nav from
-  `@figureskatingtools/shared-ui`, the shared "Protocol" design tokens.
+This repo holds the **backend only**. The user interface lives in
+[`figureskatingtools-site`](https://github.com/figureskatingtools) and is served at
+`https://figureskatingtools.com/protocolgenerator/`; that site's router does the Entra
+login and proxies `/protocolgenerator/api/*` to this Function App, adding
+`x-proxy-secret` and `x-forwarded-user-email` (see [PROXY-CONTRACT.md](PROXY-CONTRACT.md)).
+
 - **Backend** — Python Azure Functions (`infra/functions/`) using `pypdf` (merge),
   `reportlab` (generated pages) and `pillow` (photo embedding).
 - **Storage** — Azure Blob (uploaded files + `metadata.json` structure + generated output)
   and Table (`competitions`, `generatedprotocols`).
-- **Hosting** — App Service Web App (Node proxy + Easy Auth) in front of the Function App,
-  custom domain `protocols.figureskatingtools.com`. IaC in `infra/` (Bicep).
+- **Hosting** — Flex-Consumption Function App + its storage account. IaC in `infra/`
+  (Bicep). No Web App, no custom domain, no app registration in this repo.
+- `frontend/` is the retired standalone SPA, kept for reference only.
 
 ## Local development
 
 ```bash
-./start_locally.sh      # Azurite + func backend + vite frontend + SWA auth emulator
+cd infra/functions && func start
+curl -s http://localhost:7071/api/list_competitions \
+  -H 'x-proxy-secret: devsecret' -H 'x-forwarded-user-email: tester@example.com'
 ```
 
-Requires Azure Functions Core Tools, Node 22, and an Azurite storage emulator. Frontend
-install needs a GitHub Packages token for `@figureskatingtools/shared-ui`:
+Requires Azure Functions Core Tools and an Azurite storage emulator. For a UI, run the
+router + Vite dev server from `figureskatingtools-site` against this backend.
 
-```bash
-cd frontend && NODE_AUTH_TOKEN=$(gh auth token) npm install
-```
+Tests: `cd infra/functions && uv run --with-requirements requirements-dev.txt python -m pytest tests -q`
 
 ## Deployment
 
-Pushing to `main` deploys prod via `.github/workflows/deploy.yml`. Manual scripts also exist:
-`deploy_infra.sh`, `deploy_backend.sh`, `deploy_frontend.sh`. See `CLAUDE.md` for the full
-architecture and auth chain.
+Pushing to `main` deploys prod via `.github/workflows/deploy.yml`; `test` is deployed by
+manual `workflow_dispatch`. The workflow has two jobs — infrastructure (Bicep) and backend
+(zip deploy). Manual equivalents: `deploy_infra.sh`, `deploy_backend.sh`. In practice only
+the **test** environment has ever been provisioned for this tool. See `CLAUDE.md` for the
+full architecture.

@@ -1,34 +1,25 @@
 targetScope = 'subscription'
 
+// Backend-only deployment.
+//
+// The frontend, Easy Auth and the custom domain used to live here (an App
+// Service Web App proxying to this Function App). They now live in the
+// figureskatingtools-site repo, which serves the Protocol Generator UI at
+// https://figureskatingtools.com/protocolgenerator/ and proxies
+// /protocolgenerator/api/* to this Function App. This template therefore
+// deploys only storage + the Function App + its role assignments.
+
 param location string = 'swedencentral'
 param resourceGroupName string = ''
-param authClientId string = ''
-param tenantId string = ''
 
-// Shared secret between the Web App proxy and the Function App (see function.bicep).
+// Shared secret between the site router proxy and the Function App
+// (see function.bicep / storage_helpers._proxy_secret_ok and PROXY-CONTRACT.md).
 @secure()
 param proxySharedSecret string = ''
-
-// Custom domain for the web app (e.g. 'protocols.figureskatingtools.com').
-// Empty = skip DNS + domain binding. The DNS zone itself is deployed by the
-// root frontend site (figureskatingtools.com landing page); this deployment
-// only manages its own record sets in that zone.
-param customDomain string = ''
-param dnsZoneName string = 'figureskatingtools.com'
-param dnsZoneResourceGroup string = 'rg-fs-dns'
 
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
   name: resourceGroupName
   location: location
-}
-
-module authManagedIdentity 'modules/auth-identity.bicep' = {
-  scope: rg
-  name: 'authIdentityDeployment'
-  params: {
-    location: location
-    managedIdentityName: 'mi-fs-protocols-auth-${uniqueString(rg.id)}'
-  }
 }
 
 module storage 'modules/storage.bicep' = {
@@ -38,20 +29,6 @@ module storage 'modules/storage.bicep' = {
     location: location
     storageAccountName: 'stfsprot${uniqueString(rg.id)}'
     containerName: 'fs-protocolgenerator'
-  }
-}
-
-module webApp 'modules/webapp.bicep' = {
-  scope: rg
-  name: 'webAppDeployment'
-  params: {
-    location: location
-    webAppName: 'app-fs-protocols-${uniqueString(rg.id)}'
-    appServicePlanName: 'asp-fs-protocols-web'
-    authClientId: authClientId
-    authManagedIdentityClientId: authManagedIdentity.outputs.clientId
-    authManagedIdentityResourceId: authManagedIdentity.outputs.resourceId
-    tenantId: !empty(tenantId) ? tenantId : subscription().tenantId
   }
 }
 
@@ -65,42 +42,8 @@ module function 'modules/function.bicep' = {
     appInsightsName: 'ai-fs-protocols'
     storageAccountName: storage.outputs.storageAccountName
     deploymentContainerUrl: 'https://${storage.outputs.storageAccountName}.blob.${environment().suffixes.storage}/app-package'
-    allowedOrigins: [
-      'https://${webApp.outputs.webAppDefaultHostName}'
-    ]
-    authClientId: authClientId
-    authManagedIdentityClientId: authManagedIdentity.outputs.clientId
-    authManagedIdentityResourceId: authManagedIdentity.outputs.resourceId
-    tenantId: !empty(tenantId) ? tenantId : subscription().tenantId
     proxySharedSecret: proxySharedSecret
   }
-}
-
-// DNS records (CNAME + asuid TXT) in the shared figureskatingtools.com zone
-module dns 'modules/dns.bicep' = if (!empty(customDomain)) {
-  scope: resourceGroup(dnsZoneResourceGroup)
-  name: 'dnsDeployment'
-  params: {
-    dnsZoneName: dnsZoneName
-    recordName: replace(customDomain, '.${dnsZoneName}', '')
-    targetHostname: webApp.outputs.webAppDefaultHostName
-    domainVerificationId: webApp.outputs.customDomainVerificationId
-  }
-}
-
-// Hostname binding + managed certificate (requires DNS records above)
-module webAppCustomDomain 'modules/webapp-customdomain.bicep' = if (!empty(customDomain)) {
-  scope: rg
-  name: 'customDomainDeployment'
-  params: {
-    webAppName: webApp.outputs.webAppName
-    customDomain: customDomain
-    appServicePlanId: webApp.outputs.appServicePlanId
-    location: location
-  }
-  dependsOn: [
-    dns
-  ]
 }
 
 module roleAssignment 'modules/roleassignment.bicep' = {
@@ -115,8 +58,6 @@ module roleAssignment 'modules/roleassignment.bicep' = {
 output resourceGroupName string = rg.name
 output storageAccountName string = storage.outputs.storageAccountName
 output functionAppName string = function.outputs.functionAppName
-output webAppName string = webApp.outputs.webAppName
-output webAppDefaultHostName string = webApp.outputs.webAppDefaultHostName
-output authManagedIdentityClientId string = authManagedIdentity.outputs.clientId
-output authManagedIdentityObjectId string = authManagedIdentity.outputs.principalId
-output customDomain string = customDomain
+// Consumed by the site repo (TOOL_PRINCIPAL_ID_PROTOCOLGENERATOR) to grant this
+// Function App read access to the shared competition-data container.
+output functionPrincipalId string = function.outputs.functionPrincipalId

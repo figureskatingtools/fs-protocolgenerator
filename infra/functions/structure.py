@@ -39,6 +39,11 @@ def new_structure(comp_id: str, name: str, dates: str, created_by: str, created_
         },
         "coverPage": {"mode": "default", "fileId": None},
         "lastPage": {"mode": "default", "fileId": None},
+        # Optional competition-wide page chrome, stamped on every generated page.
+        # When no custom graphic is uploaded a generic placeholder band is drawn.
+        "header": {"mode": "default", "fileId": None},
+        "footer": {"mode": "default", "fileId": None},
+        "footerEnabled": True,   # draw the footer band on every page (toggleable)
         "scheduleParsed": False,
         # fileId -> {"filename", "kind" (pdf|image|xml), "size", "uploadedAt"}
         "files": {},
@@ -66,6 +71,10 @@ def new_segment(name: str, order: int) -> dict:
         "id": new_id("seg"),
         "name": name,
         "order": order,
+        # Competition units (skaters/pairs/teams) that performed this segment.
+        # Auto-filled from the segment's results PDF, user-correctable; None = unknown.
+        # Drives the information page's Competition Units / Performances counts.
+        "unitCount": None,
         "resultsPdf": None,
         "panelPdf": None,
         "judgesDetailsPdf": None,
@@ -80,6 +89,9 @@ def new_team(org: str = "", name: str = "") -> dict:
         "org": org,
         "name": name,
         "photo": None,
+        # Accreditation photo imported from the optional fallback-pictures ZIP;
+        # used at generation only when the team has no competition photo.
+        "photoFallback": None,
         "members": [],
     }
 
@@ -106,6 +118,35 @@ def discipline_signal(name: str):
 def detect_discipline(name: str) -> str:
     """Best-effort discipline; defaults to 'single' when the name is ambiguous."""
     return discipline_signal(name) or "single"
+
+
+# ISU protocol head-page PDF filename prefixes ("Protocol Head Page" slot).
+TITLE_PDF_PREFIXES = (
+    ("FSKWSINGLES", "single"),
+    ("FSKMSINGLES", "single"),
+    ("FSKXSYNCHRON", "synchro"),
+    ("FSKXICEDANCE", "dance"),
+    ("FSKMSOLDANCE", "dance"),
+    ("FSKWSOLDANCE", "dance"),
+    ("FSKXPAIRS", "pair"),
+)
+
+
+def discipline_from_title_filename(filename: str):
+    """Discipline encoded in an ISU head-page PDF filename prefix, or None when
+    the name doesn't follow the ISU convention."""
+    n = (filename or "").upper()
+    return next((d for prefix, d in TITLE_PDF_PREFIXES if n.startswith(prefix)), None)
+
+
+def apply_title_discipline(category: dict, filename: str) -> bool:
+    """Set the category's discipline from an ISU head-page filename. The prefix
+    is authoritative ISU coding, so it overrides any name-based guess."""
+    discipline = discipline_from_title_filename(filename)
+    if not category or not discipline or category.get("discipline") == discipline:
+        return False
+    category["discipline"] = discipline
+    return True
 
 
 # ── lookups ───────────────────────────────────────────────────────────────────
@@ -138,6 +179,9 @@ def clear_file(structure: dict, file_id: str):
         structure["coverPage"] = {"mode": "default", "fileId": None}
     if structure["lastPage"].get("fileId") == file_id:
         structure["lastPage"] = {"mode": "default", "fileId": None}
+    for chrome_key in ("header", "footer"):
+        if (structure.get(chrome_key) or {}).get("fileId") == file_id:
+            structure[chrome_key] = {"mode": "default", "fileId": None}
     for cat in structure.get("categories", []):
         if cat.get("titlePdf") == file_id:
             cat["titlePdf"] = None
@@ -149,6 +193,8 @@ def clear_file(structure: dict, file_id: str):
         for team in cat.get("teams", []):
             if team.get("photo") == file_id:
                 team["photo"] = None
+            if team.get("photoFallback") == file_id:
+                team["photoFallback"] = None
         for seg in cat.get("segments", []):
             for key in ROLE_KEYS.values():
                 if seg.get(key) == file_id:
@@ -160,8 +206,9 @@ def assign_file(structure: dict, target: dict, file_id):
     file_id is None). A file is first removed from any slot it already occupies, so
     assignment also implements drag-and-drop *moves* between slots.
 
-    target = {"kind": "cover"|"lastPage"|"tray"|"categoryTitle"|"totalResults"
-                       |"podiumPhoto"|"teamPhoto"|"teamRoster"|"segment", ...ids}
+    target = {"kind": "cover"|"lastPage"|"header"|"footer"|"tray"|"categoryTitle"
+                       |"totalResults"|"podiumPhoto"|"teamPhoto"|"teamPhotoFallback"
+                       |"segment", ...ids}
     """
     if file_id is not None:
         clear_file(structure, file_id)
@@ -174,6 +221,9 @@ def assign_file(structure: dict, target: dict, file_id):
         return
     if kind == "lastPage":
         structure["lastPage"] = {"mode": "custom" if file_id else "default", "fileId": file_id}
+        return
+    if kind in ("header", "footer"):
+        structure[kind] = {"mode": "custom" if file_id else "default", "fileId": file_id}
         return
 
     cat = find_category(structure, target.get("categoryId"))
@@ -191,6 +241,11 @@ def assign_file(structure: dict, target: dict, file_id):
         if not team:
             raise KeyError("team not found")
         team["photo"] = file_id
+    elif kind == "teamPhotoFallback":
+        team = find_team(cat, target.get("teamId"))
+        if not team:
+            raise KeyError("team not found")
+        team["photoFallback"] = file_id
     elif kind == "segment":
         seg = find_segment(cat, target.get("segmentId"))
         if not seg:
@@ -206,7 +261,9 @@ def assign_file(structure: dict, target: dict, file_id):
 def assigned_file_ids(structure: dict) -> set:
     """All fileIds currently referenced by a slot."""
     ids = set()
-    for ref in (structure["coverPage"].get("fileId"), structure["lastPage"].get("fileId")):
+    for ref in (structure["coverPage"].get("fileId"), structure["lastPage"].get("fileId"),
+                (structure.get("header") or {}).get("fileId"),
+                (structure.get("footer") or {}).get("fileId")):
         if ref:
             ids.add(ref)
     for cat in structure.get("categories", []):
@@ -216,6 +273,8 @@ def assigned_file_ids(structure: dict) -> set:
         for team in cat.get("teams", []):
             if team.get("photo"):
                 ids.add(team["photo"])
+            if team.get("photoFallback"):
+                ids.add(team["photoFallback"])
         for seg in cat.get("segments", []):
             for key in ROLE_KEYS.values():
                 if seg.get(key):

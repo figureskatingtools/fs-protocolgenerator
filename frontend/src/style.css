@@ -414,6 +414,81 @@ input[type="checkbox"] { accent-color: var(--ink); }
 .category-head-lead { display: flex; align-items: center; gap: 0.75rem; flex: 1; overflow: hidden; }
 .category-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .category-head-tail { display: flex; align-items: center; gap: 1rem; flex-shrink: 0; }
+
+/* Per-category readiness badge ("3/10 uploaded" / "✓ 10/10 uploaded"). */
+.cat-ready {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  padding: 0.12rem 0.45rem;
+  border-radius: 0.25rem;
+  background: var(--gold-tint);
+  color: var(--gold);
+  border: 1px solid var(--gold-bright);
+  white-space: nowrap;
+}
+.cat-ready.is-ready { background: var(--success-tint); color: var(--success-color); border-color: var(--success-color); }
+
+/* Required-files guidance — a "?" icon next to the Categories heading that
+   reveals the rules on hover/focus. */
+.help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.05rem;
+  height: 1.05rem;
+  margin-left: 0.45rem;
+  border-radius: 50%;
+  background: var(--rink-tint);
+  color: var(--rink-deep);
+  border: 1px solid #c8ddee;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
+  cursor: help;
+  position: relative;
+}
+.help-pop {
+  display: none;
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  width: 380px;
+  max-width: 80vw;
+  z-index: 40;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--rink);
+  border-radius: 0.5rem;
+  box-shadow: var(--shadow-lg);
+  padding: 0.8rem 1rem;
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  text-align: left;
+  color: var(--ink-soft);
+  line-height: 1.55;
+  cursor: auto;
+}
+.help-icon:hover .help-pop, .help-icon:focus .help-pop, .help-icon:focus-within .help-pop { display: block; }
+.help-pop strong { color: var(--ink); }
+.help-pop ul { margin: 0.4rem 0 0; padding-left: 1.1rem; }
+.help-pop li { margin-bottom: 0.2rem; }
+.help-pop .req { color: var(--rink); font-weight: 700; }
+.help-pop strong + ul { margin-bottom: 0.55rem; }
+.help-pop code {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  background: var(--frost);
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  padding: 0.02rem 0.22rem;
+}
 .toggle-icon { font-size: 0.75rem; color: var(--ink-muted); transition: transform 0.2s; }
 .category-content { padding: 1rem 1.25rem 1.25rem; }
 
@@ -440,6 +515,7 @@ input[type="checkbox"] { accent-color: var(--ink); }
 /* ── Section panels ── */
 .section { margin-bottom: 1.75rem; }
 .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
+.section-head-actions { display: flex; align-items: center; gap: 0.5rem; }
 .section-head h3 { margin: 0; font-size: 1.05rem; }
 .section-sub { color: var(--ink-muted); font-size: 0.85rem; margin: 0 0 0.75rem; }
 
@@ -511,17 +587,23 @@ input[type="checkbox"] { accent-color: var(--ink); }
 }
 .slot.dragover { border-color: var(--rink); border-style: solid; background: var(--rink-tint); }
 .slot.is-filled { border-color: var(--success-color); }
+/* A required slot still waiting for its file — highlighted so it's easy to spot. */
+.slot.is-missing { border-color: var(--gold); border-style: dashed; background: var(--gold-tint); }
+.slot.is-missing .slot-empty { border-color: var(--gold-bright); color: var(--gold); }
 .slot-label { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); display: flex; align-items: center; gap: 0.4rem; }
 .slot-label .req { color: var(--rink); }
 .slot-empty { color: var(--ink-faint); font-size: 0.78rem; font-style: italic; border: 1px dashed var(--line); border-radius: 0.35rem; padding: 0.45rem 0.5rem; text-align: center; }
 
 /* ── Page slots (cover / last page) ── */
 .page-slot-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.footer-toggle { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.85rem; font-size: 0.85rem; color: var(--ink-soft); cursor: pointer; }
 
 /* ── Segment block ── */
 .segment-block { border-top: 1px solid var(--line); padding-top: 0.85rem; margin-top: 0.85rem; }
-.segment-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.55rem; }
+.segment-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.55rem; }
 .segment-name { font-weight: 600; font-size: 0.92rem; }
+.segment-units { display: inline-flex; align-items: center; gap: 0.4rem; margin-left: auto; font-size: 0.78rem; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.segment-units input { width: 4.5rem; }
 .segment-roles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.6rem; }
 
 /* ── Category meta row ── */
@@ -547,15 +629,132 @@ input[type="checkbox"] { accent-color: var(--ink); }
 .podium-name-row { display: grid; grid-template-columns: 3.4rem 1fr; align-items: center; gap: 0.5rem; }
 .podium-place { font-family: var(--font-mono); font-size: 0.7rem; color: var(--gold); font-weight: 600; }
 
-/* ── Team cards ── */
-.team-card { border: 1px solid var(--line); border-radius: 0.5rem; padding: 0.85rem 1rem; margin-bottom: 0.75rem; background: var(--paper-tint); }
-.team-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.7rem; }
-.team-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; flex: 1; }
-.team-body { display: grid; grid-template-columns: 1.1fr 1.4fr; gap: 0.9rem; align-items: start; }
-.team-roster { font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-soft); }
-.team-roster ul { margin: 0.35rem 0 0; padding-left: 1.1rem; columns: 2; }
-.team-roster li { margin-bottom: 0.1rem; }
-.team-roster-empty { color: var(--ink-faint); font-style: italic; }
+/* ════════════════════════════════════════════════════════════════
+   Team rosters — the single place for synchro teams: names, rosters
+   and both pictures. Dense on purpose: many teams × many skaters.
+   ════════════════════════════════════════════════════════════════ */
+
+/* Quiet pointer line inside a synchro category card. */
+.cat-teams-pointer { margin: 0 0 0.9rem; }
+
+/* Picture-status dot: green = competition photo, yellow = fallback only,
+   red = nothing at all (generation then draws a placeholder). */
+.status-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--ink-faint);
+  box-shadow: 0 0 0 1px rgb(13 31 51 / 0.12);
+}
+.status-dot.is-green { background: var(--success-color); }
+.status-dot.is-yellow { background: var(--gold-bright); }
+.status-dot.is-red { background: var(--error-color); }
+.help-pop .status-dot { margin-right: 0.15rem; vertical-align: 0.05rem; }
+
+/* Collapsible per-category groups. */
+.roster-groups { display: flex; flex-direction: column; gap: 0.4rem; }
+.roster-group { border: 1px solid var(--line); border-radius: 0.5rem; overflow: hidden; background: var(--paper); }
+.roster-group-head { min-height: 2.2rem; padding: 0.4rem 0.75rem; }
+.roster-group-head .category-title { font-size: 0.92rem; }
+.roster-group-head .micro-label { font-size: 0.62rem; letter-spacing: 0.1em; }
+.roster-group-head .category-head-tail { gap: 0.7rem; }
+.roster-group-body { padding: 0.15rem 0.75rem 0.5rem; }
+.roster-group-empty { margin: 0.5rem 0 0.25rem; font-size: 0.8rem; }
+
+/* Dot tally in a group header ("6 ● 2 ● 1 ●"). */
+.dot-tally { display: inline-flex; align-items: center; gap: 0.5rem; }
+.dot-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+}
+
+/* One team = one line (wraps to two on narrow screens); the skater list
+   expands full width underneath. */
+.team-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  padding: 0.35rem 0.4rem;
+  border-top: 1px solid var(--line);
+  border-radius: 0.3rem;
+}
+.team-row:first-child { border-top: none; }
+.team-row--alert { background: var(--error-tint); box-shadow: inset 3px 0 0 var(--error-color); }
+.team-row-main { display: flex; align-items: center; gap: 0.4rem; flex: 1 1 24rem; min-width: 0; }
+.team-row-name { flex: 1 1 11rem; min-width: 6rem; font-weight: 600; }
+.team-row-org { flex: 1 1 8rem; min-width: 5rem; }
+.form-input--compact { padding: 0.25rem 0.45rem; font-size: 0.8rem; border-radius: 0.35rem; }
+.team-row-slots { display: flex; gap: 0.45rem; flex: 0 1 auto; }
+.team-row-slots .slot { width: 14.5rem; min-height: 0; padding: 0.3rem 0.45rem; gap: 0.25rem; }
+.team-row-slots .slot-empty { padding: 0.25rem 0.4rem; font-size: 0.72rem; }
+.team-row-slots .file-chip { font-size: 0.68rem; padding: 0.2rem 0.4rem; }
+.team-row-slots .chip-name { max-width: 8.5rem; }
+
+/* Skater-count button that expands the roster. */
+.roster-skaters-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 0.3rem;
+  padding: 0.15rem 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.roster-skaters-toggle:hover { border-color: var(--line-strong); color: var(--rink-deep); background: var(--paper); }
+.roster-skaters-toggle .toggle-icon { font-size: 0.62rem; }
+
+.team-row-roster { flex: 1 1 100%; padding: 0.15rem 0 0.35rem 1.1rem; }
+.roster-skaters {
+  margin: 0;
+  padding-left: 1rem;
+  columns: 3;
+  column-gap: 1.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-soft);
+}
+.roster-skaters li { margin-bottom: 0.05rem; break-inside: avoid; }
+.team-roster-empty { color: var(--ink-faint); font-size: 0.75rem; font-style: italic; }
+
+/* Inline "?" reference inside a section-sub sentence. */
+.help-hint { font-family: var(--font-mono); font-weight: 700; color: var(--rink-deep); }
+
+@media (max-width: 900px) {
+  .roster-skaters { columns: 2; }
+  .team-row-slots { flex: 1 1 100%; }
+  .team-row-slots .slot { flex: 1 1 0; width: auto; }
+}
+
+/* ── Roster import report (quiet status panel under "Team rosters") ── */
+.roster-report {
+  margin-top: 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--paper-tint);
+}
+.roster-report-sum { margin: 0; font-size: 0.85rem; color: var(--ink); }
+.roster-report-when { font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-faint); margin-left: 0.4rem; }
+.roster-report-ok { margin: 0.4rem 0 0; font-size: 0.8rem; color: var(--ink-muted); }
+.roster-report-list { margin-top: 0.7rem; }
+.roster-report-list .micro-label { color: var(--ink-muted); }
+.roster-report-list ul { margin: 0.3rem 0 0; padding-left: 1.1rem; font-size: 0.78rem; color: var(--ink-soft); }
+.roster-report-list li { margin-bottom: 0.15rem; }
+.roster-report-org { color: var(--ink-faint); }
 
 /* ── Generate / download ── */
 .action-bar { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; border-top: 1px solid var(--line); padding-top: 1.5rem; margin-top: 1.5rem; }

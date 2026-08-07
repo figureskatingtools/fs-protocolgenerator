@@ -25,8 +25,13 @@ CONTAINER_NAME = "fs-protocolgenerator"
 # Maximum single-file upload size: 50 MB (result-PDF sets and photos can be large).
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 
+# Maximum ZIP upload size for the bulk fallback-picture import: a whole
+# competition's accreditation photos easily pass 50 MB. Azure Functions caps an
+# HTTP request body at ~100 MB, so this is the practical ceiling.
+MAX_ZIP_UPLOAD_SIZE = 100 * 1024 * 1024
+
 # Automatic competition deletion lifecycle (same policy as fs-judgepapers).
-DELETION_RETENTION_DAYS = 30
+DELETION_RETENTION_DAYS = 60
 DELETION_EXTENSION_DAYS = 7
 LEGACY_DELETION_DATE = "2026-06-12T00:00:00Z"
 AUTO_CLEANUP_ACTOR = "auto-cleanup"

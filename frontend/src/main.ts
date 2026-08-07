@@ -27,6 +27,10 @@ interface ClientPrincipal {
 let currentId: string | null = null;
 let details: CompetitionDetails | null = null;
 const openCats = new Set<string>();
+/** Collapsed-by-default state of the "Team rosters" per-category groups. */
+const openRosterCats = new Set<string>();
+/** Which teams show their expanded skater list inside the roster groups. */
+const openRosterTeams = new Set<string>();
 
 const appElement = document.querySelector<HTMLDivElement>('#app')!;
 
@@ -85,13 +89,10 @@ appElement.innerHTML = `
         <div class="card reveal" style="max-width: 600px; margin: 0 auto;">
           <span class="micro-label">New Competition</span>
           <h2>Create New Competition</h2>
-          <div style="margin: 1.25rem 0;">
+          <div style="margin: 1.25rem 0 1.5rem;">
             <label class="form-label">Competition name</label>
             <input type="text" id="comp-name-input" class="form-input" placeholder="e.g. Winter Cup 2026">
-          </div>
-          <div style="margin-bottom: 1.5rem;">
-            <label class="form-label">Dates (free text)</label>
-            <input type="text" id="comp-dates-input" class="form-input" placeholder="e.g. 14.–15.3.2026">
+            <p class="text-muted" style="margin-top: 0.5rem;">Dates are filled in automatically from the schedule you upload.</p>
           </div>
           <div class="form-actions">
             <button id="btn-cancel-create" class="btn btn-ghost">Cancel</button>
@@ -106,6 +107,17 @@ appElement.innerHTML = `
             <div class="view-header-lead">
               <button id="btn-back-list" class="btn btn-sm btn-ghost">← Back</button>
               <h2 id="detail-title">Competition</h2>
+              <span class="help-icon" tabindex="0" role="button" aria-label="How to use the Protocol Generator">?<span class="help-pop">
+                <strong>How to use the Protocol Generator</strong>
+                <ul>
+                  <li>Upload the competition's <strong>schedule</strong> (PDF or DT_SCHEDULE XML) — it builds the categories and segments automatically.</li>
+                  <li>Fill in the <strong>event details</strong> (organiser, venue, dates); they feed the cover and information pages.</li>
+                  <li>Drop each category's result PDFs and photos onto their <strong>slots</strong>; drag between slots to fix placements, and hover a file to preview it.</li>
+                  <li>Required files (marked <span class="req">•</span>) drive each category's <em>"n/n uploaded"</em> readiness badge.</li>
+                  <li>For synchronized skating, import the <strong>DT_PARTIC</strong> team rosters to add team pages.</li>
+                  <li>Press <strong>Generate Protocol</strong> to build the bound PDF; download or delete generated protocols from the list below.</li>
+                </ul>
+              </span></span>
             </div>
           </div>
           <div id="detail-body"></div>
@@ -232,48 +244,192 @@ function chipHtml(fileId: string): string {
 
 function slotHtml(label: string, target: SlotTarget, fileId: string | null, required = false): string {
   const filled = fileId ? 'is-filled' : '';
+  const reqCls = required && !fileId ? 'is-missing' : '';
   const inner = fileId ? chipHtml(fileId) : '<div class="slot-empty">drop a file</div>';
-  return `<div class="slot ${filled}" data-target='${attr(target)}'>
+  return `<div class="slot ${filled} ${reqCls}" data-target='${attr(target)}'>
       <span class="slot-label">${escapeHtml(label)}${required ? ' <span class="req">•</span>' : ''}</span>
       ${inner}
     </div>`;
 }
 
+/** Whether a category's segments hold more than one segment. With a single
+ * segment, its results just repeat the total results and detail scores may be
+ * absent (beginner/local judging), so those two slots are optional — see
+ * `segmentHtml` / `categoryReadiness`. The Panel of Judges is always required. */
+function isMultiSegment(cat: Category): boolean {
+  return (cat.segments || []).length > 1;
+}
+
+/** Required-slot fill progress for a category. Required: Protocol Head Page +
+ * Total Results, the Panel of Judges on every segment, and — only when the
+ * category has 2+ segments — each segment's Results and Judges Scores Details. */
+function categoryReadiness(cat: Category): { filled: number; total: number; ready: boolean } {
+  let total = 0, filled = 0;
+  const req = (v: string | null | undefined) => { total++; if (v) filled++; };
+  req(cat.titlePdf);
+  req(cat.totalResultsPdf);
+  const multi = isMultiSegment(cat);
+  (cat.segments || []).forEach(s => {
+    req(s.panelPdf);                       // Panel of Judges: always required
+    if (multi) { req(s.resultsPdf); req(s.judgesDetailsPdf); }
+  });
+  return { filled, total, ready: total > 0 && filled === total };
+}
+
 function segmentHtml(cat: Category, seg: Segment): string {
+  // With only one segment, Results and Judges Scores Details are optional (the
+  // single segment's results duplicate the total results, and beginner/local
+  // judging may not publish detail scores). Panel of Judges is always required.
+  const multi = isMultiSegment(cat);
   return `<div class="segment-block">
       <div class="segment-head">
         <input class="form-input segment-name" style="max-width: 320px;" value="${escapeHtml(seg.name)}"
                data-edit="set_segment" data-cat="${cat.id}" data-seg="${seg.id}" data-field="name">
+        <label class="segment-units" title="Competition units (skaters/pairs/teams) that performed this segment. Auto-filled from the results PDF; correct it here if needed. Drives the competition-information page counts.">
+          Units
+          <input class="form-input" type="number" min="0" inputmode="numeric" placeholder="—"
+                 value="${seg.unitCount ?? ''}"
+                 data-edit="set_segment" data-cat="${cat.id}" data-seg="${seg.id}" data-field="unitCount">
+        </label>
         <button class="btn btn-xs btn-ghost btn-ghost--danger" data-rm-seg="${seg.id}" data-cat="${cat.id}">Remove segment</button>
       </div>
       <div class="segment-roles">
-        ${slotHtml('Results', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'results' }, seg.resultsPdf, true)}
-        ${slotHtml('Panel of Judges', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'panel' }, seg.panelPdf)}
-        ${slotHtml('Judges Details', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'judgesDetails' }, seg.judgesDetailsPdf)}
+        ${slotHtml('Segment Results', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'results' }, seg.resultsPdf, multi)}
+        ${slotHtml('Panel of Judges', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'panel' }, seg.panelPdf, true)}
+        ${slotHtml('Judges Scores Details Without Referee', { kind: 'segment', categoryId: cat.id, segmentId: seg.id, role: 'judgesDetails' }, seg.judgesDetailsPdf, multi)}
       </div>
     </div>`;
 }
 
-function teamHtml(cat: Category, team: Category['teams'][number]): string {
-  const roster = team.members && team.members.length
-    ? `<ul>${team.members.map(m => `<li>${escapeHtml(m)}</li>`).join('')}</ul>`
-    : '<span class="team-roster-empty">No roster yet — upload a DT_PARTIC XML.</span>';
-  return `<div class="team-card">
-      <div class="team-head">
-        <div class="team-fields">
-          <input class="form-input" placeholder="Team name" value="${escapeHtml(team.name)}"
-                 data-edit="set_team" data-cat="${cat.id}" data-team="${team.id}" data-field="name">
-          <input class="form-input" placeholder="Organization / club" value="${escapeHtml(team.org)}"
-                 data-edit="set_team" data-cat="${cat.id}" data-team="${team.id}" data-field="org">
-        </div>
+type TeamRow = Category['teams'][number];
+type PhotoStatus = 'green' | 'yellow' | 'red';
+
+/** Picture readiness of one team — the colour code shown in the roster list and
+ * the order generation actually uses: photo → fallback → placeholder. */
+function teamPhotoStatus(team: TeamRow): PhotoStatus {
+  if (team.photo) return 'green';
+  if (team.photoFallback) return 'yellow';
+  return 'red';
+}
+
+const STATUS_TITLE: Record<PhotoStatus, string> = {
+  green: 'Competition photo assigned',
+  yellow: 'Accreditation fallback only — used because no competition photo is set',
+  red: 'No picture at all — the team page falls back to a placeholder',
+};
+
+/** One compact team line: status dot, inline name/org edits, skater toggle,
+ * Remove, and both photo slots (same SlotTarget objects the backend expects,
+ * so drag/drop, chips and one-file-one-slot behave exactly as before). */
+function teamRowHtml(cat: Category, team: TeamRow): string {
+  const status = teamPhotoStatus(team);
+  const count = team.members?.length || 0;
+  const isOpen = openRosterTeams.has(team.id);
+  const roster = count
+    ? `<ul class="roster-skaters">${team.members.map(m => `<li>${escapeHtml(m)}</li>`).join('')}</ul>`
+    : '<span class="team-roster-empty">No roster yet — import the DT_PARTIC XML pair.</span>';
+  return `<div class="team-row ${status === 'red' ? 'team-row--alert' : ''}">
+      <div class="team-row-main">
+        <span class="status-dot is-${status}" title="${escapeHtml(STATUS_TITLE[status])}"></span>
+        <input class="form-input form-input--compact team-row-name" placeholder="Team name" value="${escapeHtml(team.name)}"
+               data-edit="set_team" data-cat="${cat.id}" data-team="${team.id}" data-field="name">
+        <input class="form-input form-input--compact team-row-org" placeholder="Club" value="${escapeHtml(team.org)}"
+               data-edit="set_team" data-cat="${cat.id}" data-team="${team.id}" data-field="org">
+        <button class="roster-skaters-toggle" data-toggle-roster-team="${team.id}"
+                title="Show or hide the skater names">${count} skater${count === 1 ? '' : 's'}
+          <span class="toggle-icon">${isOpen ? '▴' : '▾'}</span>
+        </button>
         <button class="btn btn-xs btn-ghost btn-ghost--danger" data-rm-team="${team.id}" data-cat="${cat.id}">Remove</button>
       </div>
-      <div class="team-body">
-        <div class="slot-grid">
-          ${slotHtml('Team photo', { kind: 'teamPhoto', categoryId: cat.id, teamId: team.id }, team.photo)}
-        </div>
-        <div class="team-roster">SKATERS (${team.members?.length || 0})${roster}</div>
+      <div class="team-row-slots">
+        ${slotHtml('Competition photo', { kind: 'teamPhoto', categoryId: cat.id, teamId: team.id }, team.photo)}
+        ${slotHtml('Fallback picture', { kind: 'teamPhotoFallback', categoryId: cat.id, teamId: team.id }, team.photoFallback ?? null)}
       </div>
+      ${isOpen ? `<div class="team-row-roster">${roster}</div>` : ''}
+    </div>`;
+}
+
+/** One collapsible per-category roster group. Zero-team synchro categories are
+ * included too, so "Add team" is reachable everywhere. */
+function rosterGroupHtml(cat: Category): string {
+  const isOpen = openRosterCats.has(cat.id);
+  const teams = cat.teams || [];
+  const tally: Record<PhotoStatus, number> = { green: 0, yellow: 0, red: 0 };
+  teams.forEach(t => { tally[teamPhotoStatus(t)]++; });
+  const tallyHtml = (['green', 'yellow', 'red'] as const)
+    .filter(k => tally[k] > 0)
+    .map(k => `<span class="dot-count" title="${escapeHtml(STATUS_TITLE[k])}">
+        <span class="status-dot is-${k}"></span>${tally[k]}</span>`).join('');
+  return `<div class="roster-group">
+      <div class="category-header roster-group-head is-synchro" data-toggle-roster="${cat.id}">
+        <div class="category-head-lead">
+          <span class="category-title">${escapeHtml(cat.name || '(unnamed)')}</span>
+          <span class="micro-label">${teams.length} team${teams.length === 1 ? '' : 's'}</span>
+        </div>
+        <div class="category-head-tail">
+          <span class="dot-tally">${tallyHtml}</span>
+          <button class="btn btn-xs btn-primary" data-add-team="${cat.id}">Add team</button>
+          <span class="toggle-icon">${isOpen ? '▴' : '▾'}</span>
+        </div>
+      </div>
+      <div class="roster-group-body" style="display:${isOpen ? 'block' : 'none'};">
+        ${teams.map(t => teamRowHtml(cat, t)).join('')
+          || '<p class="section-sub roster-group-empty">No teams here yet — import the rosters or add one manually.</p>'}
+      </div>
+    </div>`;
+}
+
+/** The whole "Team rosters" body: synchro categories only, in schedule order. */
+function rosterGroupsHtml(cats: Category[]): string {
+  const groups = cats
+    .filter(c => c.discipline === 'synchro')
+    .slice()
+    .sort((a, b) => a.order - b.order);
+  if (!groups.length) {
+    return `<p class="section-sub">No synchronized skating categories — team pages, rosters and
+      team photos only apply to synchro.</p>`;
+  }
+  return `<div class="roster-groups">${groups.map(rosterGroupHtml).join('')}</div>`;
+}
+
+/** Persistent status panel for the last roster import (or automatic re-match).
+ * The backend stores the report in metadata.json, so it survives reloads and is
+ * refreshed silently whenever a Total Results PDF is assigned. */
+function rosterReportHtml(s: Structure): string {
+  const r = s.rosterImport;
+  if (!r) return '';
+
+  let when = r.at || '';
+  const parsed = r.at ? new Date(r.at) : null;
+  if (parsed && !isNaN(parsed.getTime())) when = parsed.toLocaleString();
+
+  const unmatched = r.unmatched || [];
+  const withdrawn = r.withdrawn || [];
+
+  const list = (title: string, rows: string[]) => `
+      <div class="roster-report-list">
+        <span class="micro-label">${escapeHtml(title)} (${rows.length})</span>
+        <ul>${rows.map(row => `<li>${row}</li>`).join('')}</ul>
+      </div>`;
+
+  const who = (t: { name: string; org: string }) =>
+    escapeHtml(t.name || '(unnamed)') + (t.org ? ` <span class="roster-report-org">(${escapeHtml(t.org)})</span>` : '');
+
+  const blocks: string[] = [];
+  if (withdrawn.length) {
+    blocks.push(list('Registered but not in any result sheet (withdrawn)',
+      withdrawn.map(t => `${who(t)}${t.eventLabel ? ` — ${escapeHtml(t.eventLabel)}` : ''}`)));
+  }
+  if (unmatched.length) {
+    blocks.push(list('Not placed',
+      unmatched.map(t => `${who(t)} — ${escapeHtml(t.reason || 'no matching category')}`)));
+  }
+  if (!blocks.length) blocks.push('<p class="roster-report-ok">All registered teams placed.</p>');
+
+  return `<div class="roster-report">
+      <p class="roster-report-sum">Imported ${r.imported} team(s)${r.moved ? ` · ${r.moved} moved` : ''}${
+        when ? ` <span class="roster-report-when">${escapeHtml(when)}</span>` : ''}</p>
+      ${blocks.join('')}
     </div>`;
 }
 
@@ -281,17 +437,14 @@ function categoryHtml(cat: Category): string {
   const isOpen = openCats.has(cat.id);
   const isSynchro = cat.discipline === 'synchro';
   const podiumNames = (cat.podium?.names || ['', '', '']).slice(0, 3);
-  const teamsSection = isSynchro ? `
-      <div class="section">
-        <div class="section-head"><h3>Teams</h3>
-          <span style="display:flex; gap:0.4rem;">
-            <button class="btn btn-xs btn-ghost" data-import-rosters="${cat.id}">Import teams (DT_PARTIC)…</button>
-            <button class="btn btn-xs btn-primary" data-add-team="${cat.id}">Add team</button>
-          </span>
-        </div>
-        <p class="section-sub">Import selects both the <strong>DT_PARTIC_TEAMS</strong> and <strong>DT_PARTIC</strong> XML files together — they are joined to fill team names, clubs and rosters.</p>
-        ${(cat.teams || []).map(t => teamHtml(cat, t)).join('') || '<p class="section-sub">No teams yet.</p>'}
-      </div>` : '';
+  // Everything team-related (names, rosters, photos, fallback pictures) lives in
+  // the "Team rosters" section below — the category card only points there.
+  const teamsPointer = isSynchro ? `
+      <p class="section-sub cat-teams-pointer">${(cat.teams || []).length} team${(cat.teams || []).length === 1 ? '' : 's'}
+        — photos &amp; rosters are managed in <strong>Team rosters</strong> below.</p>` : '';
+
+  const r = categoryReadiness(cat);
+  const readyBadge = `<span class="cat-ready ${r.ready ? 'is-ready' : ''}" title="Required files uploaded">${r.ready ? '✓ ' : ''}${r.filled}/${r.total} uploaded</span>`;
 
   return `<div class="category-card">
       <div class="category-header ${isSynchro ? 'is-synchro' : ''}" data-toggle-cat="${cat.id}">
@@ -300,6 +453,7 @@ function categoryHtml(cat: Category): string {
           ${isSynchro ? '<span class="tag-synchro">Synchro</span>' : ''}
         </div>
         <div class="category-head-tail">
+          ${readyBadge}
           <span class="micro-label">${(cat.segments || []).length} seg</span>
           <span class="toggle-icon">${isOpen ? '▴' : '▾'}</span>
         </div>
@@ -315,12 +469,12 @@ function categoryHtml(cat: Category): string {
           <button class="btn btn-xs btn-ghost btn-ghost--danger" data-rm-cat="${cat.id}">Remove category</button>
         </div>
 
-        ${teamsSection}
+        ${teamsPointer}
 
         <div class="section">
           <div class="section-head"><h3>Category pages</h3></div>
           <div class="slot-grid">
-            ${slotHtml('Title page (PDF)', { kind: 'categoryTitle', categoryId: cat.id }, cat.titlePdf, true)}
+            ${slotHtml('Protocol Head Page (PDF)', { kind: 'categoryTitle', categoryId: cat.id }, cat.titlePdf, true)}
             ${slotHtml('Podium photo', { kind: 'podiumPhoto', categoryId: cat.id }, cat.podium?.photo || null)}
             ${slotHtml('Total results (PDF)', { kind: 'totalResults', categoryId: cat.id }, cat.totalResultsPdf, true)}
           </div>
@@ -379,6 +533,7 @@ function renderDetails() {
           <span>${escapeHtml(g.fileName)}</span>
           <span class="gen-badge">${g.size ? Math.round(Number(g.size) / 1024) + ' KB' : ''}</span>
         </a>
+        <button class="btn btn-xs btn-ghost btn-ghost--danger" data-del-protocol="${escapeHtml(g.fileName)}" title="Delete this protocol">×</button>
       </div>`).join('') : '<p class="section-sub">No protocol generated yet.</p>';
 
   document.getElementById('detail-body')!.innerHTML = `
@@ -411,6 +566,19 @@ function renderDetails() {
     </div>
 
     <div class="section">
+      <div class="section-head"><h3>Header &amp; footer</h3></div>
+      <p class="section-sub">Stamped on every interior page. Leave empty to use the Figureskatingtools brand bands — the header automatically prints the competition name, dates and location. Upload an image to override either band.</p>
+      <div class="page-slot-row">
+        ${slotHtml('Competition header (image)', { kind: 'header' }, s.header?.fileId || null)}
+        ${slotHtml('Competition footer (image)', { kind: 'footer' }, s.footer?.fileId || null)}
+      </div>
+      <label class="footer-toggle">
+        <input type="checkbox" id="footer-enabled" ${s.footerEnabled !== false ? 'checked' : ''}>
+        Show the footer band on every page
+      </label>
+    </div>
+
+    <div class="section">
       <div class="section-head"><h3>Uploads</h3>
         <button class="btn btn-xs btn-primary" id="tray-browse">Upload files…</button>
         <input type="file" id="tray-input" multiple accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.xml" style="display:none;">
@@ -422,12 +590,64 @@ function renderDetails() {
     </div>
 
     <div class="section">
-      <div class="section-head"><h3>Categories</h3>
+      <div class="section-head">
+        <h3>Categories<span class="help-icon" tabindex="0" role="button" aria-label="Required files help">?<span class="help-pop">
+          <strong>Required files</strong> (marked <span class="req">•</span>) drive each category's
+          <em>"n/n uploaded"</em> badge — it turns green with a ✓ when all are present.
+          <ul>
+            <li>Every category needs a <strong>Protocol Head Page</strong> and <strong>Total Results</strong>.</li>
+            <li>The <strong>Podium Photo</strong> is optional — left empty, the podium page simply shows blank space.</li>
+            <li><strong>Panel of Judges</strong> is required on every segment.</li>
+            <li>With <strong>two or more segments</strong>, each segment also requires its <strong>Segment Results</strong> and <strong>Judges Scores Details Without Referee</strong>.</li>
+            <li>With <strong>a single segment</strong>, those two are optional: the lone segment's results would just repeat the Total Results, and for beginner-level competitors or local judging systems the detail scores might not be published — so they aren't required.</li>
+          </ul>
+        </span></span></h3>
         <button class="btn btn-xs btn-primary" id="btn-add-cat">Add category</button>
       </div>
       ${(s.categories || []).slice().sort((a, b) => a.order - b.order).map(categoryHtml).join('')
         || '<p class="section-sub">No categories yet. Upload a schedule or add one manually.</p>'}
     </div>
+
+    ${(s.categories || []).length ? `
+    <div class="section">
+      <div class="section-head">
+        <h3>Team rosters<span class="help-icon" tabindex="0" role="button" aria-label="Team roster help">?<span class="help-pop">
+          <strong>Importing the teams</strong>
+          <ul>
+            <li>Assign each category's <strong>Total Results</strong> PDF first — teams register per
+              event but compete per block, and the result sheets are the only place that mapping exists.</li>
+            <li>Then select the competition's <strong>DT_PARTIC_TEAMS</strong> and <strong>DT_PARTIC</strong>
+              XML files together; one pair covers the whole competition and every team is placed
+              into the right block automatically.</li>
+            <li>Assign a missing results PDF later and the teams are <strong>re-matched
+              automatically</strong> — no need to import again.</li>
+            <li>Accreditation pictures import in bulk from one <strong>ZIP</strong>: files named
+              <code>Team-Name_Club-Name.jpeg</code>, optionally in folders named like the categories
+              (the folder name is only a matching hint, and names may be ASCII-folded —
+              "Helsinki-JaaLeidit" still matches "Helsinki JääLeidit"). Images matching no team land
+              in the Uploads tray.</li>
+          </ul>
+          <strong>Picture status</strong>
+          <ul>
+            <li><span class="status-dot is-green"></span> <strong>Green</strong> — competition
+              (kiss'n'cry) photo assigned; that is what the team page uses.</li>
+            <li><span class="status-dot is-yellow"></span> <strong>Yellow</strong> — accreditation
+              fallback only; used because no competition photo is set.</li>
+            <li><span class="status-dot is-red"></span> <strong>Red</strong> — no picture at all, so
+              the team page shows a placeholder; the whole row is highlighted.</li>
+          </ul>
+        </span></span></h3>
+        <div class="section-head-actions">
+          <button class="btn btn-xs btn-ghost" id="btn-import-rosters">Import teams (DT_PARTIC)…</button>
+          <button class="btn btn-xs btn-ghost" id="btn-upload-fallbacks">Upload fallback pictures (ZIP)…</button>
+        </div>
+      </div>
+      <p class="section-sub">Everything team-related lives here: names, rosters and both pictures.
+        Assign the <strong>Total Results</strong> PDFs first, then import the DT_PARTIC XML pair —
+        see <span class="help-hint">?</span> for the full flow and the colour codes.</p>
+      ${rosterGroupsHtml(s.categories || [])}
+      ${rosterReportHtml(s)}
+    </div>` : ''}
 
     <div class="action-bar">
       <div class="gen-list">${genHtml}</div>
@@ -485,6 +705,24 @@ function wireDetail() {
       renderDetails();
     }));
 
+  // Roster group collapse toggles (Team rosters section).
+  body.querySelectorAll<HTMLElement>('[data-toggle-roster]').forEach(h =>
+    h.addEventListener('click', e => {
+      if ((e.target as HTMLElement).closest('input,select,button')) return;
+      const id = h.dataset.toggleRoster!;
+      if (openRosterCats.has(id)) openRosterCats.delete(id); else openRosterCats.add(id);
+      renderDetails();
+    }));
+
+  // Per-team skater-list expanders.
+  body.querySelectorAll<HTMLElement>('[data-toggle-roster-team]').forEach(b =>
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      const id = b.dataset.toggleRosterTeam!;
+      if (openRosterTeams.has(id)) openRosterTeams.delete(id); else openRosterTeams.add(id);
+      renderDetails();
+    }));
+
   // Event detail inputs (save on blur).
   body.querySelectorAll<HTMLInputElement>('[data-event]').forEach(inp =>
     inp.addEventListener('change', () => saveEvent()));
@@ -528,13 +766,23 @@ function wireDetail() {
   body.querySelectorAll<HTMLElement>('[data-rm-seg]').forEach(b =>
     b.addEventListener('click', () => editStructure({ op: 'remove_segment', categoryId: b.dataset.cat, segmentId: b.dataset.rmSeg }, true)));
   body.querySelectorAll<HTMLElement>('[data-add-team]').forEach(b =>
-    b.addEventListener('click', () => editStructure({ op: 'add_team', categoryId: b.dataset.addTeam }, true)));
+    b.addEventListener('click', () => {
+      openRosterCats.add(b.dataset.addTeam!);   // keep the group open to show the new row
+      editStructure({ op: 'add_team', categoryId: b.dataset.addTeam }, true);
+    }));
   body.querySelectorAll<HTMLElement>('[data-rm-team]').forEach(b =>
     b.addEventListener('click', () => editStructure({ op: 'remove_team', categoryId: b.dataset.cat, teamId: b.dataset.rmTeam }, true)));
 
-  // Roster import (two DT_PARTIC XML files).
-  body.querySelectorAll<HTMLElement>('[data-import-rosters]').forEach(b =>
-    b.addEventListener('click', () => pickRosters(b.dataset.importRosters!)));
+  // Roster import (two DT_PARTIC XML files, one pair for the whole competition).
+  document.getElementById('btn-import-rosters')?.addEventListener('click', () => pickRosters());
+
+  // Fallback (accreditation) pictures — one ZIP for the whole competition.
+  document.getElementById('btn-upload-fallbacks')?.addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = '.zip';
+    inp.onchange = () => { if (inp.files?.[0]) uploadFallbackZip(inp.files[0]); };
+    inp.click();
+  });
 
   // Schedule upload.
   const schedBrowse = document.getElementById('schedule-browse');
@@ -561,8 +809,34 @@ function wireDetail() {
   trayBrowse?.addEventListener('click', () => trayInput?.click());
   trayInput?.addEventListener('change', () => { if (trayInput.files?.length) uploadFiles(trayInput.files); trayInput.value = ''; });
 
+  // Delete a generated protocol file.
+  body.querySelectorAll<HTMLElement>('[data-del-protocol]').forEach(b =>
+    b.addEventListener('click', () => deleteProtocol(b.dataset.delProtocol!)));
+
+  // Footer band toggle.
+  document.getElementById('footer-enabled')?.addEventListener('change', e => {
+    const enabled = (e.target as HTMLInputElement).checked;
+    if (details) details.structure.footerEnabled = enabled;
+    editStructure({ op: 'set_footer_enabled', enabled }, false);
+  });
+
   // Generate.
   document.getElementById('btn-generate')?.addEventListener('click', generate);
+}
+
+function deleteProtocol(fileName: string) {
+  if (!currentId) return;
+  openConfirmModal({
+    title: 'Delete protocol?',
+    message: `Delete the generated protocol <strong>${escapeHtml(fileName)}</strong>? This cannot be undone.`,
+    onConfirm: async () => {
+      const resp = await fetch(
+        `/api/delete_protocol?competition=${encodeURIComponent(currentId!)}&fileName=${encodeURIComponent(fileName)}`,
+        { method: 'DELETE' });
+      if (!resp.ok) { alert('Delete failed: ' + (await resp.text())); throw new Error('delete failed'); }
+      await loadDetails();
+    },
+  });
 }
 
 // ── mutations ──
@@ -637,7 +911,7 @@ async function parseSchedule(file: File, force = false) {
   } catch { alert('Network error parsing schedule.'); }
 }
 
-function pickRosters(categoryId: string) {
+function pickRosters() {
   const inp = document.createElement('input');
   inp.type = 'file'; inp.accept = '.xml'; inp.multiple = true;
   inp.onchange = async () => {
@@ -657,56 +931,50 @@ function pickRosters(categoryId: string) {
       });
     }
     if (!teamsXml) { alert('Could not find a DT_PARTIC_TEAMS file among the selected files.'); return; }
-    await importRosters(categoryId, teamsXml, particXml);
+    await importRosters(teamsXml, particXml);
   };
   inp.click();
 }
 
-async function importRosters(categoryId: string, teamsXml: string, particXml: string, eventCode?: string) {
+async function importRosters(teamsXml: string, particXml: string) {
   if (!currentId) return;
   try {
-    const resp = await apiJson('/api/import_rosters',
-      { id: currentId, categoryId, teamsXml, particXml, eventCode });
-    if (resp.status === 409) {
-      const data = await resp.json();
-      if (data.needEvent && Array.isArray(data.events)) {
-        const chosen = await chooseEvent(data.events);
-        if (chosen) return importRosters(categoryId, teamsXml, particXml, chosen);
-        return;
-      }
-    }
+    // Omit the XML keys entirely when empty — the backend then re-matches from
+    // the archived roster files instead of expecting a fresh upload.
+    const body = {
+      id: currentId,
+      ...(teamsXml ? { teamsXml } : {}),
+      ...(particXml ? { particXml } : {}),
+    };
+    const resp = await apiJson('/api/import_rosters', body);
     if (!resp.ok) { alert('Roster import failed: ' + (await resp.text())); return; }
     const data = await resp.json();
     await loadDetails();
-    flash(`Imported ${data.imported} team(s) — ${data.event}.`);
+    // Details (withdrawn / not placed) live in the persistent panel, not here.
+    flash(`Imported ${data.imported} team(s)${data.moved ? `, ${data.moved} moved` : ''} — see the Team rosters section for details.`);
   } catch { alert('Network error importing rosters.'); }
 }
 
-/** Modal picker: choose which registered event's teams to import. */
-function chooseEvent(events: { code: string; label: string; count: number }[]): Promise<string | null> {
-  return new Promise(resolve => {
-    const overlay = document.getElementById('modal-overlay')!;
-    document.getElementById('modal-title')!.textContent = 'Which event?';
-    document.getElementById('modal-message')!.innerHTML =
-      'This DT_PARTIC_TEAMS file contains several synchro events. Pick the one for this category:';
-    const extra = document.getElementById('modal-extra')!;
-    extra.innerHTML = `<div style="display:flex; flex-direction:column; gap:0.5rem;">${
-      events.map(e => `<button class="btn btn-ghost btn-sm" data-evt="${escapeHtml(e.code)}" style="justify-content:flex-start; text-align:left;">${escapeHtml(e.label)} <span class="text-muted">· ${e.count} team(s)</span></button>`).join('')
-    }</div>`;
-    const confirm = document.getElementById('modal-confirm') as HTMLButtonElement;
-    const cancel = document.getElementById('modal-cancel') as HTMLButtonElement;
-    confirm.classList.add('hidden');
-    overlay.classList.remove('hidden');
-    const done = (val: string | null) => {
-      overlay.classList.add('hidden');
-      confirm.classList.remove('hidden');
-      extra.innerHTML = '';
-      resolve(val);
-    };
-    extra.querySelectorAll<HTMLElement>('[data-evt]').forEach(b =>
-      b.addEventListener('click', () => done(b.dataset.evt!)));
-    cancel.onclick = () => done(null);
-  });
+/** Bulk-import accreditation pictures from one ZIP (folders ≈ categories, files
+ * "Team-Name_Club-Name.jpeg"). Matched images become the team's fallback
+ * picture; anything unmatched stays in the Uploads tray and is reported. */
+async function uploadFallbackZip(file: File) {
+  if (!currentId) return;
+  try {
+    const resp = await apiRaw(
+      '/api/upload_fallback_photos?' + new URLSearchParams({ competition: currentId }), file);
+    if (!resp.ok) { alert('Fallback picture import failed: ' + (await resp.text())); return; }
+    const data = await resp.json();
+    await loadDetails();
+    const parts = [`Matched ${data.matched} fallback picture(s)`];
+    if (Array.isArray(data.unmatchedFiles) && data.unmatchedFiles.length) {
+      parts.push(`no team matched: ${data.unmatchedFiles.join(', ')}`);
+    }
+    if (Array.isArray(data.rejected) && data.rejected.length) {
+      parts.push(`rejected: ${data.rejected.join(', ')}`);
+    }
+    flash(parts.join(' — ') + '.');
+  } catch { alert('Network error importing fallback pictures.'); }
 }
 
 /** Brief transient status toast reusing the upload-status look. */
@@ -745,42 +1013,53 @@ async function generate() {
 }
 
 // ── delete competition modal ──
-function confirmDeleteCompetition(id: string, name: string) {
+// Graphical confirmation modal (reuses the #modal-overlay component) — a single
+// place for destructive confirmations so they're consistent and not JS popups.
+function openConfirmModal(opts: {
+  title: string; message: string; confirmLabel?: string;
+  onConfirm: () => Promise<void> | void;
+}) {
   const overlay = document.getElementById('modal-overlay')!;
-  document.getElementById('modal-title')!.textContent = 'Delete competition?';
-  document.getElementById('modal-message')!.innerHTML =
-    `Delete <strong>${escapeHtml(name)}</strong>? This permanently removes its files.`;
+  document.getElementById('modal-title')!.textContent = opts.title;
+  document.getElementById('modal-message')!.innerHTML = opts.message;
   document.getElementById('modal-extra')!.innerHTML = '';
   const confirm = document.getElementById('modal-confirm') as HTMLButtonElement;
   const cancel = document.getElementById('modal-cancel') as HTMLButtonElement;
   confirm.className = 'btn btn-danger btn-sm';
-  confirm.textContent = 'Delete';
+  confirm.textContent = opts.confirmLabel || 'Delete';
   overlay.classList.remove('hidden');
   const close = () => overlay.classList.add('hidden');
   cancel.onclick = close;
   confirm.onclick = async () => {
     confirm.disabled = true;
-    try {
-      await apiGet(`/api/delete_competition?id=${encodeURIComponent(id)}`);
-      close(); loadCompetitions();
-    } catch { alert('Delete failed.'); }
+    try { await opts.onConfirm(); close(); }
+    catch { /* the action surfaced its own error; keep the modal open */ }
     finally { confirm.disabled = false; }
   };
+}
+
+function confirmDeleteCompetition(id: string, name: string) {
+  openConfirmModal({
+    title: 'Delete competition?',
+    message: `Delete <strong>${escapeHtml(name)}</strong>? This permanently removes its files.`,
+    onConfirm: async () => {
+      await apiGet(`/api/delete_competition?id=${encodeURIComponent(id)}`);
+      loadCompetitions();
+    },
+  });
 }
 
 // ── create competition ──
 async function createCompetition() {
   const name = (document.getElementById('comp-name-input') as HTMLInputElement).value.trim();
-  const dates = (document.getElementById('comp-dates-input') as HTMLInputElement).value.trim();
   if (!name) { alert('Please enter a name.'); return; }
   const btn = document.getElementById('btn-confirm-create') as HTMLButtonElement;
   btn.disabled = true; btn.textContent = 'Creating…';
   try {
-    const resp = await apiGet(`/api/create_competition?name=${encodeURIComponent(name)}&dates=${encodeURIComponent(dates)}`);
+    const resp = await apiGet(`/api/create_competition?name=${encodeURIComponent(name)}`);
     if (resp.ok) {
       const data = await resp.json();
       (document.getElementById('comp-name-input') as HTMLInputElement).value = '';
-      (document.getElementById('comp-dates-input') as HTMLInputElement).value = '';
       openCompetition(data.id, data.name);
     } else {
       alert('Create failed: ' + (await resp.text()));
