@@ -3,9 +3,10 @@ import logging
 import os
 import io
 import json
+import re
 import unicodedata
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import UpdateMode
@@ -177,16 +178,22 @@ def _competitions_table():
     return comp_table
 
 
-def _create_competition_record(comp_table, email, safe_name, dates, platform_id=None):
+def _create_competition_record(comp_table, email, safe_name, dates, platform_id=None,
+                               rink="", dates_auto=False):
     """Seed a new competition — unique id, metadata.json structure document and
     registry entity — and return its id. Shared by `create_competition` (the
-    legacy standalone flow) and `resolve_competition` (platform binding)."""
+    legacy standalone flow) and `resolve_competition` (platform binding, which
+    also seeds the venue and flags the dates as auto-filled)."""
     new_id = sh.generate_competition_id(comp_table)
     folder_path = f"{safe_name}-{new_id}"
     now = datetime.utcnow()
     created_date = f"{now.isoformat()}Z"
 
     structure = st.new_structure(new_id, safe_name, dates, email, created_date)
+    if rink:
+        structure["event"]["rink"] = rink
+    if dates and dates_auto:
+        structure["event"]["datesAuto"] = True
     if platform_id:
         structure["platformId"] = platform_id
     sh.write_structure(folder_path, structure)
@@ -243,6 +250,58 @@ def _normalized_name(value) -> str:
                    if c.isalnum() and not unicodedata.combining(c)).casefold()
 
 
+_ISO_DATE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
+
+
+def _fi_date(value) -> str:
+    """Finnish dd.MM.yyyy rendering of a platform date. The site sends ISO
+    (`2025-01-25`, sometimes a span or with a time part); protocols print Finnish
+    dates everywhere. Anything that isn't a recognisable ISO date passes through
+    untouched, so a hand-written "1.-2.5.2026" survives a re-resolve."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    def _fi(match):
+        try:
+            return date(int(match.group(1)), int(match.group(2)),
+                        int(match.group(3))).strftime("%d.%m.%Y")
+        except ValueError:
+            return match.group(0)
+
+    # Drop a trailing ISO time part ("2025-01-25T00:00:00Z" -> the day), then
+    # reformat every ISO date in place, so a span ("2026-05-01 – 2026-05-02")
+    # keeps its separator.
+    day_only = re.sub(r"^(\d{4}-\d{1,2}-\d{1,2})[T ]\d{1,2}:\d{2}.*$", r"\1", text)
+    return _ISO_DATE.sub(_fi, day_only)
+
+
+def _backfill_platform_event(structure, dates, venue) -> bool:
+    """Fill *empty* event fields from the platform's competition data; True when
+    something changed. Never clobbers: an existing value is either user-entered or
+    a better source (the schedule's full date span).
+
+    The one exception is a stored *raw ISO* date: only the earlier version of this
+    route could have written that (no user types "2025-01-25" into the Finnish
+    date field), so it is repaired in place and flagged auto, letting a schedule
+    re-parse widen it to the full span."""
+    event = structure.setdefault("event", {})
+    changed = False
+    if venue and not (event.get("rink") or "").strip():
+        event["rink"] = venue
+        changed = True
+    stored = (event.get("dates") or "").strip()
+    if dates and not stored:
+        event["dates"] = _fi_date(dates)
+        event["datesAuto"] = True
+        changed = True
+    elif stored and _ISO_DATE.fullmatch(stored):
+        event["dates"] = _fi_date(stored)
+        event["datesAuto"] = True
+        changed = True
+    return changed
+
+
 def _newest(entities):
     """The entity with the newest CreatedDate (ISO strings sort correctly)."""
     return max(entities, key=lambda e: e.get("CreatedDate") or "")
@@ -283,7 +342,13 @@ def _adopt_competition_by_name(comp_table, platform_id, name):
 @app.route(route="resolve_competition", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     """Map the site's active platform competition to this tool's competition,
-    creating it on first use: {platformId, name, dates?} -> {id, name, created}."""
+    creating it on first use:
+    {platformId, name, dates?, venue?} -> {id, name, created}.
+
+    The platform's date (ISO) and venue seed `event.dates` (as Finnish dd.MM.yyyy,
+    flagged `datesAuto` so the schedule's full span may later replace it) and
+    `event.rink`. On a hit or an adoption the same values only *backfill* empty
+    fields."""
     email = _require_user(req)
     if not email:
         return func.HttpResponse("Unauthorized", status_code=401)
@@ -297,6 +362,7 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     platform_id = (body.get('platformId') or '').strip()
     name = (body.get('name') or '').strip()
     dates = body.get('dates') or ''
+    venue = (body.get('venue') or '').strip()
     if not platform_id:
         return func.HttpResponse("Missing platformId", status_code=400)
     safe_name = sh.sanitize_name(name)
@@ -311,13 +377,24 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
         entity = (_find_bound_competition(comp_table, platform_id)
                   or _adopt_competition_by_name(comp_table, platform_id, name))
         if entity:
+            if dates or venue:
+                folder_path = entity.get("FolderPath", entity["RowKey"])
+                try:
+                    structure = sh.read_structure(folder_path)
+                    if structure and _backfill_platform_event(structure, dates, venue):
+                        sh.write_structure(folder_path, structure)
+                except Exception as e:
+                    # Backfill is a nicety; never fail the binding over it.
+                    logging.warning(f"Platform event backfill failed for {folder_path}: {e}")
             return sh.json_response({
                 "id": entity["RowKey"],
                 "name": entity.get("Name", entity["RowKey"]),
                 "created": False,
             })
 
-        new_id = _create_competition_record(comp_table, email, safe_name, dates, platform_id)
+        new_id = _create_competition_record(
+            comp_table, email, safe_name, _fi_date(dates), platform_id,
+            rink=venue, dates_auto=bool(dates))
         return sh.json_response({"id": new_id, "name": safe_name, "created": True})
     except Exception as e:
         logging.error(f"Error resolving competition: {e}")
@@ -489,6 +566,9 @@ def save_event_settings(req: func.HttpRequest) -> func.HttpResponse:
         for key in allowed:
             if key in event:
                 structure["event"][key] = event[key]
+        # The user reviewed the dates: a later schedule re-parse must not touch them.
+        if "dates" in event:
+            structure["event"].pop("datesAuto", None)
         sh.write_structure(folder_path, structure)
         return sh.json_response({"event": structure["event"]})
     except Exception as e:
@@ -684,6 +764,22 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
 
 # ── schedule + roster ──────────────────────────────────────────────────────────
 
+def _apply_schedule_meta(event: dict, meta: dict) -> None:
+    """Auto-fill event fields from the parsed schedule.
+
+    The rink is fill-when-empty (the platform's venue deliberately wins). The dates
+    are also overwritten when they were auto-filled (`datesAuto`, e.g. the
+    platform's single start date) — the schedule knows the full span, which is the
+    better guess. The flag stays set so a re-parse can refine it again; only a user
+    save clears it (see `save_event_settings`)."""
+    if meta.get("rink") and not (event.get("rink") or "").strip():
+        event["rink"] = meta["rink"]
+    if meta.get("dates") and (not (event.get("dates") or "").strip()
+                              or event.get("datesAuto")):
+        event["dates"] = meta["dates"]
+        event["datesAuto"] = True
+
+
 @app.route(route="parse_schedule", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
     """Upload + parse the schedule PDF; build the category/segment structure."""
@@ -716,11 +812,8 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
         structure["schedule"] = rows
         structure["categories"] = categories
         structure["scheduleParsed"] = True
-        # Auto-fill event fields the XML gives us, without clobbering user input.
-        if meta.get("rink") and not structure["event"].get("rink"):
-            structure["event"]["rink"] = meta["rink"]
-        if meta.get("dates") and not structure["event"].get("dates"):
-            structure["event"]["dates"] = meta["dates"]
+        # Auto-fill event fields the schedule gives us, without clobbering user input.
+        _apply_schedule_meta(structure.setdefault("event", {}), meta)
         sh.write_structure(folder_path, structure)
         return sh.json_response({
             "rows": len(rows),

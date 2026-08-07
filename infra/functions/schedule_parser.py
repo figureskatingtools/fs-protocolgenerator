@@ -89,7 +89,8 @@ def _rows_from_text(text: str):
         if date_match:
             day, month, year = date_match.groups()
             current_date = f"{year}{month.zfill(2)}{day.zfill(2)}"
-            current_display = f"{day}.{month}.{year}"
+            # Finnish dd.MM.yyyy, zero-padded like the XML path ("05.01.2026").
+            current_display = f"{day.zfill(2)}.{month.zfill(2)}.{year}"
             continue
         m = _ROW.match(line)
         if not m:

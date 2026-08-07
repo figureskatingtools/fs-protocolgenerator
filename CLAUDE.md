@@ -112,7 +112,10 @@ remain as plain fallbacks only if fonts/assets are missing.
 
 `list/create/delete/extend_competition`, `resolve_competition` (platform
 competition GUID → tool record: `PlatformId` lookup → normalized-name adoption
-of pre-existing records → create; soft-deleted rows are never resurrected),
+of pre-existing records → create; soft-deleted rows are never resurrected;
+optional `dates`/`venue` seed `event.dates` (dd.MM.yyyy, marked
+`event.datesAuto` so a schedule parse may refine it until the user saves the
+event form) and `event.rink` — create seeds, hit/adopt backfill empty fields),
 `get_competition_details`,
 `save_event_settings`, `upload_file`, `get_file` (streams bytes for previews),
 `assign_file`, `delete_file`, `parse_schedule`, `import_rosters`,
