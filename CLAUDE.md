@@ -110,7 +110,10 @@ remain as plain fallbacks only if fonts/assets are missing.
 
 ## Backend routes (`function_app.py`)
 
-`list/create/delete/extend_competition`, `get_competition_details`,
+`list/create/delete/extend_competition`, `resolve_competition` (platform
+competition GUID → tool record: `PlatformId` lookup → normalized-name adoption
+of pre-existing records → create; soft-deleted rows are never resurrected),
+`get_competition_details`,
 `save_event_settings`, `upload_file`, `get_file` (streams bytes for previews),
 `assign_file`, `delete_file`, `parse_schedule`, `import_rosters`,
 `upload_fallback_photos` (bulk fallback-picture ZIP), `edit_structure`
