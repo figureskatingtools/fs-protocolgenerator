@@ -16,6 +16,12 @@ result sheet (Tikkurila Trophy), whose rows are
 e.g. "1 Lotta TERHO SCT 38.53 1" → "SCT - Lotta TERHO". The nation/club is the last
 non-numeric column (often a mixed-case club code like "KaTa"/"PoriTa", sometimes an
 all-caps code like "SCT"/"HL"), with the name to its left and the scores trailing.
+Ice-dance and pair rows have the same shape with a two-person name,
+
+    <Pl.>  <Given FAMILY / Given FAMILY>  <Nation/Club>  <Total Score>  <SD>  <FD>
+
+e.g. "1Iris LAHTI / Oskari LIEDENPOHJA HL 113.03 1 1" → "HL - Iris LAHTI /
+Oskari LIEDENPOHJA", so the " / " separator is part of the name and survives.
 Expected to be refined further against more real exports (e.g. synchro totals).
 
 `parse_result_rows` is the single row extractor every reader is built on: the
@@ -55,14 +61,18 @@ def _split_row(rest: str):
     Columns are Name | Nation/Club | scores, so once the numeric score columns are
     dropped the last token is the nation/club and everything before it is the name
     ("Given FAMILY" for a skater, a team name for synchro). A lone token is a name
-    with no club, and so is a remainder whose name part is pure punctuation."""
-    tokens = [t for t in rest.split() if not _NUMERIC.match(t)]
+    with no club, and so is a remainder whose name part is pure punctuation.
+
+    A bare "/" is kept: it is the couple separator in an ice-dance/pair name, not a
+    score column (`_NUMERIC` still has to drop the lone "-"/":" placeholders that
+    stand in for a missing segment rank)."""
+    tokens = [t for t in rest.split() if t == "/" or not _NUMERIC.match(t)]
     if not tokens:
         return "", ""
     if len(tokens) == 1:
         return tokens[0], ""
     club = tokens[-1]
-    name = " ".join(tokens[:-1]).strip(" -–·")
+    name = " ".join(tokens[:-1]).strip(" -–·/")
     if not name:
         return club, ""
     return name, club

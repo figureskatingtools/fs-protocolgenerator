@@ -335,14 +335,22 @@ def podium_page(category_name: str, photo_bytes, names, chrome=None) -> bytes:
     for col, (place, height) in enumerate(steps):
         cx = MARGIN + col * col_w + col_w / 2
         px = cx - ped_w / 2
-        # Name centred over this column's pedestal, shrunk to fit the column.
+        # Name centred over this column's pedestal, shrunk to fit the column. A
+        # couple that still doesn't fit breaks at its "/" onto a second row, which
+        # stacks upwards into the clearance under the photo box.
         name = names[place] or "—"
         fs = 11.5
-        while fs > 7 and stringWidth(name, "Times-Roman", fs) > col_w - 4 * mm:
-            fs -= 0.5
+        name_w = col_w - 4 * mm
+        lines = [name]
+        if stringWidth(name, "Times-Roman", fs) > name_w:
+            lines = branding.split_couple_name(name)
+            while fs > 7 and max(stringWidth(l, "Times-Roman", fs) for l in lines) > name_w:
+                fs -= 0.5
         c.setFillColorRGB(*INK)
         c.setFont("Times-Roman", fs)
-        c.drawCentredString(cx, base_y + height + 6 * mm, name)
+        name_y = base_y + height + 6 * mm
+        for i, line in enumerate(reversed(lines)):
+            c.drawCentredString(cx, name_y + i * fs * 1.2, line)
         # Pedestal block.
         c.setFillColorRGB(0.93, 0.95, 0.97)
         c.setStrokeColorRGB(*LINE)
