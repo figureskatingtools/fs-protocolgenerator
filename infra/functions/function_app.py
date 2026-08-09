@@ -1268,7 +1268,7 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
     Body: {id, op, ...}. Ops:
       add_category {name, discipline}
       remove_category {categoryId}
-      set_category {categoryId, name?, discipline?, order?}
+      set_category {categoryId, name?, discipline?, order?, code?}
       add_segment {categoryId, name}
       remove_segment {categoryId, segmentId}
       set_segment {categoryId, segmentId, name?, order?, unitCount?}
@@ -1312,6 +1312,8 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
             for k in ("name", "discipline", "order"):
                 if k in body:
                     c[k] = body[k]
+            if "code" in body:
+                c["code"] = str(body["code"] or "").strip()[:32]
         elif op == "add_segment":
             c = cat()
             c["segments"].append(st.new_segment(body.get("name", "Segment"), len(c["segments"])))
