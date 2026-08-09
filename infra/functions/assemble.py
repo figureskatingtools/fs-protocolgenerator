@@ -15,11 +15,14 @@ canonical ISU-protocol order:
       for each segment: results PDF -> panel PDF -> judges-details PDF
   last page (custom or default)
 
-Uploaded PDFs are inserted as-is; photos and missing graphics are rendered by
-generate_pages. `get_file_bytes(file_id)` resolves an uploaded file's bytes.
+Uploaded PDFs are inserted as-is apart from boilerplate-only and blank trailing
+pages, which are dropped (see `_skippable_page_indices`); photos and missing
+graphics are rendered by generate_pages. `get_file_bytes(file_id)` resolves an
+uploaded file's bytes.
 """
 import io
 import logging
+import re
 
 from pypdf import PdfReader, PdfWriter
 
@@ -28,11 +31,84 @@ import generate_pages
 import results_parser
 from structure import sorted_categories, sorted_segments
 
+# Per-page furniture of an FSM/ISU export: the "printed:" timestamp line and the
+# "Page N / N" counter. Present on every page, so they never make a page content.
+_PAGE_FOOTER = re.compile(r'^\s*printed:\s|^\s*Page\s+\d+\s*/\s*\d+\s*$')
 
-def _append_pdf_bytes(writer: PdfWriter, pdf_bytes: bytes) -> bool:
+
+def _page_text_lines(page) -> list[str]:
+    """The page's non-blank text lines, layout extraction preferred (same reading
+    as results_parser._read_text: layout mode keeps the column geometry, plain
+    extraction is the fallback when a page trips it up)."""
+    try:
+        text = page.extract_text(extraction_mode="layout") or ""
+    except Exception:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            return []
+    return [line for line in (l.strip() for l in text.split("\n")) if line]
+
+
+def _skippable_page_indices(reader: PdfReader) -> set[int]:
+    """Indices of pages in an uploaded document that carry no results.
+
+    FSM exports often spill a trailing page that holds only the repeated title
+    chrome, the "printed:"/"Page N / N" furniture and the Legend block — visually
+    empty, but a real page that would otherwise land in the protocol. A page is
+    boilerplate-only when nothing survives cutting at the `Legend:` line, dropping
+    the page footer lines and dropping the lines this *same document* repeats on two
+    or more pages (its running header/title). Scoping the repeat count per document
+    is what keeps genuinely short one-page sheets — where every line is unique —
+    intact.
+
+    Textless pages are only dropped when they carry no images either, so scans and
+    photo pages survive; an unreadable `page.images` counts as "has images" (keep),
+    since dropping a page is the destructive choice."""
+    pages = [_page_text_lines(page) for page in reader.pages]
+
+    # How many pages of this document each distinct line appears on (a line
+    # repeated within one page still counts once for that page).
+    line_pages: dict[str, int] = {}
+    for lines in pages:
+        for line in set(lines):
+            line_pages[line] = line_pages.get(line, 0) + 1
+
+    skippable = set()
+    for i, lines in enumerate(pages):
+        if not lines:
+            try:
+                has_images = bool(reader.pages[i].images)
+            except Exception:
+                has_images = True     # unreadable → assume content, keep the page
+            if not has_images:
+                skippable.add(i)
+            continue
+
+        content = []
+        for line in lines:
+            if line.lower().startswith("legend:"):
+                break                 # the legend block ends the page's content
+            if _PAGE_FOOTER.match(line):
+                continue
+            if line_pages.get(line, 0) >= 2:
+                continue              # running header/title of this document
+            content.append(line)
+        if not content:
+            skippable.add(i)
+    return skippable
+
+
+def _append_pdf_bytes(writer: PdfWriter, pdf_bytes: bytes, skip_empty: bool = False) -> bool:
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
-        for page in reader.pages:
+        skip = _skippable_page_indices(reader) if skip_empty else set()
+        if skip:
+            logging.info("Skipped empty page(s) "
+                         f"{', '.join(str(i + 1) for i in sorted(skip))} of an uploaded PDF")
+        for i, page in enumerate(reader.pages):
+            if i in skip:
+                continue
             writer.add_page(page)
         return True
     except Exception as e:
@@ -45,7 +121,8 @@ def _file_kind(structure: dict, file_id: str) -> str:
 
 
 def _append_file(writer: PdfWriter, structure: dict, file_id, get_file_bytes) -> bool:
-    """Append an uploaded file (PDF inserted as-is, image wrapped to a page)."""
+    """Append an uploaded file (PDF inserted as-is bar its empty boilerplate pages,
+    image wrapped to a page)."""
     if not file_id:
         return False
     data = get_file_bytes(file_id)
@@ -55,8 +132,9 @@ def _append_file(writer: PdfWriter, structure: dict, file_id, get_file_bytes) ->
     kind = _file_kind(structure, file_id)
     if kind == "image":
         return _append_pdf_bytes(writer, generate_pages.image_fullpage(data))
-    # default: treat as PDF
-    return _append_pdf_bytes(writer, data)
+    # default: treat as PDF — uploaded exports are the ones with trailing
+    # legend-only/blank pages to drop (generated pages are never filtered)
+    return _append_pdf_bytes(writer, data, skip_empty=True)
 
 
 def _photo_bytes(structure: dict, file_id, get_file_bytes):
