@@ -742,6 +742,20 @@ def _split_medallist(entry):
     return entry, ""
 
 
+def split_couple_name(name):
+    """An ice-dance/pair name broken over two rows at the first "/": `["A /", "B"]`.
+
+    The separator stays at the end of the first row, the way the results sheet
+    reads. `[name]` when there is nothing to break on — a single skater, a team, or
+    a lone "/" with one of the two sides missing."""
+    text = (name or "").strip()
+    first, sep, second = text.partition("/")
+    first, second = first.strip(), second.strip()
+    if not sep or not first or not second:
+        return [text]
+    return [f"{first} /", second]
+
+
 def draw_podium(c, *, category_name="", photo_bytes=None, entries=None):
     """Render the branded podium body onto canvas `c`."""
     _register_fonts()
@@ -812,12 +826,22 @@ def draw_podium(c, *, category_name="", photo_bytes=None, entries=None):
             name_bottom_px = club_top_px - 3
         else:
             name_bottom_px = club_bottom_px
-        name_top_px = name_bottom_px - name_fs * 1.2
-        fs = name_fs * SX
+        # One row while the name fits; a couple that doesn't breaks at its "/" and
+        # both rows are then shrunk to the column. The name block grows *upwards*,
+        # so the club line and the pedestal stay put and the medallion rides along.
         label = name or "—"
-        while fs > 8 and _str_w(label, name_font, fs) > (col_w - 4) * SX:
-            fs -= 0.5
-        _text_center(c, cx, name_top_px * SY, label, name_font, fs, INK)
+        fs = name_fs * SX
+        name_w = (col_w - 4) * SX
+        lines = [label]
+        if _str_w(label, name_font, fs) > name_w:
+            lines = split_couple_name(label)
+            while fs > 8 and max(_str_w(l, name_font, fs) for l in lines) > name_w:
+                fs -= 0.5
+        line_h_px = name_fs * 1.2
+        name_top_px = name_bottom_px - line_h_px * len(lines)
+        for i, line in enumerate(lines):
+            _text_center(c, cx, (name_top_px + i * line_h_px) * SY,
+                         line, name_font, fs, INK)
 
         # Rank medallion above the name.
         circ_top_px = (name_top_px - 9) - circ_d

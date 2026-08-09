@@ -52,6 +52,35 @@ def test_missing_placements_come_back_empty(monkeypatch):
     assert rp.parse_top_three(b"pdf") == ["BHK - Blue Herons", "", "NLK - Northern Lights"]
 
 
+COUPLES_SHEET = """
+                            Juniorit Ice Dance - Total Results
+
+ Pl.  Name                                              Club   Total   SD    FD
+   1Iris LAHTI / Oskari LIEDENPOHJA                      HL   113.03   1     1
+   2Millie COLLING / Emma Aino Elina AALTO               HL    98.40   2     2
+"""
+
+
+def test_a_couple_row_keeps_the_slash_between_the_two_names(monkeypatch):
+    _stub(monkeypatch, COUPLES_SHEET)
+    assert rp.parse_result_rows(b"pdf") == [
+        {"rank": 1, "name": "Iris LAHTI / Oskari LIEDENPOHJA", "club": "HL"},
+        {"rank": 2, "name": "Millie COLLING / Emma Aino Elina AALTO", "club": "HL"},
+    ]
+
+
+def test_parse_top_three_keeps_the_couple_separator(monkeypatch):
+    _stub(monkeypatch, COUPLES_SHEET)
+    assert rp.parse_top_three(b"pdf")[0] == "HL - Iris LAHTI / Oskari LIEDENPOHJA"
+
+
+def test_a_placeholder_segment_rank_is_still_dropped(monkeypatch):
+    # The lone "-"/":" stand-ins for a missing rank are scores, not name parts.
+    _stub(monkeypatch, "   1Iris LAHTI / Oskari LIEDENPOHJA   HL   113.03   -   -\n")
+    assert rp.parse_result_rows(b"pdf") == [
+        {"rank": 1, "name": "Iris LAHTI / Oskari LIEDENPOHJA", "club": "HL"}]
+
+
 def test_a_row_without_a_club_is_all_name(monkeypatch):
     _stub(monkeypatch, "  1 Loners   58.20  1\n")
     assert rp.parse_result_rows(b"pdf") == [{"rank": 1, "name": "Loners", "club": ""}]
