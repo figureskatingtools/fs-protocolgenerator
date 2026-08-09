@@ -39,6 +39,11 @@ def _resolve(comp_id):
     return entity, entity.get("FolderPath", entity["RowKey"])
 
 
+def _truthy(value) -> bool:
+    """A boolean that may arrive as a query-param string or as real JSON."""
+    return value is True or (isinstance(value, str) and value.strip().lower() in ("1", "true"))
+
+
 def _kind_for(filename: str) -> str:
     lower = filename.lower()
     if lower.endswith(".pdf"):
@@ -578,6 +583,61 @@ def save_event_settings(req: func.HttpRequest) -> func.HttpResponse:
 
 # ── files: upload / fetch / assign / delete ───────────────────────────────────
 
+def _register_upload(structure, folder_path, filename, body, params):
+    """Store an uploaded file's bytes, register it in the structure and — when
+    the caller named a slot — assign it there straight away. Returns
+    (file_id, meta); persisting the structure is the caller's job.
+
+    `params` is a plain dict of the request's query params, so the browser
+    upload and the competition-pool import describe a target identically:
+    `slotKind` (+ `categoryId`/`segmentId`/`teamId`/`role`) and `autoAssigned`.
+    A target the structure does not have (a stale category id) leaves the file
+    in the tray rather than failing the upload."""
+    file_id = st.new_id("file")
+    blob_path = f"{folder_path}/uploads/{file_id}_{filename}"
+    container = sh.get_container_client()
+    container.upload_blob(blob_path, body, overwrite=True)
+
+    meta = {
+        "filename": filename,
+        "kind": _kind_for(filename),
+        "size": len(body),
+        "uploadedAt": f"{datetime.utcnow().isoformat()}Z",
+        "blob": blob_path,
+    }
+    structure.setdefault("files", {})[file_id] = meta
+
+    # Optional immediate slot assignment from query params.
+    slot_kind = params.get('slotKind')
+    if slot_kind:
+        target = {"kind": slot_kind}
+        for p in ("categoryId", "segmentId", "teamId", "role"):
+            if params.get(p):
+                target[p] = params.get(p)
+        try:
+            st.assign_file(structure, target, file_id)
+            if slot_kind == "totalResults":
+                cat = st.find_category(structure, target.get("categoryId"))
+                if cat:
+                    _fill_podium_from_results(structure, cat)
+                _rematch_after_results(structure, folder_path)
+            elif slot_kind == "segment" and target.get("role") == "results":
+                cat = st.find_category(structure, target.get("categoryId"))
+                seg = st.find_segment(cat, target.get("segmentId")) if cat else None
+                _fill_segment_count_from_results(structure, seg)
+            elif slot_kind == "categoryTitle":
+                cat = st.find_category(structure, target.get("categoryId"))
+                st.apply_title_discipline(cat, filename)
+            # Tag only a placement that actually happened: a file that falls
+            # back to the tray (the except below) is nothing to confirm.
+            if _truthy(params.get('autoAssigned')):
+                meta["autoAssigned"] = True
+        except KeyError as ke:
+            logging.warning(f"Upload assign failed: {ke}")
+
+    return file_id, meta
+
+
 @app.route(route="upload_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def upload_file(req: func.HttpRequest) -> func.HttpResponse:
     if not _require_user(req):
@@ -603,49 +663,90 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         if not entity:
             return func.HttpResponse("Competition not found", status_code=404)
         structure = sh.read_structure(folder_path)
-
-        file_id = st.new_id("file")
-        blob_path = f"{folder_path}/uploads/{file_id}_{filename}"
-        container = sh.get_container_client()
-        container.upload_blob(blob_path, body, overwrite=True)
-
-        structure.setdefault("files", {})[file_id] = {
-            "filename": filename,
-            "kind": kind,
-            "size": len(body),
-            "uploadedAt": f"{datetime.utcnow().isoformat()}Z",
-            "blob": blob_path,
-        }
-
-        # Optional immediate slot assignment from query params.
-        slot_kind = req.params.get('slotKind')
-        if slot_kind:
-            target = {"kind": slot_kind}
-            for p in ("categoryId", "segmentId", "teamId", "role"):
-                if req.params.get(p):
-                    target[p] = req.params.get(p)
-            try:
-                st.assign_file(structure, target, file_id)
-                if slot_kind == "totalResults":
-                    cat = st.find_category(structure, target.get("categoryId"))
-                    if cat:
-                        _fill_podium_from_results(structure, cat)
-                    _rematch_after_results(structure, folder_path)
-                elif slot_kind == "segment" and target.get("role") == "results":
-                    cat = st.find_category(structure, target.get("categoryId"))
-                    seg = st.find_segment(cat, target.get("segmentId")) if cat else None
-                    _fill_segment_count_from_results(structure, seg)
-                elif slot_kind == "categoryTitle":
-                    cat = st.find_category(structure, target.get("categoryId"))
-                    st.apply_title_discipline(cat, filename)
-            except KeyError as ke:
-                logging.warning(f"Upload assign failed: {ke}")
-
+        file_id, meta = _register_upload(structure, folder_path, filename, body, dict(req.params))
         sh.write_structure(folder_path, structure)
-        return sh.json_response({"fileId": file_id, "file": structure["files"][file_id]})
+        return sh.json_response({"fileId": file_id, "file": meta})
     except Exception as e:
         logging.error(f"Error uploading file: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
+
+
+@app.route(route="import_platform_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
+    """Copy a file out of the platform's shared competition file pool into this
+    competition, registering it exactly like a browser upload.
+
+    The pool folder is derived server-side from the competition's bound
+    PlatformId — the client only names a file, never a path or a GUID. Errors
+    carry a machine-readable code so the frontend can fall back to a direct
+    upload when the feature is off or the competition is unbound."""
+    if not _require_user(req):
+        return func.HttpResponse("Unauthorized", status_code=401)
+    comp_id = req.params.get('competition')
+    name = req.params.get('name')
+    if not comp_id or not name:
+        return sh.json_response(
+            {"error": "missing_parameter", "message": "Missing competition or name"}, 400)
+    filename = os.path.basename(name)
+    if _kind_for(filename) == "other":
+        return sh.json_response(
+            {"error": "unsupported_type",
+             "message": "Unsupported file type (PDF, image or XML only)"}, 400)
+
+    try:
+        entity, folder_path = _resolve(comp_id)
+        if not entity:
+            return sh.json_response(
+                {"error": "competition_not_found", "message": "Competition not found"}, 404)
+        platform_id = entity.get("PlatformId")
+        if not platform_id:
+            return sh.json_response(
+                {"error": "not_bound",
+                 "message": "This competition is not linked to a platform competition"}, 409)
+        try:
+            container = sh.get_platform_container_client()
+        except Exception as e:
+            logging.error(f"Platform pool client creation failed: {e}")
+            return sh.json_response(
+                {"error": "platform_unavailable",
+                 "message": "Could not reach the competition file pool"}, 502)
+        if container is None:
+            return sh.json_response(
+                {"error": "platform_not_configured",
+                 "message": "The shared competition file pool is not configured"}, 503)
+
+        pool_path = f"{platform_id}/uploads/{filename}"
+        try:
+            blob = container.get_blob_client(pool_path)
+            if not blob.exists():
+                return sh.json_response(
+                    {"error": "pool_file_not_found",
+                     "message": "File not found in the competition files"}, 404)
+            body = blob.download_blob().readall()
+        except ResourceNotFoundError:
+            return sh.json_response(
+                {"error": "pool_file_not_found",
+                 "message": "File not found in the competition files"}, 404)
+        except Exception as e:
+            logging.error(f"Platform pool read failed for {pool_path}: {e}")
+            return sh.json_response(
+                {"error": "platform_unavailable",
+                 "message": "The shared competition files are unavailable"}, 502)
+
+        if len(body) > sh.MAX_UPLOAD_SIZE:
+            return sh.json_response(
+                {"error": "file_too_large",
+                 "message": f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB)."}, 413)
+
+        structure = sh.read_structure(folder_path)
+        file_id, meta = _register_upload(structure, folder_path, filename, body, dict(req.params))
+        # Which pool file this copy came from, so the UI can mark it imported.
+        meta["poolName"] = filename
+        sh.write_structure(folder_path, structure)
+        return sh.json_response({"fileId": file_id, "file": meta})
+    except Exception as e:
+        logging.error(f"Error importing platform file: {e}")
+        return sh.json_response({"error": "internal_error", "message": "Internal server error"}, 500)
 
 
 @app.route(route="get_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
@@ -725,6 +826,16 @@ def assign_file(req: func.HttpRequest) -> func.HttpResponse:
             cat = st.find_category(structure, target.get("categoryId"))
             meta = structure.get("files", {}).get(file_id) or {}
             st.apply_title_discipline(cat, meta.get("filename"))
+        if file_id:
+            # Moving a file by hand *is* the confirmation an auto-placement was
+            # waiting for — including a move back to the tray. A caller that is
+            # itself placing files automatically says so in the body.
+            meta = structure.get("files", {}).get(file_id)
+            if meta is not None:
+                if _truthy(body.get("autoAssigned")):
+                    meta["autoAssigned"] = True
+                else:
+                    meta.pop("autoAssigned", None)
         sh.write_structure(folder_path, structure)
         return sh.json_response({"ok": True})
     except KeyError as ke:
@@ -1163,7 +1274,7 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
     Body: {id, op, ...}. Ops:
       add_category {name, discipline}
       remove_category {categoryId}
-      set_category {categoryId, name?, discipline?, order?}
+      set_category {categoryId, name?, discipline?, order?, code?}
       add_segment {categoryId, name}
       remove_segment {categoryId, segmentId}
       set_segment {categoryId, segmentId, name?, order?, unitCount?}
@@ -1207,6 +1318,8 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
             for k in ("name", "discipline", "order"):
                 if k in body:
                     c[k] = body[k]
+            if "code" in body:
+                c["code"] = str(body["code"] or "").strip()[:32]
         elif op == "add_segment":
             c = cat()
             c["segments"].append(st.new_segment(body.get("name", "Segment"), len(c["segments"])))

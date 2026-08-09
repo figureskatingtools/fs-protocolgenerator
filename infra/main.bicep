@@ -17,6 +17,12 @@ param resourceGroupName string = ''
 @secure()
 param proxySharedSecret string = ''
 
+// The platform's storage account name (`stfsplat*`, from the figureskatingtools-site
+// deployment) whose `competition-data` container holds the shared competition file
+// pool. Empty = this app's import_platform_file route stays off.
+param platformStorageAccountName string = ''
+param platformDataContainerName string = 'competition-data'
+
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
   name: resourceGroupName
   location: location
@@ -43,6 +49,8 @@ module function 'modules/function.bicep' = {
     storageAccountName: storage.outputs.storageAccountName
     deploymentContainerUrl: 'https://${storage.outputs.storageAccountName}.blob.${environment().suffixes.storage}/app-package'
     proxySharedSecret: proxySharedSecret
+    platformStorageAccountName: platformStorageAccountName
+    platformDataContainerName: platformDataContainerName
   }
 }
 
