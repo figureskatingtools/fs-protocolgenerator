@@ -117,11 +117,38 @@ optional `dates`/`venue` seed `event.dates` (dd.MM.yyyy, marked
 `event.datesAuto` so a schedule parse may refine it until the user saves the
 event form) and `event.rink` — create seeds, hit/adopt backfill empty fields),
 `get_competition_details`,
-`save_event_settings`, `upload_file`, `get_file` (streams bytes for previews),
+`save_event_settings`, `upload_file`, `import_platform_file` (copies a file out
+of the platform's shared competition file pool — see below), `get_file`
+(streams bytes for previews),
 `assign_file`, `delete_file`, `parse_schedule`, `import_rosters`,
 `upload_fallback_photos` (bulk fallback-picture ZIP), `edit_structure`
 (manual add/remove/set ops), `generate_protocol`, plus the daily auto-deletion
 timer.
+
+### Shared competition file pool + auto-assignment
+
+`upload_file` and `import_platform_file` share `_register_upload(structure,
+folder_path, filename, body, params)` — file-id mint, blob write, `files{}`
+entry and the optional slot assignment (`slotKind` + `categoryId`/`segmentId`/
+`teamId`/`role`, with the podium / unit-count / title-discipline side effects).
+A target the structure no longer has leaves the file in the tray instead of
+failing the request.
+
+`POST import_platform_file?competition=&name=` copies a file the platform holds
+in `competition-data/<PlatformId>/uploads/<name>` (read-only, via
+`sh.get_platform_container_client()` / `PLATFORM_STORAGE_ACCOUNT` +
+`PLATFORM_DATA_CONTAINER`) into this competition, stamping `meta.poolName`. The
+pool folder comes from the competition's bound `PlatformId`, never from the
+client. JSON errors carry a code so the frontend can fall back to a direct
+upload: 409 `not_bound`, 503 `platform_not_configured`, 404
+`pool_file_not_found`, 502 `platform_unavailable`, 413 `file_too_large`, 400
+`unsupported_type`/`missing_parameter`.
+
+`autoAssigned` marks a placement made by filename recognition rather than by a
+human: `&autoAssigned=1` on either upload route tags the file **only** when the
+slot assignment actually succeeded, and any later manual `assign_file` (including
+a move back to the tray) drops the tag — unless that call declares itself
+automatic with body `"autoAssigned": true`.
 
 ## Parsers (calibration pending)
 
@@ -211,7 +238,9 @@ leftovers from the standalone-Web-App era and are no longer used.
 
 Required GitHub environment config: secrets `AZURE_CLIENT_ID`,
 `PROXY_SHARED_SECRET`; vars `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
-`LOCATION`, `RESOURCE_GROUP_NAME`. (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and
+`LOCATION`, `RESOURCE_GROUP_NAME`, plus optional `PLATFORM_STORAGE_ACCOUNT` (the
+site repo's `stfsplat*` account for this environment — unset leaves
+`import_platform_file` off). (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and
 `CUSTOM_DOMAIN` are gone.)
 
 ## Cross-repo handoff (figureskatingtools-site)

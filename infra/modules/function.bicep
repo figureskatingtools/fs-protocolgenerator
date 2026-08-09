@@ -11,6 +11,12 @@ param deploymentContainerUrl string
 @secure()
 param proxySharedSecret string = ''
 
+// The platform's storage account (`stfsplat*`, owned by the figureskatingtools-site
+// repo) holding the shared per-competition file pool this app imports from with
+// its Blob Data Reader grant. Empty = the import feature is off.
+param platformStorageAccountName string = ''
+param platformDataContainerName string = 'competition-data'
+
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: appServicePlanName
   location: location
@@ -65,6 +71,14 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'PROXY_SHARED_SECRET'
           value: proxySharedSecret
+        }
+        {
+          name: 'PLATFORM_STORAGE_ACCOUNT'
+          value: platformStorageAccountName
+        }
+        {
+          name: 'PLATFORM_DATA_CONTAINER'
+          value: platformDataContainerName
         }
       ]
     }

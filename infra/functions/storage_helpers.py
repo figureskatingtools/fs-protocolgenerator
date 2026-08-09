@@ -22,6 +22,10 @@ from azure.data.tables import TableClient, UpdateMode
 # Blob container holding every competition folder.
 CONTAINER_NAME = "fs-protocolgenerator"
 
+# Platform-owned container holding the shared per-competition file pool. Read
+# only, and only when PLATFORM_STORAGE_ACCOUNT names the platform's account.
+PLATFORM_DATA_CONTAINER = "competition-data"
+
 # Maximum single-file upload size: 50 MB (result-PDF sets and photos can be large).
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 
@@ -127,6 +131,27 @@ def get_container_client():
     if not bsc:
         return None
     return bsc.get_container_client(CONTAINER_NAME)
+
+
+def get_platform_container_client():
+    """Container client for the platform's shared competition file pool
+    (`competition-data/<platform-guid>/uploads/...`), or None when
+    PLATFORM_STORAGE_ACCOUNT is unset — the import feature is then cleanly off.
+
+    This app holds Storage Blob Data *Reader* on that account (granted by the
+    site repo's shared-data-access.bicep), so the credential is the same
+    Managed Identity used for our own storage — only the account differs."""
+    account_name = os.environ.get("PLATFORM_STORAGE_ACCOUNT")
+    if not account_name:
+        return None
+    try:
+        container_name = os.environ.get("PLATFORM_DATA_CONTAINER") or PLATFORM_DATA_CONTAINER
+        account_url = f"https://{account_name}.blob.core.windows.net"
+        bsc = BlobServiceClient(account_url=account_url, credential=DefaultAzureCredential())
+        return bsc.get_container_client(container_name)
+    except Exception as e:
+        logging.error(f"Failed to create platform blob client: {e}")
+        return None
 
 
 def get_table_client(table_name="generatedprotocols"):
