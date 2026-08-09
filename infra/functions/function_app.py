@@ -703,7 +703,13 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
             return sh.json_response(
                 {"error": "not_bound",
                  "message": "This competition is not linked to a platform competition"}, 409)
-        container = sh.get_platform_container_client()
+        try:
+            container = sh.get_platform_container_client()
+        except Exception as e:
+            logging.error(f"Platform pool client creation failed: {e}")
+            return sh.json_response(
+                {"error": "platform_unavailable",
+                 "message": "Could not reach the competition file pool"}, 502)
         if container is None:
             return sh.json_response(
                 {"error": "platform_not_configured",

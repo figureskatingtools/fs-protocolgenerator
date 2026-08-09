@@ -144,14 +144,12 @@ def get_platform_container_client():
     account_name = os.environ.get("PLATFORM_STORAGE_ACCOUNT")
     if not account_name:
         return None
-    try:
-        container_name = os.environ.get("PLATFORM_DATA_CONTAINER") or PLATFORM_DATA_CONTAINER
-        account_url = f"https://{account_name}.blob.core.windows.net"
-        bsc = BlobServiceClient(account_url=account_url, credential=DefaultAzureCredential())
-        return bsc.get_container_client(container_name)
-    except Exception as e:
-        logging.error(f"Failed to create platform blob client: {e}")
-        return None
+    # Creation failures propagate: callers map them to "platform unavailable"
+    # (502), which is distinct from the deliberate feature-off None (503).
+    container_name = os.environ.get("PLATFORM_DATA_CONTAINER") or PLATFORM_DATA_CONTAINER
+    account_url = f"https://{account_name}.blob.core.windows.net"
+    bsc = BlobServiceClient(account_url=account_url, credential=DefaultAzureCredential())
+    return bsc.get_container_client(container_name)
 
 
 def get_table_client(table_name="generatedprotocols"):

@@ -144,6 +144,17 @@ def test_a_storage_failure_is_a_bad_gateway(comp, monkeypatch):
     error(import_file(), 502, "platform_unavailable")
 
 
+def test_a_client_creation_failure_is_unavailable_not_unconfigured(comp, monkeypatch):
+    """A transient failure while building the pool client must not masquerade
+    as the deliberate feature-off 503 — the frontend treats 503 as "stop
+    trying the pool", while 502 keeps the pool in play."""
+    def boom():
+        raise RuntimeError("credential blew up")
+
+    monkeypatch.setattr(sh, "get_platform_container_client", boom)
+    error(import_file(), 502, "platform_unavailable")
+
+
 def test_a_blob_that_vanishes_between_check_and_read_is_a_404(comp, monkeypatch):
     class Vanishing:
         def get_blob_client(self, path):
