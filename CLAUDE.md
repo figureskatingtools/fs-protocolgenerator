@@ -120,7 +120,8 @@ event form) and `event.rink` — create seeds, hit/adopt backfill empty fields),
 `save_event_settings`, `upload_file`, `import_platform_file` (copies a file out
 of the platform's shared competition file pool — see below), `get_file`
 (streams bytes for previews),
-`assign_file`, `delete_file`, `parse_schedule`, `import_rosters`,
+`assign_file`, `delete_file`, `parse_schedule` (body upload *or* a pool
+reference, see below), `import_rosters`,
 `upload_fallback_photos` (bulk fallback-picture ZIP), `edit_structure`
 (manual add/remove/set ops), `generate_protocol`, plus the daily auto-deletion
 timer.
@@ -145,6 +146,19 @@ the frontend can fall back to a direct upload: 409 `not_bound`, 503
 `platform_not_configured`, 404 `pool_file_not_found`, 502
 `platform_unavailable`, 413 `file_too_large`, 400
 `unsupported_type`/`invalid_source`/`missing_parameter`.
+
+`POST parse_schedule?competition=&poolName=[&source=upload|fsm][&force=true]`
+with an **empty body** parses the schedule straight out of that same pool
+(`DT_SCHEDULE_FSK….xml` or `…_CompetitionSchedule.pdf`) instead of from an
+uploaded body — the bytes come from the shared `_read_pool_file(entity,
+filename, source)` helper, so the binding check, folder resolution, size cap and
+error codes are literally `import_platform_file`'s (409 `not_bound`, 503, 502,
+404, plus a plain-text 400 `invalid_source`). Everything after that is the
+upload path unchanged (409 unless `force`, `schedule.xml|pdf` kept,
+`parse_schedule_data`, event auto-fill); the success JSON adds
+`"source": {"poolName", "source"}`. The frontend uses this automatically: a
+bound competition with no categories and a schedule in the pool parses it on
+open, and the Schedule section offers a "Use it" / "Replace from it" button.
 
 `autoAssigned` marks a placement made by filename recognition rather than by a
 human: `&autoAssigned=1` on either upload route tags the file **only** when the
