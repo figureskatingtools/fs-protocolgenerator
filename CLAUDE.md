@@ -174,7 +174,9 @@ automatic with body `"autoAssigned": true`.
     `VenueName` (auto-fills `event.rink`/`event.dates`), and an ISU `Unit Code`
     used to group units into categories (so Advanced Novice L1 `…ADVNOV----` and
     L2 `…ADVNOV--01` stay distinct while a category's Short Program + Free Skating
-    merge). The category `code` is stored for future roster auto-linking.
+    merge). The category `code` (`unit_code[:22]`) is stored and is what the
+    frontend's filename auto-assignment matches FSM's exported PDFs against —
+    their names start with the very same RSC — so it must stay verbatim.
   - **Schedule PDF (fallback)** — calibrated against the Finnish "COMPETITION
     SCHEDULE" export: glued start/finish times, 2-space category|segment columns,
     multi-day segment merge, and synchro detected from the document title
