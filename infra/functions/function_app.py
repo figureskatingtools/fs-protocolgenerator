@@ -671,13 +671,67 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
+def _read_pool_file(entity, filename, source):
+    """Read one file out of the platform's shared competition file pool.
+
+    `(bytes, None)` on success, `(None, response)` with the route-ready error
+    otherwise. The folder is derived from the competition row's bound
+    `PlatformId` plus the fixed `uploads`/`fsm` folder name, never from the
+    client; `filename` must already be a basename and `source` already
+    validated by the caller (the two routes word that 400 differently).
+    Shared by `import_platform_file` and `parse_schedule`."""
+    platform_id = entity.get("PlatformId")
+    if not platform_id:
+        return None, sh.json_response(
+            {"error": "not_bound",
+             "message": "This competition is not linked to a platform competition"}, 409)
+    try:
+        container = sh.get_platform_container_client()
+    except Exception as e:
+        logging.error(f"Platform pool client creation failed: {e}")
+        return None, sh.json_response(
+            {"error": "platform_unavailable",
+             "message": "Could not reach the competition file pool"}, 502)
+    if container is None:
+        return None, sh.json_response(
+            {"error": "platform_not_configured",
+             "message": "The shared competition file pool is not configured"}, 503)
+
+    pool_path = f"{platform_id}/{'fsm' if source == 'fsm' else 'uploads'}/{filename}"
+    try:
+        blob = container.get_blob_client(pool_path)
+        if not blob.exists():
+            return None, sh.json_response(
+                {"error": "pool_file_not_found",
+                 "message": "File not found in the competition files"}, 404)
+        body = blob.download_blob().readall()
+    except ResourceNotFoundError:
+        return None, sh.json_response(
+            {"error": "pool_file_not_found",
+             "message": "File not found in the competition files"}, 404)
+    except Exception as e:
+        logging.error(f"Platform pool read failed for {pool_path}: {e}")
+        return None, sh.json_response(
+            {"error": "platform_unavailable",
+             "message": "The shared competition files are unavailable"}, 502)
+
+    if len(body) > sh.MAX_UPLOAD_SIZE:
+        return None, sh.json_response(
+            {"error": "file_too_large",
+             "message": f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB)."}, 413)
+    return body, None
+
+
 @app.route(route="import_platform_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     """Copy a file out of the platform's shared competition file pool into this
     competition, registering it exactly like a browser upload.
 
     The pool folder is derived server-side from the competition's bound
-    PlatformId — the client only names a file, never a path or a GUID. Errors
+    PlatformId — the client only names a file, never a path or a GUID. The
+    optional `source` query param picks which of the pool's two folders to read:
+    `upload` (the default, files people uploaded) or `fsm` (files the HOVTP
+    listener pushed); anything else is a 400 `invalid_source`. Errors
     carry a machine-readable code so the frontend can fall back to a direct
     upload when the feature is off or the competition is unbound."""
     if not _require_user(req):
@@ -692,51 +746,20 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
         return sh.json_response(
             {"error": "unsupported_type",
              "message": "Unsupported file type (PDF, image or XML only)"}, 400)
+    # The pool has two folders; the client picks one by name, never by path.
+    source = req.params.get('source') or 'upload'
+    if source not in ('upload', 'fsm'):
+        return sh.json_response(
+            {"error": "invalid_source", "message": "source must be 'upload' or 'fsm'"}, 400)
 
     try:
         entity, folder_path = _resolve(comp_id)
         if not entity:
             return sh.json_response(
                 {"error": "competition_not_found", "message": "Competition not found"}, 404)
-        platform_id = entity.get("PlatformId")
-        if not platform_id:
-            return sh.json_response(
-                {"error": "not_bound",
-                 "message": "This competition is not linked to a platform competition"}, 409)
-        try:
-            container = sh.get_platform_container_client()
-        except Exception as e:
-            logging.error(f"Platform pool client creation failed: {e}")
-            return sh.json_response(
-                {"error": "platform_unavailable",
-                 "message": "Could not reach the competition file pool"}, 502)
-        if container is None:
-            return sh.json_response(
-                {"error": "platform_not_configured",
-                 "message": "The shared competition file pool is not configured"}, 503)
-
-        pool_path = f"{platform_id}/uploads/{filename}"
-        try:
-            blob = container.get_blob_client(pool_path)
-            if not blob.exists():
-                return sh.json_response(
-                    {"error": "pool_file_not_found",
-                     "message": "File not found in the competition files"}, 404)
-            body = blob.download_blob().readall()
-        except ResourceNotFoundError:
-            return sh.json_response(
-                {"error": "pool_file_not_found",
-                 "message": "File not found in the competition files"}, 404)
-        except Exception as e:
-            logging.error(f"Platform pool read failed for {pool_path}: {e}")
-            return sh.json_response(
-                {"error": "platform_unavailable",
-                 "message": "The shared competition files are unavailable"}, 502)
-
-        if len(body) > sh.MAX_UPLOAD_SIZE:
-            return sh.json_response(
-                {"error": "file_too_large",
-                 "message": f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB)."}, 413)
+        body, err = _read_pool_file(entity, filename, source)
+        if err:
+            return err
 
         structure = sh.read_structure(folder_path)
         file_id, meta = _register_upload(structure, folder_path, filename, body, dict(req.params))
@@ -893,7 +916,25 @@ def _apply_schedule_meta(event: dict, meta: dict) -> None:
 
 @app.route(route="parse_schedule", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
-    """Upload + parse the schedule PDF; build the category/segment structure."""
+    """Parse the competition schedule; build the category/segment structure.
+
+    Two ways in, both ending in `parse_schedule_data` (DT_SCHEDULE XML or a
+    schedule PDF, auto-detected):
+
+    * the file as the **request body** — the browser's drop box;
+    * a **pool reference** — `poolName` (+ optional `source=upload|fsm`,
+      default `upload`) with an empty body, when the schedule is already in the
+      platform's shared competition file pool. The bytes are read through
+      `_read_pool_file`, i.e. exactly like `import_platform_file`: the folder
+      comes from the competition's bound PlatformId (409 `not_bound` without
+      one), the name is reduced to a basename, and the pool's own failures
+      surface as 503/502/404/413. An unknown `source` is a plain-text 400
+      `invalid_source`.
+
+    Either way an existing category list is only rebuilt with `force=true`
+    (409 otherwise), the source file is kept as `schedule.xml|pdf`, and the
+    parsed rink/dates auto-fill the event. A pool parse echoes back which pool
+    file it used in `source`."""
     if not _require_user(req):
         return func.HttpResponse("Unauthorized", status_code=401)
     comp_id = req.params.get('competition')
@@ -901,8 +942,13 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id:
         return func.HttpResponse("Missing competition", status_code=400)
     body = req.get_body()
-    if not body:
+    pool_name = req.params.get('poolName')
+    source = req.params.get('source') or 'upload'
+    if not body and not pool_name:
         return func.HttpResponse("Missing schedule PDF body", status_code=400)
+    if not body and source not in ('upload', 'fsm'):
+        return func.HttpResponse("invalid_source: source must be 'upload' or 'fsm'",
+                                 status_code=400)
     try:
         entity, folder_path = _resolve(comp_id)
         if not entity:
@@ -913,6 +959,15 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(
                 "Competition already has categories. Re-parse with force=true to rebuild.",
                 status_code=409)
+
+        # No body = the schedule already sits in the shared competition file pool.
+        pool_ref = None
+        if not body:
+            filename = os.path.basename(pool_name)
+            body, err = _read_pool_file(entity, filename, source)
+            if err:
+                return err
+            pool_ref = {"poolName": filename, "source": source}
 
         # Keep the source schedule (PDF or DT_SCHEDULE XML) for re-parsing.
         is_xml = body[:2000].lstrip()[:5] == b"<?xml" or b"OdfBody" in body[:2000]
@@ -926,11 +981,14 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
         # Auto-fill event fields the schedule gives us, without clobbering user input.
         _apply_schedule_meta(structure.setdefault("event", {}), meta)
         sh.write_structure(folder_path, structure)
-        return sh.json_response({
+        result = {
             "rows": len(rows),
             "categories": len(structure["categories"]),
             "structure": structure,
-        })
+        }
+        if pool_ref:
+            result["source"] = pool_ref
+        return sh.json_response(result)
     except Exception as e:
         logging.error(f"Error parsing schedule: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
