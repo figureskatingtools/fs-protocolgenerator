@@ -677,7 +677,10 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     competition, registering it exactly like a browser upload.
 
     The pool folder is derived server-side from the competition's bound
-    PlatformId — the client only names a file, never a path or a GUID. Errors
+    PlatformId — the client only names a file, never a path or a GUID. The
+    optional `source` query param picks which of the pool's two folders to read:
+    `upload` (the default, files people uploaded) or `fsm` (files the HOVTP
+    listener pushed); anything else is a 400 `invalid_source`. Errors
     carry a machine-readable code so the frontend can fall back to a direct
     upload when the feature is off or the competition is unbound."""
     if not _require_user(req):
@@ -692,6 +695,11 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
         return sh.json_response(
             {"error": "unsupported_type",
              "message": "Unsupported file type (PDF, image or XML only)"}, 400)
+    # The pool has two folders; the client picks one by name, never by path.
+    source = req.params.get('source') or 'upload'
+    if source not in ('upload', 'fsm'):
+        return sh.json_response(
+            {"error": "invalid_source", "message": "source must be 'upload' or 'fsm'"}, 400)
 
     try:
         entity, folder_path = _resolve(comp_id)
@@ -715,7 +723,7 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
                 {"error": "platform_not_configured",
                  "message": "The shared competition file pool is not configured"}, 503)
 
-        pool_path = f"{platform_id}/uploads/{filename}"
+        pool_path = f"{platform_id}/{'fsm' if source == 'fsm' else 'uploads'}/{filename}"
         try:
             blob = container.get_blob_client(pool_path)
             if not blob.exists():

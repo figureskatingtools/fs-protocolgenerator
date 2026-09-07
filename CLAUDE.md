@@ -134,15 +134,17 @@ entry and the optional slot assignment (`slotKind` + `categoryId`/`segmentId`/
 A target the structure no longer has leaves the file in the tray instead of
 failing the request.
 
-`POST import_platform_file?competition=&name=` copies a file the platform holds
-in `competition-data/<PlatformId>/uploads/<name>` (read-only, via
-`sh.get_platform_container_client()` / `PLATFORM_STORAGE_ACCOUNT` +
-`PLATFORM_DATA_CONTAINER`) into this competition, stamping `meta.poolName`. The
-pool folder comes from the competition's bound `PlatformId`, never from the
-client. JSON errors carry a code so the frontend can fall back to a direct
-upload: 409 `not_bound`, 503 `platform_not_configured`, 404
-`pool_file_not_found`, 502 `platform_unavailable`, 413 `file_too_large`, 400
-`unsupported_type`/`missing_parameter`.
+`POST import_platform_file?competition=&name=[&source=upload|fsm]` copies a
+file the platform holds in `competition-data/<PlatformId>/<uploads|fsm>/<name>`
+(read-only, via `sh.get_platform_container_client()` / `PLATFORM_STORAGE_ACCOUNT`
++ `PLATFORM_DATA_CONTAINER`) into this competition, stamping `meta.poolName`.
+`source` defaults to `upload` (what people uploaded); `fsm` is what the HOVTP
+listener pushed. The pool folder comes from the competition's bound `PlatformId`
+plus that fixed folder name, never from the client. JSON errors carry a code so
+the frontend can fall back to a direct upload: 409 `not_bound`, 503
+`platform_not_configured`, 404 `pool_file_not_found`, 502
+`platform_unavailable`, 413 `file_too_large`, 400
+`unsupported_type`/`invalid_source`/`missing_parameter`.
 
 `autoAssigned` marks a placement made by filename recognition rather than by a
 human: `&autoAssigned=1` on either upload route tags the file **only** when the

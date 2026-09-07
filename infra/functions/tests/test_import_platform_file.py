@@ -1,8 +1,10 @@
 """`function_app.import_platform_file` — pulling a file out of the platform's
 shared competition file pool into this tool's competition.
 
-The pool lives in the platform's storage account (`competition-data/<platform
-guid>/uploads/<name>`), which this Function App may only *read*. The route is
+The pool lives in the platform's storage account, in two folders this Function
+App may only *read*: `competition-data/<platform guid>/uploads/<name>` for what
+people uploaded and `.../fsm/<name>` for what the HOVTP listener pushed — the
+`source` query param picks between them. The route is
 the only bridge, so the awkward cases are the interesting ones: the client names
 a file and nothing else (the folder comes from the competition's bound
 PlatformId, so a traversal attempt collapses to a basename), the feature is off
@@ -27,6 +29,7 @@ from conftest import FakeContainerClient
 EMAIL = "organizer@example.com"
 POOL_NAME = "FSKWSINGLES-----------QUAL000100--_SegmentResults.pdf"
 PDF = b"%PDF-1.4 pooled"
+FSM_PDF = b"%PDF-1.4 pushed by the listener"
 
 
 @pytest.fixture
@@ -43,7 +46,8 @@ def comp(storage):
 @pytest.fixture
 def pool(monkeypatch):
     """The platform's competition-data container, holding one file for `p-1`."""
-    fake = FakeContainerClient({f"p-1/uploads/{POOL_NAME}": PDF})
+    fake = FakeContainerClient({f"p-1/uploads/{POOL_NAME}": PDF,
+                                f"p-1/fsm/{POOL_NAME}": FSM_PDF})
     monkeypatch.setattr(sh, "get_platform_container_client", lambda: fake)
     return fake
 
@@ -118,8 +122,29 @@ def test_the_pool_path_is_built_from_the_binding_not_from_the_client(comp, pool)
     assert body["file"]["poolName"] == POOL_NAME
 
 
+def test_the_default_source_is_the_uploads_folder(comp, pool, storage):
+    """No `source` = the folder people upload into, even though the same name
+    also sits in the FSM folder."""
+    body = payload(import_file())
+    assert storage.container.blobs[body["file"]["blob"]] == PDF
+
+
+def test_an_fsm_source_resolves_the_listener_folder(comp, pool, storage):
+    body = payload(import_file(source="fsm"))
+    assert storage.container.blobs[body["file"]["blob"]] == FSM_PDF
+    assert body["file"]["poolName"] == POOL_NAME
+
+
+def test_an_unknown_source_is_rejected(comp, pool):
+    """Only the two folder names the pool actually has — no client-supplied
+    path fragment ever reaches the blob name."""
+    error(import_file(source="../uploads"), 400, "invalid_source")
+    error(import_file(source="archive"), 400, "invalid_source")
+
+
 def test_a_missing_pool_file_is_a_404(comp, pool):
     error(import_file(name="NeverPushed.pdf"), 404, "pool_file_not_found")
+    error(import_file(name="NeverPushed.pdf", source="fsm"), 404, "pool_file_not_found")
 
 
 # ── the feature's off switches ───────────────────────────────────────────────
