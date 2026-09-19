@@ -676,10 +676,13 @@ def _read_pool_file(entity, filename, source):
 
     `(bytes, None)` on success, `(None, response)` with the route-ready error
     otherwise. The folder is derived from the competition row's bound
-    `PlatformId` plus the fixed `uploads`/`fsm` folder name, never from the
-    client; `filename` must already be a basename and `source` already
-    validated by the caller (the two routes word that 400 differently).
-    Shared by `import_platform_file` and `parse_schedule`."""
+    `PlatformId` plus a fixed folder name, never from the client: the `source`
+    query value `upload` selects the `uploads/` folder (what people uploaded)
+    and `fsm` selects `fsm/` (what the HOVTP listener pushed) — note the
+    singular query value against the plural folder. `filename` must already be
+    a basename and `source` already validated by the caller (the two routes
+    word that 400 differently). Shared by `import_platform_file` and
+    `parse_schedule`."""
     platform_id = entity.get("PlatformId")
     if not platform_id:
         return None, sh.json_response(
@@ -945,7 +948,10 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
     pool_name = req.params.get('poolName')
     source = req.params.get('source') or 'upload'
     if not body and not pool_name:
-        return func.HttpResponse("Missing schedule PDF body", status_code=400)
+        return func.HttpResponse(
+            "Missing schedule: send the file (PDF or DT_SCHEDULE XML) as the request "
+            "body, or name one in the competition file pool with poolName.",
+            status_code=400)
     if not body and source not in ('upload', 'fsm'):
         return func.HttpResponse("invalid_source: source must be 'upload' or 'fsm'",
                                  status_code=400)

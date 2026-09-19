@@ -192,7 +192,8 @@ error codes are literally `import_platform_file`'s (409 `not_bound`, 503, 502,
 404, plus a plain-text 400 `invalid_source`). Everything after that is the
 upload path unchanged (409 unless `force`, `schedule.xml|pdf` kept,
 `parse_schedule_data`, event auto-fill); the success JSON adds
-`"source": {"poolName", "source"}`. The frontend uses this automatically: a
+`"source": {"poolName": "<filename>", "source": "upload|fsm"}` (the query value
+`upload` reads the `uploads/` folder, `fsm` reads `fsm/`). The frontend uses this automatically: a
 bound competition with no categories and a schedule in the pool parses it on
 open, and the Schedule section offers a "Use it" / "Replace from it" button.
 
