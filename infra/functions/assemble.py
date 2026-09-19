@@ -29,7 +29,8 @@ from pypdf import PdfReader, PdfWriter
 import branding
 import generate_pages
 import results_parser
-from structure import sorted_categories, sorted_segments
+from structure import (sorted_categories, sorted_segments,
+                       team_name_mode, team_page_enabled, team_text_rows)
 
 # Per-page furniture of an FSM/ISU export: the "printed:" timestamp line and the
 # "Page N / N" counter. Present on every page, so they never make a page content.
@@ -272,11 +273,19 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
         # Synchronized skating: a team-presentation page per team, first.
         if category.get("discipline") == "synchro":
             for team in category.get("teams", []):
+                # Turned off competition-wide or for this team: no page at all —
+                # no photo, no names, no free-text rows. The team still competed,
+                # so the information page's unit counts are deliberately unaffected.
+                if not team_page_enabled(structure, team):
+                    continue
                 # Competition photo first, then the accreditation fallback picture
                 # (imported from the optional ZIP); neither → placeholder box.
                 photo = (_photo_bytes(structure, team.get("photo"), get_file_bytes)
                          or _photo_bytes(structure, team.get("photoFallback"), get_file_bytes))
-                _append_pdf_bytes(writer, generate_pages.synchro_team_page(team, photo, chrome))
+                _append_pdf_bytes(writer, generate_pages.synchro_team_page(
+                    team, photo, chrome,
+                    name_mode=team_name_mode(structure, team),
+                    text_rows=team_text_rows(category, team)))
 
         # Category protocol head page PDF
         _append_file(writer, structure, category.get("titlePdf"), get_file_bytes)

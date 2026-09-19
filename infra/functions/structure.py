@@ -18,6 +18,16 @@ ROLE_KEYS = {
     "judgesDetails": "judgesDetailsPdf",
 }
 
+# How much of a synchro roster the team page prints. "none" keeps the page (photo,
+# team name, free-text rows) but drops the skater list entirely.
+NAME_MODES = ("full", "firstNames", "none")
+
+# Free-text rows a team page may carry ("Free Skating theme: Spies"). Capped so the
+# page layout stays solvable next to a full 32-skater roster.
+MAX_TEAM_TEXT_FIELDS = 12
+TEXT_LABEL_MAX = 60
+TEXT_VALUE_MAX = 120
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex[:6]}"
@@ -44,6 +54,9 @@ def new_structure(comp_id: str, name: str, dates: str, created_by: str, created_
         "header": {"mode": "default", "fileId": None},
         "footer": {"mode": "default", "fileId": None},
         "footerEnabled": True,   # draw the footer band on every page (toggleable)
+        # Synchro team-presentation pages: whether they are produced at all and how
+        # skater names are printed. Each team may override both (see new_team).
+        "teamPages": {"enabled": True, "nameMode": "full"},
         "scheduleParsed": False,
         # fileId -> {"filename", "kind" (pdf|image|xml), "size", "uploadedAt"}
         "files": {},
@@ -93,6 +106,12 @@ def new_team(org: str = "", name: str = "") -> dict:
         # used at generation only when the team has no competition photo.
         "photoFallback": None,
         "members": [],
+        # Team-page overrides; None = inherit the competition-wide teamPages setting.
+        "pageEnabled": None,
+        "nameMode": None,
+        # Free-typed rows printed on the team page:
+        # {"id", "segmentId" (None = team-level), "label", "value"}.
+        "textFields": [],
     }
 
 
@@ -169,6 +188,98 @@ def sorted_categories(structure: dict):
 
 def sorted_segments(category: dict):
     return sorted(category.get("segments", []), key=lambda s: (s.get("order", 0), s.get("name", "")))
+
+
+# ── team pages ────────────────────────────────────────────────────────────────
+#
+# Two settings — create the page at all, and how much of the roster to print —
+# live competition-wide in `teamPages` and may be overridden per team, where None
+# means "inherit". Every read goes through these resolvers, so a metadata.json
+# written before the feature existed resolves to today's behaviour (pages on,
+# full names) without a migration.
+
+def coerce_name_mode(value):
+    """A client-supplied name mode, or None when it is absent/blank/unknown — which
+    the resolvers below read as "inherit"."""
+    return value if value in NAME_MODES else None
+
+
+def team_pages_defaults(structure: dict) -> dict:
+    """The competition-wide team-page settings, filled in for structures written
+    before the setting existed."""
+    tp = structure.get("teamPages") or {}
+    return {
+        "enabled": tp.get("enabled", True) is not False,
+        "nameMode": coerce_name_mode(tp.get("nameMode")) or "full",
+    }
+
+
+def team_page_enabled(structure: dict, team: dict) -> bool:
+    """Whether this team gets a presentation page: its own override when it has one,
+    else the competition default. Only an explicit True/False overrides."""
+    override = (team or {}).get("pageEnabled")
+    if override is None:
+        return team_pages_defaults(structure)["enabled"]
+    return bool(override)
+
+
+def team_name_mode(structure: dict, team: dict) -> str:
+    """'full' | 'firstNames' | 'none' for this team's roster."""
+    return (coerce_name_mode((team or {}).get("nameMode"))
+            or team_pages_defaults(structure)["nameMode"])
+
+
+def team_text_rows(category: dict, team: dict) -> list:
+    """The team's free-text rows in print order: team-level rows first, then one
+    group per segment in segment order, insertion order within a group. A row whose
+    segmentId the category no longer has falls back to the team-level group rather
+    than disappearing. Rows blank on both sides are dropped.
+
+    Each row comes back as {"segment": <segment name or "">, "label", "value"} —
+    plain data, so the page renderer needs no structure vocabulary."""
+    rows = (team or {}).get("textFields") or []
+    names = {s["id"]: s.get("name", "") for s in sorted_segments(category or {})}
+    order = {sid: i + 1 for i, sid in enumerate(names)}   # 0 is reserved for team-level
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or "").strip()
+        value = str(row.get("value") or "").strip()
+        if not label and not value:
+            continue
+        seg_id = row.get("segmentId")
+        seg_id = seg_id if seg_id in names else None
+        out.append((order.get(seg_id, 0), len(out),
+                    {"segment": names.get(seg_id, ""), "label": label, "value": value}))
+    return [row for _, _, row in sorted(out, key=lambda r: (r[0], r[1]))]
+
+
+def sanitize_text_fields(rows, category: dict) -> list:
+    """Normalize a client-sent `textFields` list before it is stored: mint missing
+    ids, keep only segmentIds this category actually has (others become team-level),
+    trim and length-cap label and value, drop rows blank on both sides, and cap the
+    list at MAX_TEAM_TEXT_FIELDS."""
+    seg_ids = {s["id"] for s in (category or {}).get("segments", [])}
+    out = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or "").strip()[:TEXT_LABEL_MAX]
+        value = str(row.get("value") or "").strip()[:TEXT_VALUE_MAX]
+        if not label and not value:
+            continue
+        seg_id = row.get("segmentId")
+        row_id = str(row.get("id") or "").strip() or new_id("fld")
+        out.append({
+            "id": row_id,
+            "segmentId": seg_id if seg_id in seg_ids else None,
+            "label": label,
+            "value": value,
+        })
+        if len(out) >= MAX_TEAM_TEXT_FIELDS:
+            break
+    return out
 
 
 # ── slot assignment ────────────────────────────────────────────────────────────

@@ -1338,9 +1338,12 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
       set_segment {categoryId, segmentId, name?, order?, unitCount?}
       add_team {categoryId, org?, name?}
       remove_team {categoryId, teamId}
-      set_team {categoryId, teamId, org?, name?, members?}
+      set_team {categoryId, teamId, org?, name?, members?,
+                pageEnabled?, nameMode?, textFields?}
       set_podium {categoryId, names:[..]}
       set_page_mode {slot:'cover'|'lastPage', mode:'default'}
+      set_footer_enabled {enabled}
+      set_team_pages {enabled?, nameMode?}
     """
     if not _require_user(req):
         return func.HttpResponse("Unauthorized", status_code=401)
@@ -1408,6 +1411,15 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
             for k in ("org", "name", "members"):
                 if k in body:
                     t[k] = body[k]
+            # Team-page overrides are tri-state: an explicit null (or an unknown
+            # name mode) returns the team to the competition-wide default.
+            if "pageEnabled" in body:
+                v = body["pageEnabled"]
+                t["pageEnabled"] = None if v is None else bool(v)
+            if "nameMode" in body:
+                t["nameMode"] = st.coerce_name_mode(body["nameMode"])
+            if "textFields" in body:
+                t["textFields"] = st.sanitize_text_fields(body["textFields"], c)
         elif op == "set_podium":
             c = cat()
             names = (list(body.get("names", [])) + ["", "", ""])[:3]
@@ -1419,6 +1431,14 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
                 structure[key] = {"mode": "default", "fileId": None}
         elif op == "set_footer_enabled":
             structure["footerEnabled"] = bool(body.get("enabled", True))
+        elif op == "set_team_pages":
+            # Competition-wide team-page defaults. No inherit state here, so an
+            # unknown name mode falls back to "full" rather than to None.
+            tp = structure.setdefault("teamPages", {"enabled": True, "nameMode": "full"})
+            if "enabled" in body:
+                tp["enabled"] = bool(body.get("enabled", True))
+            if "nameMode" in body:
+                tp["nameMode"] = st.coerce_name_mode(body["nameMode"]) or "full"
         else:
             return func.HttpResponse(f"Unknown op: {op}", status_code=400)
 

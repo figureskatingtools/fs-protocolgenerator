@@ -363,31 +363,150 @@ def podium_page(category_name: str, photo_bytes, names, chrome=None) -> bytes:
     return _finish(buf, c)
 
 
-# Synchro team page: the roster is laid out *first* (a full 32-skater team must
-# always fit above the footer band) and the photo box then takes whatever vertical
-# space is left, within sane bounds.
+# Synchro team page: the free-text rows and the roster are laid out *first* (a full
+# 32-skater team must always fit above the footer band) and the photo box then takes
+# whatever vertical space is left, within sane bounds.
 ROSTER_ROW_H = 5.5 * mm
 ROSTER_LABEL_H = 19 * mm     # the "SKATERS" label block between photo and names
 ROSTER_PAD = 4 * mm          # breathing room under the last roster row
 PHOTO_MIN_H = 60 * mm
 PHOTO_MAX_H = 130 * mm
+PHOTO_MAX_H_SOLO = 185 * mm  # cap when no names are printed and the photo can grow
+
+# Free-text rows ("Free Skating theme: Spies"), drawn between photo and roster.
+TEXT_GAP = 8 * mm            # photo bottom -> first text row
+TEXT_ROW_H = 5.5 * mm        # one "Label  Value" row
+TEXT_HEAD_H = 7 * mm         # a segment eyebrow above that segment's rows
+# Hard budget for the whole block, TEXT_GAP included. Sized so the photo box never
+# has to fall back on PHOTO_MIN_H: with a 32-name roster (111 mm) and photo_top
+# ≈ 238 mm there is 238 - 16 - 111 - 45 = 66 mm left, still above the 60 mm floor.
+TEXT_MAX_H = 45 * mm
 
 
-def _roster_grid(count: int):
+def _is_family_token(token: str) -> bool:
+    """Whether a roster token belongs to the upper-cased family part of the name."""
+    letters = [ch for ch in token if ch.isalpha()]
+    return bool(letters) and all(ch.isupper() for ch in letters)
+
+
+def _given_names(member: str) -> str:
+    """The given-name part of a "FAMILY Given" roster entry (the convention
+    `dt_partic._format_member` writes). Leading all-caps tokens are the family name
+    and may be several words — "VAN DER BERG Anna" -> "Anna". An entry that does not
+    follow the convention comes back whole: a hand-typed "Anna Korhonen" (no
+    upper-case lead) and an all-caps "ANNA KORHONEN" (nothing would be left) are both
+    returned unchanged, because a full name beats a blank row. A stray initial after
+    the family name ("KORHONEN A Maria") is dropped with it — accepted."""
+    tokens = (member or "").split()
+    i = 0
+    while i < len(tokens) and _is_family_token(tokens[i]):
+        i += 1
+    return " ".join(tokens[i:]) or (member or "").strip()
+
+
+def _display_members(members, name_mode: str) -> list:
+    """The roster as it should be printed: unchanged, given names only (keeping the
+    stored family-name-alphabetical order), or nothing at all."""
+    if name_mode == "none":
+        return []
+    if name_mode == "firstNames":
+        return [n for n in (_given_names(m) for m in (members or [])) if n]
+    return list(members or [])
+
+
+def _roster_grid(count: int, tight: bool = False):
     """(columns, rows) for a roster of `count` names: two columns normally, three
-    as a safety valve for the rare oversized list."""
-    cols = 3 if count > 44 else 2
+    as a safety valve for the rare oversized list. `tight` pulls that valve earlier,
+    for a page that also has to fit a block of free-text rows."""
+    cols = 3 if count > (32 if tight else 44) else 2
     return cols, max(1, math.ceil(count / cols))
 
 
-def _team_photo_box_h(photo_top: float, rows: int, cap: bool = True) -> float:
-    """Height for the team photo box: everything between `photo_top` and the roster
-    the page still has to fit, clamped so the box neither collapses nor dominates.
-    With `cap=False` (no photo) the box takes all remaining height, so the
-    placeholder area — and its page-centred label — fills the page instead of
-    leaving dead space under the roster."""
-    avail = photo_top - CONTENT_BOTTOM - ROSTER_LABEL_H - rows * ROSTER_ROW_H - ROSTER_PAD
-    return max(PHOTO_MIN_H, min(PHOTO_MAX_H, avail) if cap else avail)
+def _text_block(text_rows):
+    """(lines, height) for the free-text rows, the height including the gap under
+    the photo. Lines are ("head"|"row", label, value) tuples, a heading emitted
+    whenever the segment changes. Truncated to TEXT_MAX_H and never left ending on a
+    dangling heading, so the roster reservation below can never be squeezed off the
+    page."""
+    lines, height, segment = [], TEXT_GAP, None
+    for row in text_rows or []:
+        pending, extra = [], 0.0
+        if row.get("segment") != segment:
+            segment = row.get("segment")
+            if segment:
+                pending.append(("head", segment, ""))
+                extra += TEXT_HEAD_H
+        pending.append(("row", row.get("label", ""), row.get("value", "")))
+        extra += TEXT_ROW_H
+        if height + extra > TEXT_MAX_H:
+            break
+        lines.extend(pending)
+        height += extra
+    while lines and lines[-1][0] == "head":     # never end on a dangling heading
+        lines.pop()
+        height -= TEXT_HEAD_H
+    return lines, (height if lines else 0.0)
+
+
+def _roster_block_h(rows: int, show_names: bool) -> float:
+    """Vertical space the SKATERS block claims — zero when no names are printed."""
+    return (ROSTER_LABEL_H + rows * ROSTER_ROW_H + ROSTER_PAD) if show_names else 0.0
+
+
+def _team_photo_box_h(photo_top: float, roster_h: float, text_h: float = 0.0,
+                      cap=PHOTO_MAX_H) -> float:
+    """Height for the team photo box: everything between `photo_top` and the footer
+    that the free-text rows and the roster do not need, clamped so the box neither
+    collapses nor dominates. With `cap=None` (no photo, or no roster to make room
+    for) the box takes all remaining height, so the placeholder area — and its
+    page-centred label — fills the page instead of leaving dead space."""
+    avail = photo_top - CONTENT_BOTTOM - text_h - roster_h
+    return max(PHOTO_MIN_H, min(cap, avail) if cap else avail)
+
+
+def _fill(c, color):
+    """Set the fill colour from either a plain (r, g, b) tuple (this module's
+    palette) or a reportlab Color (branding's)."""
+    if isinstance(color, tuple):
+        c.setFillColorRGB(*color)
+    else:
+        c.setFillColor(color)
+
+
+def _draw_text_rows(c, lines, start_y: float, fonts, colors) -> None:
+    """Draw the free-text block: an optional segment eyebrow, then "Label  Value"
+    rows with the value shrunk (and ellipsized) if it would run past the margin.
+    `fonts` and `colors` are (head, label, value) triples so the branded and plain
+    layouts can share the geometry."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    head_font, label_font, value_font = fonts
+    head_color, label_color, value_color = colors
+    y = start_y
+    for kind, label, value in lines:
+        if kind == "head":
+            _fill(c, head_color)
+            to = c.beginText(MARGIN, y)
+            to.setFont(head_font, 8)
+            to.setCharSpace(1.5)
+            to.textLine(label.upper())
+            to.setCharSpace(0)   # Tc is page-level text state — don't leak it
+            c.drawText(to)
+            y -= TEXT_HEAD_H
+            continue
+        _fill(c, label_color)
+        c.setFont(label_font, 9)
+        c.drawString(MARGIN, y, label)
+        x = MARGIN + stringWidth(label, label_font, 9) + 2 * mm
+        avail = PAGE_W - MARGIN - x
+        size = 9.5 if stringWidth(value, value_font, 9.5) <= avail else 8.5
+        # `len(value) > 1` is the termination guard: an over-long label can leave
+        # `avail` narrower than the ellipsis itself, and "…"[:-2] + "…" is "…".
+        while len(value) > 1 and stringWidth(value, value_font, size) > avail:
+            value = value[:-2] + "…"
+        _fill(c, value_color)
+        c.setFont(value_font, size)
+        c.drawString(x, y, value)
+        y -= TEXT_ROW_H
 
 
 def _draw_roster(c, members, cols: int, start_y: float, font: str, size: float):
@@ -407,10 +526,11 @@ def _draw_roster(c, members, cols: int, start_y: float, font: str, size: float):
             cy -= ROSTER_ROW_H
 
 
-def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
+def _draw_branded_team(c, name: str, org: str, members, photo_bytes, text_rows=None,
+                       show_names: bool = True):
     """Brand-styled team body: eyebrow, team name + gradient rule, club, the photo
-    in a rounded box with the gradient hairline (matching the podium page), then the
-    roster. Same deterministic sizing as the plain layout."""
+    in a rounded box with the gradient hairline (matching the podium page), the
+    free-text rows, then the roster. Same deterministic sizing as the plain layout."""
     from reportlab.pdfbase.pdfmetrics import stringWidth
     box_w = PAGE_W - 2 * MARGIN
 
@@ -446,9 +566,12 @@ def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
         y -= 4 * mm
 
     # Photo: rounded, gradient hairline; a plain placeholder when none was given.
+    # The text rows and the roster reserve their space first.
     photo_top = y - 2 * mm
-    cols, rows = _roster_grid(len(members))
-    box_h = _team_photo_box_h(photo_top, rows, cap=bool(photo_bytes))
+    lines, text_h = _text_block(text_rows)
+    cols, rows = _roster_grid(len(members), tight=bool(lines)) if show_names else (1, 0)
+    cap = (PHOTO_MAX_H if show_names else PHOTO_MAX_H_SOLO) if photo_bytes else None
+    box_h = _team_photo_box_h(photo_top, _roster_block_h(rows, show_names), text_h, cap)
     drawn = 0.0
     if photo_bytes:
         drawn = branding._rounded_fit_image(c, photo_bytes, MARGIN, photo_top,
@@ -458,8 +581,19 @@ def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
                          "Team photo (not provided)")
         drawn = box_h
 
+    # Free-text rows (nothing drawn, and no space consumed, when there are none).
+    y = photo_top - drawn
+    if lines:
+        _draw_text_rows(c, lines, y - TEXT_GAP,
+                        (branding.F_RALEWAY_SEMI, branding.F_RALEWAY_SEMI,
+                         branding.F_RALEWAY_MED),
+                        (branding.MUTED, branding.SLATE, branding.INK))
+        y -= text_h
+
     # Roster.
-    y = photo_top - drawn - 12 * mm
+    if not show_names:
+        return
+    y -= 12 * mm
     to = c.beginText(MARGIN, y)
     to.setFont(branding.F_RALEWAY_SEMI, 8)
     to.setCharSpace(1.5)
@@ -471,20 +605,28 @@ def _draw_branded_team(c, name: str, org: str, members, photo_bytes):
     _draw_roster(c, members, cols, y - 7 * mm, branding.F_RALEWAY_MED, 9.5)
 
 
-def synchro_team_page(team: dict, photo_bytes, chrome=None) -> bytes:
-    """Team-presentation page: organization + team name, photo, and roster. Uses
-    the brand fonts/rounded photo when the brand fonts are available, else the plain
-    layout below. Both size the photo box from the roster length so a full
-    32-skater team always fits above the footer band."""
+def synchro_team_page(team: dict, photo_bytes, chrome=None,
+                      name_mode: str = "full", text_rows=None) -> bytes:
+    """Team-presentation page: organization + team name, photo, the competition's
+    free-text rows and the roster. Uses the brand fonts/rounded photo when the brand
+    fonts are available, else the plain layout below. Both reserve the text rows and
+    the roster first, so a full 32-skater team always fits above the footer band.
+
+    `name_mode` is the resolved `structure.team_name_mode` ("full" | "firstNames" |
+    "none"); `text_rows` the resolved `structure.team_text_rows`. The defaults
+    reproduce the page as it was before either setting existed."""
     name = team.get("name") or "Team"
     org = team.get("org") or ""
-    members = team.get("members") or []
+    members = _display_members(team.get("members") or [], name_mode)
+    # Only "none" removes the SKATERS block. A team whose roster has not been
+    # imported yet keeps the heading, as it always has.
+    show_names = name_mode != "none"
 
     if branding.fonts_available():
         try:
             buf, c = _new_canvas()
             _draw_chrome(c, chrome)
-            _draw_branded_team(c, name, org, members, photo_bytes)
+            _draw_branded_team(c, name, org, members, photo_bytes, text_rows, show_names)
             return _finish(buf, c)
         except Exception as e:
             logging.warning(f"Branded team page failed, using plain: {e}")
@@ -504,12 +646,23 @@ def synchro_team_page(team: dict, photo_bytes, chrome=None) -> bytes:
     y -= 6 * mm
 
     box_w = PAGE_W - 2 * MARGIN
-    cols, rows = _roster_grid(len(members))
-    box_h = _team_photo_box_h(y, rows, cap=bool(photo_bytes))
+    lines, text_h = _text_block(text_rows)
+    cols, rows = _roster_grid(len(members), tight=bool(lines)) if show_names else (1, 0)
+    cap = (PHOTO_MAX_H if show_names else PHOTO_MAX_H_SOLO) if photo_bytes else None
+    box_h = _team_photo_box_h(y, _roster_block_h(rows, show_names), text_h, cap)
     box_y = y - box_h
     _draw_photo(c, photo_bytes, MARGIN, box_y, box_w, box_h, "Team photo (not provided)")
 
-    y = box_y - 12 * mm
+    y = box_y
+    if lines:
+        _draw_text_rows(c, lines, y - TEXT_GAP,
+                        ("Helvetica-Bold", "Helvetica-Bold", "Helvetica"),
+                        (MUTED, MUTED, INK))
+        y -= text_h
+
+    if not show_names:
+        return _finish(buf, c)
+    y -= 12 * mm
     c.setFillColorRGB(*MUTED)
     c.setFont("Helvetica-Bold", 8)
     c.drawString(MARGIN, y, "SKATERS")

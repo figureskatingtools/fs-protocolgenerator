@@ -57,6 +57,20 @@ re-encoded (≤2000 px JPEG) and assigned to `photoFallback` (replacing any prio
 fallback file), unmatched ones land in the tray and are reported. Generation uses
 photo → fallback → placeholder.
 
+**Team-page settings.** Competition-wide `structure.teamPages` (`{enabled,
+nameMode}`) decides whether synchro team pages are produced at all and how much of
+each roster is printed (`NAME_MODES` = `full` | `firstNames` | `none`; `none` keeps
+the page but drops the skater list). Each team may override both — `team.pageEnabled`
+and `team.nameMode`, where `None` means *inherit* — and carries `team.textFields`,
+up to `MAX_TEAM_TEXT_FIELDS` free-typed rows printed on its page ("Free Skating
+theme: Spies"), each `{id, segmentId (None = team-level), label, value}`. Every read
+goes through the resolvers in `structure.py` (`team_pages_defaults`,
+`team_page_enabled`, `team_name_mode`, `team_text_rows`), which default a
+metadata.json written before the feature to today's behaviour — pages on, full
+names — so there is no migration. `team_text_rows` is also what orders the rows for
+printing (team-level first, then segment order) and what keeps a row whose segment
+was deleted, degrading it to team-level.
+
 ## Assembly order (`assemble.py`)
 
 cover (custom or default) → event-info page → time-schedule page → for each
@@ -64,6 +78,11 @@ category in schedule order: *(synchro)* one team page per team → protocol head
 page PDF (the category's `titlePdf` slot; "Protocol Head Page" in the UI) →
 podium page (when a photo or name exists) → total results PDF → per segment
 (results → panel → judges details) → last page (custom or default).
+
+A synchro team whose resolved `team_page_enabled` is false contributes **no page at
+all** — no photo, no names, no text rows. It still competed, so `_competition_stats`
+(and with it the information page's Competition Units / Performances) is deliberately
+unaffected.
 
 Every *generated interior* page (event-info, schedule, podium, synchro team — not
 the cover/last page, not inserted result PDFs) is stamped with a competition-wide
@@ -123,7 +142,10 @@ of the platform's shared competition file pool — see below), `get_file`
 `assign_file`, `delete_file`, `parse_schedule` (body upload *or* a pool
 reference, see below), `import_rosters`,
 `upload_fallback_photos` (bulk fallback-picture ZIP), `edit_structure`
-(manual add/remove/set ops), `generate_protocol`, plus the daily auto-deletion
+(manual add/remove/set ops — including `set_team_pages {enabled?, nameMode?}` for the
+competition-wide team-page defaults, and `set_team`'s `pageEnabled` / `nameMode` /
+`textFields` for a team's overrides and its free-text rows, the last two replaced
+wholesale like `members`), `generate_protocol`, plus the daily auto-deletion
 timer.
 
 ### Shared competition file pool + auto-assignment
@@ -186,7 +208,8 @@ automatic with body `"autoAssigned": true`.
   **DT_PARTIC** (`<Participant Code GivenName FamilyName>`) on athlete `Code`.
   One TEAMS + one PARTIC file cover the **whole competition**. Names render
   "FAMILY Given", rosters sorted alphabetically; Name/Organisation are stripped
-  (real exports carry trailing spaces).
+  (real exports carry trailing spaces). That "FAMILY Given" shape is load-bearing:
+  `generate_pages._given_names` reverses it for the team page's given-names mode.
 - `roster_matching.py` — pure team→category placement, used by `import_rosters`.
   Teams register per **event** (`RegisteredEvent="…MLAIKU----"`) but often compete
   per **block** ("Aikuiset, Mupi L1"/"L2"; DT_SCHEDULE codes `…MLAIKU--01`), and
@@ -222,9 +245,17 @@ The real cover, last page and header/footer art are now the approved brand kit (
 are unavailable, plus neutral placeholder boxes for missing team photos. The podium
 page lays the top three out in podium shape (1st centre/highest, 2nd left, 3rd
 right) and leaves the photo area empty (no placeholder) when no podium photo is set.
-The synchro team page sizes its photo box dynamically — roster rows (2 columns,
-3 past 44 skaters) are reserved first so up to 32 names always fit above the
-footer band, and the photo takes the remaining height (clamped 60–130 mm).
+The synchro team page sizes its photo box dynamically — the free-text block and the
+roster rows (2 columns, 3 past 44 skaters, or past 32 when text rows share the page)
+are reserved first so up to 32 names always fit above the footer band, and the photo
+takes the remaining height (clamped 60–130 mm, or 60–185 mm when the names are
+switched off and it can grow). `TEXT_MAX_H` (45 mm, the gap under the photo included)
+is what buys that guarantee: it is sized so the photo box never has to fall back on
+its 60 mm floor, which would be the one way the last roster line could slip into the
+footer band. `_text_block` truncates to that budget and never leaves a dangling
+segment heading. `generate_pages._given_names` reverses `dt_partic`'s "FAMILY Given"
+convention for the `firstNames` mode, returning an entry that does not follow it —
+a hand-edited name — whole rather than blank.
 
 ## Local development
 
