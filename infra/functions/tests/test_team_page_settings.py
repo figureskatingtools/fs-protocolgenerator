@@ -1,14 +1,15 @@
 """`function_app.edit_structure` — the team-page settings ops.
 
-`set_team_pages` carries the competition-wide default; `set_team` carries a
-team's overrides and its free-text rows. The distinction the tests pin down is
-the tri-state: a team stores `None` to mean "inherit", so an explicit `null` has
-to be a way of *clearing* an override, not a way of turning the page off. The
-competition-wide setting has no inherit state, so a value it cannot use falls
-back to "full" instead.
+`set_team_pages` carries the competition-wide default, `set_category` a
+category's, `set_team` a team's overrides and its free-text rows. The distinction
+the tests pin down is the tri-state the two lower levels share: they store `None`
+to mean "inherit", so an explicit `null` has to be a way of *clearing* an
+override, not a way of turning the page off. The competition-wide setting has no
+inherit state, so a value it cannot use falls back to "full" instead.
 
 `textFields` is a whole-list replace, like `members`, so the route is also what
-assigns a new row its id.
+assigns a new row its id — and what strips the `segmentId` rows carried while
+they were still segment-attached.
 """
 import json
 
@@ -46,12 +47,20 @@ def saved(response) -> dict:
     return json.loads(response.get_body())["structure"]
 
 
+def cat_of(structure) -> dict:
+    return structure["categories"][0]
+
+
 def team_of(structure) -> dict:
     return structure["categories"][0]["teams"][0]
 
 
+def set_category(comp, **fields):
+    return saved(edit(op="set_category", categoryId=cat_of(comp)["id"], **fields))
+
+
 def set_team(comp, **fields):
-    cat = comp["categories"][0]
+    cat = cat_of(comp)
     return saved(edit(op="set_team", categoryId=cat["id"],
                       teamId=cat["teams"][0]["id"], **fields))
 
@@ -85,6 +94,49 @@ def test_set_team_pages_works_on_a_structure_written_before_the_feature(comp):
     assert out["teamPages"] == {"enabled": False, "nameMode": "full"}
 
 
+# ── the category default ──────────────────────────────────────────────────────
+
+def test_a_category_can_skip_all_of_its_teams(comp):
+    out = cat_of(set_category(comp, pageEnabled=False))
+    assert out["pageEnabled"] is False
+
+
+def test_a_category_can_carry_its_own_name_mode(comp):
+    assert cat_of(set_category(comp, nameMode="firstNames"))["nameMode"] == "firstNames"
+
+
+def test_an_explicit_null_returns_the_category_to_the_competition_default(comp):
+    set_category(comp, pageEnabled=False, nameMode="none")
+    out = set_category(comp, pageEnabled=None, nameMode=None)
+    assert cat_of(out)["pageEnabled"] is None
+    assert cat_of(out)["nameMode"] is None
+    assert st.category_page_enabled(out, cat_of(out)) is True
+
+
+def test_an_unknown_category_name_mode_is_read_as_inherit(comp):
+    assert cat_of(set_category(comp, nameMode="surnames-only"))["nameMode"] is None
+
+
+def test_setting_the_category_default_leaves_its_other_fields_alone(comp):
+    out = cat_of(set_category(comp, pageEnabled=False))
+    assert out["name"] == "SM-seniorit"
+    assert out["discipline"] == "synchro"
+    assert len(out["teams"]) == 1
+
+
+def test_a_category_default_reaches_a_team_that_has_not_overridden(comp):
+    out = set_category(comp, pageEnabled=False, nameMode="none")
+    assert st.team_page_enabled(out, cat_of(out), team_of(out)) is False
+    assert st.team_name_mode(out, cat_of(out), team_of(out)) == "none"
+
+
+def test_a_team_override_survives_a_category_change(comp):
+    set_team(comp, pageEnabled=True, nameMode="full")
+    out = set_category(comp, pageEnabled=False, nameMode="none")
+    assert st.team_page_enabled(out, cat_of(out), team_of(out)) is True
+    assert st.team_name_mode(out, cat_of(out), team_of(out)) == "full"
+
+
 # ── per-team overrides ────────────────────────────────────────────────────────
 
 def test_a_team_can_be_skipped(comp):
@@ -97,10 +149,10 @@ def test_a_team_can_carry_its_own_name_mode(comp):
 
 def test_an_explicit_null_returns_the_team_to_the_default(comp):
     set_team(comp, pageEnabled=False, nameMode="none")
-    out = team_of(set_team(comp, pageEnabled=None, nameMode=None))
-    assert out["pageEnabled"] is None
-    assert out["nameMode"] is None
-    assert st.team_page_enabled(comp, out) is True
+    out = set_team(comp, pageEnabled=None, nameMode=None)
+    assert team_of(out)["pageEnabled"] is None
+    assert team_of(out)["nameMode"] is None
+    assert st.team_page_enabled(out, cat_of(out), team_of(out)) is True
 
 
 def test_an_unknown_team_name_mode_is_read_as_inherit(comp):
@@ -120,17 +172,18 @@ def test_a_new_text_row_comes_back_with_an_id(comp):
     assert rows[0]["label"] == "Theme"
 
 
-def test_a_text_row_can_name_a_segment_of_its_category(comp):
-    seg_id = comp["categories"][0]["segments"][0]["id"]
+def test_a_stored_row_carries_no_segment(comp):
+    seg_id = cat_of(comp)["segments"][0]["id"]
     rows = team_of(set_team(comp, textFields=[
         {"segmentId": seg_id, "label": "Theme", "value": "Spies"}]))["textFields"]
-    assert rows[0]["segmentId"] == seg_id
+    assert "segmentId" not in rows[0]
 
 
-def test_a_foreign_segment_id_is_stored_team_level(comp):
+def test_the_rows_keep_the_order_they_were_sent_in(comp):
     rows = team_of(set_team(comp, textFields=[
-        {"segmentId": "seg-elsewhere", "label": "Theme", "value": "Spies"}]))["textFields"]
-    assert rows[0]["segmentId"] is None
+        {"label": "Theme", "value": "Spies"},
+        {"label": "Coach", "value": "M. Virta"}]))["textFields"]
+    assert [r["label"] for r in rows] == ["Theme", "Coach"]
 
 
 def test_sending_text_rows_replaces_the_whole_list(comp):
@@ -147,9 +200,14 @@ def test_an_empty_row_is_not_stored(comp):
 # ── the usual route guards ────────────────────────────────────────────────────
 
 def test_an_unknown_team_is_a_404(comp):
-    cat = comp["categories"][0]
+    cat = cat_of(comp)
     res = edit(op="set_team", categoryId=cat["id"], teamId="team-gone", nameMode="none")
     assert res.status_code == 404
+
+
+def test_an_unknown_category_is_a_404(comp):
+    assert edit(op="set_category", categoryId="cat-gone",
+                pageEnabled=False).status_code == 404
 
 
 def test_the_ops_need_a_proxy_identity(comp):
@@ -159,7 +217,7 @@ def test_the_ops_need_a_proxy_identity(comp):
 def test_a_roster_re_import_keeps_a_teams_overrides(comp):
     # `_upsert_team` refreshes only the imported fields, so the organizer's
     # team-page choices must survive re-importing the DT_PARTIC pair.
-    cat = comp["categories"][0]
+    cat = cat_of(comp)
     set_team(comp, pageEnabled=False, nameMode="none",
              textFields=[{"label": "Theme", "value": "Spies"}])
     fa._upsert_team(comp, cat, {"code": "T1", "name": "Helsinki Finettes",

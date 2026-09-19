@@ -373,13 +373,16 @@ PHOTO_MIN_H = 60 * mm
 PHOTO_MAX_H = 130 * mm
 PHOTO_MAX_H_SOLO = 185 * mm  # cap when no names are printed and the photo can grow
 
-# Free-text rows ("Free Skating theme: Spies"), drawn between photo and roster.
+# Free-text rows ("Theme: Spies"), drawn between photo and roster.
 TEXT_GAP = 8 * mm            # photo bottom -> first text row
 TEXT_ROW_H = 5.5 * mm        # one "Label  Value" row
-TEXT_HEAD_H = 7 * mm         # a segment eyebrow above that segment's rows
-# Hard budget for the whole block, TEXT_GAP included. Sized so the photo box never
-# has to fall back on PHOTO_MIN_H: with a 32-name roster (111 mm) and photo_top
-# ≈ 238 mm there is 238 - 16 - 111 - 45 = 66 mm left, still above the 60 mm floor.
+# Hard budget for the whole block, TEXT_GAP included — it admits 6 rows
+# (8 + 6 × 5.5 = 41 mm). Sized so the photo box never has to fall back on
+# PHOTO_MIN_H: with a 32-name roster (111 mm) and photo_top ≈ 238 mm there is
+# 238 - 16 - 111 - 45 = 66 mm left, still above the 60 mm floor.
+# `structure.MAX_TEAM_TEXT_FIELDS` is set to the 6 rows this budget draws, so a
+# stored row is never one `_text_block` silently truncates away: changing these
+# constants means changing that cap too (and vice versa).
 TEXT_MAX_H = 45 * mm
 
 
@@ -424,27 +427,15 @@ def _roster_grid(count: int, tight: bool = False):
 
 def _text_block(text_rows):
     """(lines, height) for the free-text rows, the height including the gap under
-    the photo. Lines are ("head"|"row", label, value) tuples, a heading emitted
-    whenever the segment changes. Truncated to TEXT_MAX_H and never left ending on a
-    dangling heading, so the roster reservation below can never be squeezed off the
-    page."""
-    lines, height, segment = [], TEXT_GAP, None
+    the photo. Lines are (label, value) pairs, printed in the order they are stored.
+    Truncated to TEXT_MAX_H, so the roster reservation below can never be squeezed
+    off the page."""
+    lines, height = [], TEXT_GAP
     for row in text_rows or []:
-        pending, extra = [], 0.0
-        if row.get("segment") != segment:
-            segment = row.get("segment")
-            if segment:
-                pending.append(("head", segment, ""))
-                extra += TEXT_HEAD_H
-        pending.append(("row", row.get("label", ""), row.get("value", "")))
-        extra += TEXT_ROW_H
-        if height + extra > TEXT_MAX_H:
+        if height + TEXT_ROW_H > TEXT_MAX_H:
             break
-        lines.extend(pending)
-        height += extra
-    while lines and lines[-1][0] == "head":     # never end on a dangling heading
-        lines.pop()
-        height -= TEXT_HEAD_H
+        lines.append((row.get("label", ""), row.get("value", "")))
+        height += TEXT_ROW_H
     return lines, (height if lines else 0.0)
 
 
@@ -474,25 +465,14 @@ def _fill(c, color):
 
 
 def _draw_text_rows(c, lines, start_y: float, fonts, colors) -> None:
-    """Draw the free-text block: an optional segment eyebrow, then "Label  Value"
-    rows with the value shrunk (and ellipsized) if it would run past the margin.
-    `fonts` and `colors` are (head, label, value) triples so the branded and plain
-    layouts can share the geometry."""
+    """Draw the free-text block: "Label  Value" rows with the value shrunk (and
+    ellipsized) if it would run past the margin. `fonts` and `colors` are
+    (label, value) pairs so the branded and plain layouts can share the geometry."""
     from reportlab.pdfbase.pdfmetrics import stringWidth
-    head_font, label_font, value_font = fonts
-    head_color, label_color, value_color = colors
+    label_font, value_font = fonts
+    label_color, value_color = colors
     y = start_y
-    for kind, label, value in lines:
-        if kind == "head":
-            _fill(c, head_color)
-            to = c.beginText(MARGIN, y)
-            to.setFont(head_font, 8)
-            to.setCharSpace(1.5)
-            to.textLine(label.upper())
-            to.setCharSpace(0)   # Tc is page-level text state — don't leak it
-            c.drawText(to)
-            y -= TEXT_HEAD_H
-            continue
+    for label, value in lines:
         _fill(c, label_color)
         c.setFont(label_font, 9)
         c.drawString(MARGIN, y, label)
@@ -585,9 +565,8 @@ def _draw_branded_team(c, name: str, org: str, members, photo_bytes, text_rows=N
     y = photo_top - drawn
     if lines:
         _draw_text_rows(c, lines, y - TEXT_GAP,
-                        (branding.F_RALEWAY_SEMI, branding.F_RALEWAY_SEMI,
-                         branding.F_RALEWAY_MED),
-                        (branding.MUTED, branding.SLATE, branding.INK))
+                        (branding.F_RALEWAY_SEMI, branding.F_RALEWAY_MED),
+                        (branding.SLATE, branding.INK))
         y -= text_h
 
     # Roster.
@@ -656,8 +635,8 @@ def synchro_team_page(team: dict, photo_bytes, chrome=None,
     y = box_y
     if lines:
         _draw_text_rows(c, lines, y - TEXT_GAP,
-                        ("Helvetica-Bold", "Helvetica-Bold", "Helvetica"),
-                        (MUTED, MUTED, INK))
+                        ("Helvetica-Bold", "Helvetica"),
+                        (MUTED, INK))
         y -= text_h
 
     if not show_names:

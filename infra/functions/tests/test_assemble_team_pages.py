@@ -3,7 +3,8 @@
 Turning team pages off has to remove the page *entirely* — not an empty one, not
 a photo-only one — because the reason to turn it off is that the organizer does
 not want those pages in the bound protocol at all. The competition-wide setting
-is only a default, so a single team can opt back in when everything else is off.
+and the category one are only defaults, so a single team can opt back in when
+everything above it is off, and a category can opt its whole field back in.
 
 The counterpart matters just as much: a team that gets no page still competed,
 so the information page's Competition Units / Performances tallies must not move.
@@ -38,6 +39,10 @@ def protocol_text(structure) -> str:
     pdf = assemble.assemble_protocol(structure, lambda _file_id: None)
     reader = PdfReader(io.BytesIO(pdf))
     return "\n".join((page.extract_text() or "") for page in reader.pages)
+
+
+def category_of(structure):
+    return structure["categories"][0]
 
 
 def teams_of(structure):
@@ -78,14 +83,56 @@ def test_the_competition_name_mode_reaches_the_page():
     assert "KORHONEN" not in text
 
 
+def test_a_category_can_skip_its_whole_field():
+    structure = competition()
+    category_of(structure)["pageEnabled"] = False
+    text = protocol_text(structure)
+    assert "Helsinki Finettes" not in text
+    assert "Rockettes" not in text
+
+
+def test_a_category_can_opt_its_field_back_in():
+    structure = competition(enabled=False, nameMode="full")
+    category_of(structure)["pageEnabled"] = True
+    text = protocol_text(structure)
+    assert "Helsinki Finettes" in text
+    assert "Rockettes" in text
+
+
+def test_the_category_name_mode_reaches_the_page():
+    structure = competition()
+    category_of(structure)["nameMode"] = "firstNames"
+    text = protocol_text(structure)
+    assert "Anna" in text
+    assert "KORHONEN" not in text
+
+
+def test_a_team_override_beats_its_category():
+    structure = competition()
+    category_of(structure)["pageEnabled"] = False
+    teams_of(structure)[1]["pageEnabled"] = True
+    text = protocol_text(structure)
+    assert "Helsinki Finettes" not in text
+    assert "Rockettes" in text
+
+
 def test_a_teams_text_rows_reach_its_page():
     structure = competition()
-    seg_id = structure["categories"][0]["segments"][0]["id"]
+    teams_of(structure)[0]["textFields"] = [
+        {"id": "fld-1", "label": "Theme", "value": "Spies"}]
+    text = protocol_text(structure)
+    assert "Theme" in text
+    assert "Spies" in text
+
+
+def test_a_text_row_stored_with_a_segment_still_reaches_the_page():
+    # Rows saved before they became a flat list carry a segmentId; it is ignored
+    # on the way to the page rather than costing the organizer the row.
+    structure = competition()
+    seg_id = category_of(structure)["segments"][0]["id"]
     teams_of(structure)[0]["textFields"] = [
         {"id": "fld-1", "segmentId": seg_id, "label": "Theme", "value": "Spies"}]
-    text = protocol_text(structure)
-    assert "Spies" in text
-    assert "FREE SKATING" in text
+    assert "Spies" in protocol_text(structure)
 
 
 def test_a_skipped_team_still_counts_towards_the_information_page():

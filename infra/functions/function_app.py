@@ -1111,34 +1111,43 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
     """Match every registered team onto a category and apply the result in place.
 
     Shared by the `import_rosters` route and the automatic re-match that runs when
-    a Total Results PDF arrives. A fresh `teams_xml` (+ optional `partic_xml`) is
-    archived under `rosters/`, which is exactly what lets the re-match run later
-    without re-uploading: without `teams_xml` the archived copy is used and the
-    pass is treated as automatic (see `_apply_assignments`).
+    a Total Results PDF arrives. Whichever XML is supplied is archived under
+    `rosters/`, which is exactly what lets a later pass run without re-uploading;
+    an archived copy is read only for the file this call did *not* bring. So a
+    partic-only body (the supported "add the skater names to the roster I already
+    imported" case) re-matches the archived TEAMS against the participants the
+    user just picked, rather than against the archived ones.
+
+    `auto` stays "no fresh TEAMS file drove this pass" — it is what stops
+    `_apply_assignments` moving an already-placed team on a non-exact hit — and is
+    therefore keyed on `teams_xml` alone, never on `partic_xml`.
 
     The structure is mutated (the caller persists it) and the report is stored in
     `structure["rosterImport"]` for the UI. Returns the summary, or None when
     there is nothing to match (no archived roster, or no teams in the XML)."""
     auto = teams_xml is None
+    fresh_partic = partic_xml is not None
     if auto:
         blob = _roster_blob(container, folder_path, "teams.xml")
         if not blob.exists():
             return None
         teams_xml = blob.download_blob().readall()
-        partic = _roster_blob(container, folder_path, "partic.xml")
-        partic_xml = partic.download_blob().readall() if partic.exists() else None
+        if not fresh_partic:
+            partic = _roster_blob(container, folder_path, "partic.xml")
+            partic_xml = partic.download_blob().readall() if partic.exists() else None
 
     participants = parse_participants(_as_bytes(partic_xml)) if partic_xml else {}
     teams = parse_team_rosters(_as_bytes(teams_xml), participants)
     if not teams:
         return None
 
+    # Keep the source XML files for the record (not draggable upload chips) and
+    # for later automatic re-matches — each one only when this call supplied it,
+    # so an archived copy is never rewritten with itself.
     if not auto:
-        # Keep the source XML files for the record (not draggable upload chips)
-        # and for later automatic re-matches.
         container.upload_blob(f"{folder_path}/rosters/teams.xml", _as_bytes(teams_xml), overwrite=True)
-        if partic_xml:
-            container.upload_blob(f"{folder_path}/rosters/partic.xml", _as_bytes(partic_xml), overwrite=True)
+    if fresh_partic:
+        container.upload_blob(f"{folder_path}/rosters/partic.xml", _as_bytes(partic_xml), overwrite=True)
 
     rows_by_cat = _result_rows_for_categories(structure, container, folder_path)
     report = roster_matching.match_teams(structure, teams, rows_by_cat)
@@ -1173,7 +1182,9 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
     DT_PARTIC_TEAMS file joined with one DT_PARTIC file (XML strings in the body).
 
     Body: {id, teamsXml?, particXml?} — without `teamsXml` the roster archived by
-    an earlier import is re-matched instead (409 when nothing was imported yet).
+    an earlier import is re-matched instead (409 when nothing was imported yet),
+    against the `particXml` of this call when it carries one (that is how skater
+    names are added to a TEAMS-only import) and otherwise against the archived one.
 
     One TEAMS file spans every synchro event, but teams register per *event* and
     compete per *block*: which block a team skated in shows up only in that block's
@@ -1202,12 +1213,16 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
         container = sh.get_container_client()
 
         if not teams_xml and not _roster_blob(container, folder_path, "teams.xml").exists():
-            return func.HttpResponse("No roster files imported yet", status_code=409)
+            return func.HttpResponse(
+                "No team roster has been imported for this competition yet — select the "
+                "DT_PARTIC_TEAMS file as well, not just DT_PARTIC.", status_code=409)
 
         summary = _run_roster_match(structure, container, folder_path,
                                     teams_xml=teams_xml or None, partic_xml=partic_xml or None)
         if summary is None:
-            return func.HttpResponse("No teams found in DT_PARTIC_TEAMS", status_code=422)
+            return func.HttpResponse(
+                "No teams found in the DT_PARTIC_TEAMS file — check that it is the team "
+                "export of this competition.", status_code=422)
 
         sh.write_structure(folder_path, structure)
         return sh.json_response({
@@ -1332,7 +1347,8 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
     Body: {id, op, ...}. Ops:
       add_category {name, discipline}
       remove_category {categoryId}
-      set_category {categoryId, name?, discipline?, order?, code?}
+      set_category {categoryId, name?, discipline?, order?, code?,
+                    pageEnabled?, nameMode?}
       add_segment {categoryId, name}
       remove_segment {categoryId, segmentId}
       set_segment {categoryId, segmentId, name?, order?, unitCount?}
@@ -1381,6 +1397,14 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
                     c[k] = body[k]
             if "code" in body:
                 c["code"] = str(body["code"] or "").strip()[:32]
+            # The category's team-page defaults, tri-state exactly like a team's:
+            # an explicit null (or an unknown name mode) returns the category to
+            # the competition-wide default.
+            if "pageEnabled" in body:
+                v = body["pageEnabled"]
+                c["pageEnabled"] = None if v is None else bool(v)
+            if "nameMode" in body:
+                c["nameMode"] = st.coerce_name_mode(body["nameMode"])
         elif op == "add_segment":
             c = cat()
             c["segments"].append(st.new_segment(body.get("name", "Segment"), len(c["segments"])))
@@ -1412,14 +1436,14 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
                 if k in body:
                     t[k] = body[k]
             # Team-page overrides are tri-state: an explicit null (or an unknown
-            # name mode) returns the team to the competition-wide default.
+            # name mode) returns the team to its category's default.
             if "pageEnabled" in body:
                 v = body["pageEnabled"]
                 t["pageEnabled"] = None if v is None else bool(v)
             if "nameMode" in body:
                 t["nameMode"] = st.coerce_name_mode(body["nameMode"])
             if "textFields" in body:
-                t["textFields"] = st.sanitize_text_fields(body["textFields"], c)
+                t["textFields"] = st.sanitize_text_fields(body["textFields"])
         elif op == "set_podium":
             c = cat()
             names = (list(body.get("names", [])) + ["", "", ""])[:3]

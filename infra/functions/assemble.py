@@ -273,10 +273,11 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
         # Synchronized skating: a team-presentation page per team, first.
         if category.get("discipline") == "synchro":
             for team in category.get("teams", []):
-                # Turned off competition-wide or for this team: no page at all —
-                # no photo, no names, no free-text rows. The team still competed,
-                # so the information page's unit counts are deliberately unaffected.
-                if not team_page_enabled(structure, team):
+                # Turned off competition-wide, for this category or for this
+                # team: no page at all — no photo, no names, no free-text rows.
+                # The team still competed, so the information page's unit counts
+                # are deliberately unaffected.
+                if not team_page_enabled(structure, category, team):
                     continue
                 # Competition photo first, then the accreditation fallback picture
                 # (imported from the optional ZIP); neither → placeholder box.
@@ -284,8 +285,8 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
                          or _photo_bytes(structure, team.get("photoFallback"), get_file_bytes))
                 _append_pdf_bytes(writer, generate_pages.synchro_team_page(
                     team, photo, chrome,
-                    name_mode=team_name_mode(structure, team),
-                    text_rows=team_text_rows(category, team)))
+                    name_mode=team_name_mode(structure, category, team),
+                    text_rows=team_text_rows(team)))
 
         # Category protocol head page PDF
         _append_file(writer, structure, category.get("titlePdf"), get_file_bytes)

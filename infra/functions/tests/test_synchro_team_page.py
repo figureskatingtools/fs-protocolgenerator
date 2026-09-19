@@ -8,8 +8,9 @@ the convention — a hand-edited entry — has to come back whole rather than bl
 
 The other half of the file guards the page's one hard invariant: a full
 32-skater roster must still fit above the footer band once free-text rows have
-taken their share of the page. The text block is therefore capped, and the photo
-box is sized from whatever is left.
+taken their share of the page. The text block is therefore capped (a flat list of
+"Label  Value" lines, no headings), and the photo box is sized from whatever is
+left.
 """
 import io
 
@@ -18,6 +19,7 @@ from pypdf import PdfReader
 
 import branding
 import generate_pages as gp
+import structure as st
 
 ROSTER = ["KORHONEN Anna Maria", "VAN DER BERG Aino", "MÄKI-LUOTO Sofia"]
 TEAM = {"name": "Helsinki Finettes", "org": "HTK", "members": ROSTER}
@@ -103,7 +105,7 @@ def test_an_empty_entry_stays_empty():
 
 # ── free-text rows ────────────────────────────────────────────────────────────
 
-THEME = [{"segment": "Free Skating", "label": "Theme", "value": "Spies"}]
+THEME = [{"label": "Theme", "value": "Spies"}]
 
 
 def test_a_text_row_prints_its_label_and_value():
@@ -112,24 +114,24 @@ def test_a_text_row_prints_its_label_and_value():
     assert "Spies" in text
 
 
-def test_a_text_row_prints_its_segment_heading():
-    assert "FREE SKATING" in page_text(text_rows=THEME)
-
-
-def test_two_rows_of_one_segment_share_a_single_heading():
-    rows = THEME + [{"segment": "Free Skating", "label": "Music", "value": "Goldfinger"}]
-    assert page_text(text_rows=rows).count("FREE SKATING") == 1
+def test_the_rows_print_in_the_order_they_are_given():
+    rows = THEME + [{"label": "Music", "value": "Goldfinger"}]
+    text = page_text(text_rows=rows)
+    assert text.index("Theme") < text.index("Music")
 
 
 def test_an_over_long_row_still_renders():
     # The label is capped at 60 chars by the route, but a label that wide can leave
     # the value less room than the ellipsis it would shrink to — which must not hang.
-    rows = [{"segment": "", "label": "L" * 60, "value": "V" * 120}]
+    rows = [{"label": "L" * 60, "value": "V" * 120}]
     assert "L" * 20 in page_text(text_rows=rows)
 
 
-def test_a_team_level_row_prints_without_a_heading():
-    text = page_text(text_rows=[{"segment": "", "label": "Coach", "value": "M. Virta"}])
+def test_a_row_left_over_from_the_segment_days_still_prints():
+    # `structure.team_text_rows` strips the key, but the renderer must not care
+    # either: it reads only label and value.
+    rows = [{"segmentId": "seg-1234", "label": "Coach", "value": "M. Virta"}]
+    text = page_text(text_rows=rows)
     assert "Coach" in text and "M. Virta" in text
 
 
@@ -146,18 +148,35 @@ def test_text_rows_print_with_the_names_switched_off():
 
 # ── layout invariants ─────────────────────────────────────────────────────────
 
+def test_the_stored_cap_is_exactly_what_the_block_can_draw():
+    """The one assertion that stops the two constants drifting apart: every row
+    `structure.sanitize_text_fields` is willing to store must survive `_text_block`
+    unchanged, and one row more must not — otherwise a user types a row, the
+    backend keeps it, and the page silently never prints it."""
+    rows = [{"label": f"Row {i}", "value": "x"}
+            for i in range(st.MAX_TEAM_TEXT_FIELDS)]
+    lines, height = gp._text_block(rows)
+    assert len(lines) == st.MAX_TEAM_TEXT_FIELDS
+    assert height <= gp.TEXT_MAX_H
+    # And the cap is not needlessly low either — the 7th row is what the budget
+    # genuinely cannot draw.
+    one_more = rows + [{"label": "Over", "value": "x"}]
+    assert len(gp._text_block(one_more)[0]) == st.MAX_TEAM_TEXT_FIELDS
+
+
 def test_the_text_block_is_capped_so_the_roster_keeps_its_space():
-    many = [{"segment": "", "label": f"Row {i}", "value": "x"} for i in range(30)]
+    many = [{"label": f"Row {i}", "value": "x"} for i in range(30)]
     lines, height = gp._text_block(many)
     assert height <= gp.TEXT_MAX_H
     assert len(lines) < len(many)
 
 
-def test_the_text_block_never_ends_on_a_dangling_heading():
-    rows = [{"segment": f"Segment {i}", "label": f"Row {i}", "value": "x"}
-            for i in range(30)]
-    lines, _ = gp._text_block(rows)
-    assert lines[-1][0] == "row"
+def test_every_row_the_cap_admits_costs_the_same():
+    # Without segment headings the block is one row height per line, so the budget
+    # is simply TEXT_GAP plus n rows — the arithmetic the TEXT_MAX_H comment states.
+    lines, height = gp._text_block([{"label": f"Row {i}", "value": "x"}
+                                    for i in range(30)])
+    assert height == pytest.approx(gp.TEXT_GAP + len(lines) * gp.TEXT_ROW_H)
 
 
 def test_no_text_rows_means_no_reserved_space():
@@ -171,7 +190,7 @@ def test_a_full_roster_with_a_full_text_block_stays_above_the_footer():
     # footer band, which is what the TEXT_MAX_H budget buys.
     photo_top = 238 * gp.mm
     _, text_h = gp._text_block(
-        [{"segment": "", "label": f"Row {i}", "value": "x"} for i in range(30)])
+        [{"label": f"Row {i}", "value": "x"} for i in range(30)])
     cols, rows = gp._roster_grid(32, tight=True)
     roster_h = gp._roster_block_h(rows, True)
     box_h = gp._team_photo_box_h(photo_top, roster_h, text_h, gp.PHOTO_MAX_H)
@@ -182,7 +201,7 @@ def test_all_32_names_are_printed_next_to_a_text_block():
     # `_draw_roster` silently drops rows that fall below CONTENT_BOTTOM, so the
     # names coming back out of the PDF are the real end-to-end check.
     roster = [f"SUKUNIMI{i:02d} Etunimi{i:02d}" for i in range(32)]
-    rows = [{"segment": "", "label": f"Row {i}", "value": "x"} for i in range(30)]
+    rows = [{"label": f"Row {i}", "value": "x"} for i in range(30)]
     text = page_text({"name": "Team", "org": "HTK", "members": roster}, text_rows=rows)
     assert all(name in text for name in roster)
 
@@ -218,4 +237,4 @@ def test_the_plain_fallback_drops_the_roster_for_no_names(plain):
 
 def test_the_plain_fallback_prints_the_text_rows(plain):
     text = page_text(text_rows=THEME)
-    assert "Theme" in text and "Spies" in text and "FREE SKATING" in text
+    assert "Theme" in text and "Spies" in text

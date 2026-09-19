@@ -57,19 +57,29 @@ re-encoded (≤2000 px JPEG) and assigned to `photoFallback` (replacing any prio
 fallback file), unmatched ones land in the tray and are reported. Generation uses
 photo → fallback → placeholder.
 
-**Team-page settings.** Competition-wide `structure.teamPages` (`{enabled,
-nameMode}`) decides whether synchro team pages are produced at all and how much of
-each roster is printed (`NAME_MODES` = `full` | `firstNames` | `none`; `none` keeps
-the page but drops the skater list). Each team may override both — `team.pageEnabled`
-and `team.nameMode`, where `None` means *inherit* — and carries `team.textFields`,
-up to `MAX_TEAM_TEXT_FIELDS` free-typed rows printed on its page ("Free Skating
-theme: Spies"), each `{id, segmentId (None = team-level), label, value}`. Every read
-goes through the resolvers in `structure.py` (`team_pages_defaults`,
-`team_page_enabled`, `team_name_mode`, `team_text_rows`), which default a
-metadata.json written before the feature to today's behaviour — pages on, full
-names — so there is no migration. `team_text_rows` is also what orders the rows for
-printing (team-level first, then segment order) and what keeps a row whose segment
-was deleted, degrading it to team-level.
+**Team-page settings.** Two settings — whether synchro team pages are produced at
+all, and how much of each roster is printed (`NAME_MODES` = `full` | `firstNames` |
+`none`; `none` keeps the page but drops the skater list) — resolve through three
+levels: **competition → category → team**. Competition-wide `structure.teamPages`
+(`{enabled, nameMode}`) is the base; `category.pageEnabled` / `category.nameMode`
+and `team.pageEnabled` / `team.nameMode` override it, `None` meaning *inherit* at
+both lower levels. Nothing is copied down, so changing a category immediately moves
+every team that has not overridden it. Every read goes through the resolvers in
+`structure.py` (`team_pages_defaults`, `category_page_enabled`,
+`category_name_mode`, `team_page_enabled(structure, category, team)`,
+`team_name_mode(structure, category, team)`), which default a metadata.json written
+before the feature to today's behaviour — pages on, full names — so there is no
+migration.
+
+A team also carries `team.textFields`, up to `MAX_TEAM_TEXT_FIELDS` (6 — exactly the
+number `generate_pages._text_block` can draw inside `TEXT_MAX_H`, so a stored row is
+never one the page silently drops) free-typed rows
+printed on its page ("Theme: Spies"), each `{id, label, value}` — a flat list, in
+stored order, with no segment dimension. `team_text_rows(team)` is what drops the
+rows blank on both sides and hands the renderer plain `{label, value}` data;
+`sanitize_text_fields(rows)` normalises what the client sends and strips the
+`segmentId` rows written while the feature still attached them to segments (which
+`team_text_rows` likewise ignores rather than choking on).
 
 ## Assembly order (`assemble.py`)
 
@@ -79,8 +89,9 @@ page PDF (the category's `titlePdf` slot; "Protocol Head Page" in the UI) →
 podium page (when a photo or name exists) → total results PDF → per segment
 (results → panel → judges details) → last page (custom or default).
 
-A synchro team whose resolved `team_page_enabled` is false contributes **no page at
-all** — no photo, no names, no text rows. It still competed, so `_competition_stats`
+A synchro team whose resolved `team_page_enabled` is false — switched off
+competition-wide, by its category or by itself — contributes **no page at all**:
+no photo, no names, no text rows. It still competed, so `_competition_stats`
 (and with it the information page's Competition Units / Performances) is deliberately
 unaffected.
 
@@ -143,9 +154,12 @@ of the platform's shared competition file pool — see below), `get_file`
 reference, see below), `import_rosters`,
 `upload_fallback_photos` (bulk fallback-picture ZIP), `edit_structure`
 (manual add/remove/set ops — including `set_team_pages {enabled?, nameMode?}` for the
-competition-wide team-page defaults, and `set_team`'s `pageEnabled` / `nameMode` /
-`textFields` for a team's overrides and its free-text rows, the last two replaced
-wholesale like `members`), `generate_protocol`, plus the daily auto-deletion
+competition-wide team-page defaults, `set_category`'s `pageEnabled` / `nameMode` for
+a category's, and `set_team`'s `pageEnabled` / `nameMode` / `textFields` for a team's
+overrides and its free-text rows; the two overrides are tri-state everywhere below
+the competition level — an explicit `null` clears back to *inherit* — and
+`textFields` is replaced wholesale like `members`), `generate_protocol`, plus the
+daily auto-deletion
 timer.
 
 ### Shared competition file pool + auto-assignment
@@ -252,8 +266,10 @@ takes the remaining height (clamped 60–130 mm, or 60–185 mm when the names a
 switched off and it can grow). `TEXT_MAX_H` (45 mm, the gap under the photo included)
 is what buys that guarantee: it is sized so the photo box never has to fall back on
 its 60 mm floor, which would be the one way the last roster line could slip into the
-footer band. `_text_block` truncates to that budget and never leaves a dangling
-segment heading. `generate_pages._given_names` reverses `dt_partic`'s "FAMILY Given"
+footer band. `_text_block` truncates to that budget — at `TEXT_ROW_H` it admits six
+"Label  Value" rows (8 + 6 × 5.5 = 41 mm), which is why
+`structure.MAX_TEAM_TEXT_FIELDS` (and the frontend's mirror of it) is 6: the cap on
+what may be entered is exactly what prints. `generate_pages._given_names` reverses `dt_partic`'s "FAMILY Given"
 convention for the `firstNames` mode, returning an entry that does not follow it —
 a hand-edited name — whole rather than blank.
 
