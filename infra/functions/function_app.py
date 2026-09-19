@@ -671,13 +671,70 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
+def _read_pool_file(entity, filename, source):
+    """Read one file out of the platform's shared competition file pool.
+
+    `(bytes, None)` on success, `(None, response)` with the route-ready error
+    otherwise. The folder is derived from the competition row's bound
+    `PlatformId` plus a fixed folder name, never from the client: the `source`
+    query value `upload` selects the `uploads/` folder (what people uploaded)
+    and `fsm` selects `fsm/` (what the HOVTP listener pushed) — note the
+    singular query value against the plural folder. `filename` must already be
+    a basename and `source` already validated by the caller (the two routes
+    word that 400 differently). Shared by `import_platform_file` and
+    `parse_schedule`."""
+    platform_id = entity.get("PlatformId")
+    if not platform_id:
+        return None, sh.json_response(
+            {"error": "not_bound",
+             "message": "This competition is not linked to a platform competition"}, 409)
+    try:
+        container = sh.get_platform_container_client()
+    except Exception as e:
+        logging.error(f"Platform pool client creation failed: {e}")
+        return None, sh.json_response(
+            {"error": "platform_unavailable",
+             "message": "Could not reach the competition file pool"}, 502)
+    if container is None:
+        return None, sh.json_response(
+            {"error": "platform_not_configured",
+             "message": "The shared competition file pool is not configured"}, 503)
+
+    pool_path = f"{platform_id}/{'fsm' if source == 'fsm' else 'uploads'}/{filename}"
+    try:
+        blob = container.get_blob_client(pool_path)
+        if not blob.exists():
+            return None, sh.json_response(
+                {"error": "pool_file_not_found",
+                 "message": "File not found in the competition files"}, 404)
+        body = blob.download_blob().readall()
+    except ResourceNotFoundError:
+        return None, sh.json_response(
+            {"error": "pool_file_not_found",
+             "message": "File not found in the competition files"}, 404)
+    except Exception as e:
+        logging.error(f"Platform pool read failed for {pool_path}: {e}")
+        return None, sh.json_response(
+            {"error": "platform_unavailable",
+             "message": "The shared competition files are unavailable"}, 502)
+
+    if len(body) > sh.MAX_UPLOAD_SIZE:
+        return None, sh.json_response(
+            {"error": "file_too_large",
+             "message": f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB)."}, 413)
+    return body, None
+
+
 @app.route(route="import_platform_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     """Copy a file out of the platform's shared competition file pool into this
     competition, registering it exactly like a browser upload.
 
     The pool folder is derived server-side from the competition's bound
-    PlatformId — the client only names a file, never a path or a GUID. Errors
+    PlatformId — the client only names a file, never a path or a GUID. The
+    optional `source` query param picks which of the pool's two folders to read:
+    `upload` (the default, files people uploaded) or `fsm` (files the HOVTP
+    listener pushed); anything else is a 400 `invalid_source`. Errors
     carry a machine-readable code so the frontend can fall back to a direct
     upload when the feature is off or the competition is unbound."""
     if not _require_user(req):
@@ -692,51 +749,20 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
         return sh.json_response(
             {"error": "unsupported_type",
              "message": "Unsupported file type (PDF, image or XML only)"}, 400)
+    # The pool has two folders; the client picks one by name, never by path.
+    source = req.params.get('source') or 'upload'
+    if source not in ('upload', 'fsm'):
+        return sh.json_response(
+            {"error": "invalid_source", "message": "source must be 'upload' or 'fsm'"}, 400)
 
     try:
         entity, folder_path = _resolve(comp_id)
         if not entity:
             return sh.json_response(
                 {"error": "competition_not_found", "message": "Competition not found"}, 404)
-        platform_id = entity.get("PlatformId")
-        if not platform_id:
-            return sh.json_response(
-                {"error": "not_bound",
-                 "message": "This competition is not linked to a platform competition"}, 409)
-        try:
-            container = sh.get_platform_container_client()
-        except Exception as e:
-            logging.error(f"Platform pool client creation failed: {e}")
-            return sh.json_response(
-                {"error": "platform_unavailable",
-                 "message": "Could not reach the competition file pool"}, 502)
-        if container is None:
-            return sh.json_response(
-                {"error": "platform_not_configured",
-                 "message": "The shared competition file pool is not configured"}, 503)
-
-        pool_path = f"{platform_id}/uploads/{filename}"
-        try:
-            blob = container.get_blob_client(pool_path)
-            if not blob.exists():
-                return sh.json_response(
-                    {"error": "pool_file_not_found",
-                     "message": "File not found in the competition files"}, 404)
-            body = blob.download_blob().readall()
-        except ResourceNotFoundError:
-            return sh.json_response(
-                {"error": "pool_file_not_found",
-                 "message": "File not found in the competition files"}, 404)
-        except Exception as e:
-            logging.error(f"Platform pool read failed for {pool_path}: {e}")
-            return sh.json_response(
-                {"error": "platform_unavailable",
-                 "message": "The shared competition files are unavailable"}, 502)
-
-        if len(body) > sh.MAX_UPLOAD_SIZE:
-            return sh.json_response(
-                {"error": "file_too_large",
-                 "message": f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB)."}, 413)
+        body, err = _read_pool_file(entity, filename, source)
+        if err:
+            return err
 
         structure = sh.read_structure(folder_path)
         file_id, meta = _register_upload(structure, folder_path, filename, body, dict(req.params))
@@ -893,7 +919,25 @@ def _apply_schedule_meta(event: dict, meta: dict) -> None:
 
 @app.route(route="parse_schedule", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
-    """Upload + parse the schedule PDF; build the category/segment structure."""
+    """Parse the competition schedule; build the category/segment structure.
+
+    Two ways in, both ending in `parse_schedule_data` (DT_SCHEDULE XML or a
+    schedule PDF, auto-detected):
+
+    * the file as the **request body** — the browser's drop box;
+    * a **pool reference** — `poolName` (+ optional `source=upload|fsm`,
+      default `upload`) with an empty body, when the schedule is already in the
+      platform's shared competition file pool. The bytes are read through
+      `_read_pool_file`, i.e. exactly like `import_platform_file`: the folder
+      comes from the competition's bound PlatformId (409 `not_bound` without
+      one), the name is reduced to a basename, and the pool's own failures
+      surface as 503/502/404/413. An unknown `source` is a plain-text 400
+      `invalid_source`.
+
+    Either way an existing category list is only rebuilt with `force=true`
+    (409 otherwise), the source file is kept as `schedule.xml|pdf`, and the
+    parsed rink/dates auto-fill the event. A pool parse echoes back which pool
+    file it used in `source`."""
     if not _require_user(req):
         return func.HttpResponse("Unauthorized", status_code=401)
     comp_id = req.params.get('competition')
@@ -901,8 +945,16 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id:
         return func.HttpResponse("Missing competition", status_code=400)
     body = req.get_body()
-    if not body:
-        return func.HttpResponse("Missing schedule PDF body", status_code=400)
+    pool_name = req.params.get('poolName')
+    source = req.params.get('source') or 'upload'
+    if not body and not pool_name:
+        return func.HttpResponse(
+            "Missing schedule: send the file (PDF or DT_SCHEDULE XML) as the request "
+            "body, or name one in the competition file pool with poolName.",
+            status_code=400)
+    if not body and source not in ('upload', 'fsm'):
+        return func.HttpResponse("invalid_source: source must be 'upload' or 'fsm'",
+                                 status_code=400)
     try:
         entity, folder_path = _resolve(comp_id)
         if not entity:
@@ -913,6 +965,15 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(
                 "Competition already has categories. Re-parse with force=true to rebuild.",
                 status_code=409)
+
+        # No body = the schedule already sits in the shared competition file pool.
+        pool_ref = None
+        if not body:
+            filename = os.path.basename(pool_name)
+            body, err = _read_pool_file(entity, filename, source)
+            if err:
+                return err
+            pool_ref = {"poolName": filename, "source": source}
 
         # Keep the source schedule (PDF or DT_SCHEDULE XML) for re-parsing.
         is_xml = body[:2000].lstrip()[:5] == b"<?xml" or b"OdfBody" in body[:2000]
@@ -926,11 +987,14 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
         # Auto-fill event fields the schedule gives us, without clobbering user input.
         _apply_schedule_meta(structure.setdefault("event", {}), meta)
         sh.write_structure(folder_path, structure)
-        return sh.json_response({
+        result = {
             "rows": len(rows),
             "categories": len(structure["categories"]),
             "structure": structure,
-        })
+        }
+        if pool_ref:
+            result["source"] = pool_ref
+        return sh.json_response(result)
     except Exception as e:
         logging.error(f"Error parsing schedule: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
@@ -1053,34 +1117,43 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
     """Match every registered team onto a category and apply the result in place.
 
     Shared by the `import_rosters` route and the automatic re-match that runs when
-    a Total Results PDF arrives. A fresh `teams_xml` (+ optional `partic_xml`) is
-    archived under `rosters/`, which is exactly what lets the re-match run later
-    without re-uploading: without `teams_xml` the archived copy is used and the
-    pass is treated as automatic (see `_apply_assignments`).
+    a Total Results PDF arrives. Whichever XML is supplied is archived under
+    `rosters/`, which is exactly what lets a later pass run without re-uploading;
+    an archived copy is read only for the file this call did *not* bring. So a
+    partic-only body (the supported "add the skater names to the roster I already
+    imported" case) re-matches the archived TEAMS against the participants the
+    user just picked, rather than against the archived ones.
+
+    `auto` stays "no fresh TEAMS file drove this pass" — it is what stops
+    `_apply_assignments` moving an already-placed team on a non-exact hit — and is
+    therefore keyed on `teams_xml` alone, never on `partic_xml`.
 
     The structure is mutated (the caller persists it) and the report is stored in
     `structure["rosterImport"]` for the UI. Returns the summary, or None when
     there is nothing to match (no archived roster, or no teams in the XML)."""
     auto = teams_xml is None
+    fresh_partic = partic_xml is not None
     if auto:
         blob = _roster_blob(container, folder_path, "teams.xml")
         if not blob.exists():
             return None
         teams_xml = blob.download_blob().readall()
-        partic = _roster_blob(container, folder_path, "partic.xml")
-        partic_xml = partic.download_blob().readall() if partic.exists() else None
+        if not fresh_partic:
+            partic = _roster_blob(container, folder_path, "partic.xml")
+            partic_xml = partic.download_blob().readall() if partic.exists() else None
 
     participants = parse_participants(_as_bytes(partic_xml)) if partic_xml else {}
     teams = parse_team_rosters(_as_bytes(teams_xml), participants)
     if not teams:
         return None
 
+    # Keep the source XML files for the record (not draggable upload chips) and
+    # for later automatic re-matches — each one only when this call supplied it,
+    # so an archived copy is never rewritten with itself.
     if not auto:
-        # Keep the source XML files for the record (not draggable upload chips)
-        # and for later automatic re-matches.
         container.upload_blob(f"{folder_path}/rosters/teams.xml", _as_bytes(teams_xml), overwrite=True)
-        if partic_xml:
-            container.upload_blob(f"{folder_path}/rosters/partic.xml", _as_bytes(partic_xml), overwrite=True)
+    if fresh_partic:
+        container.upload_blob(f"{folder_path}/rosters/partic.xml", _as_bytes(partic_xml), overwrite=True)
 
     rows_by_cat = _result_rows_for_categories(structure, container, folder_path)
     report = roster_matching.match_teams(structure, teams, rows_by_cat)
@@ -1115,7 +1188,9 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
     DT_PARTIC_TEAMS file joined with one DT_PARTIC file (XML strings in the body).
 
     Body: {id, teamsXml?, particXml?} — without `teamsXml` the roster archived by
-    an earlier import is re-matched instead (409 when nothing was imported yet).
+    an earlier import is re-matched instead (409 when nothing was imported yet),
+    against the `particXml` of this call when it carries one (that is how skater
+    names are added to a TEAMS-only import) and otherwise against the archived one.
 
     One TEAMS file spans every synchro event, but teams register per *event* and
     compete per *block*: which block a team skated in shows up only in that block's
@@ -1144,12 +1219,16 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
         container = sh.get_container_client()
 
         if not teams_xml and not _roster_blob(container, folder_path, "teams.xml").exists():
-            return func.HttpResponse("No roster files imported yet", status_code=409)
+            return func.HttpResponse(
+                "No team roster has been imported for this competition yet — select the "
+                "DT_PARTIC_TEAMS file as well, not just DT_PARTIC.", status_code=409)
 
         summary = _run_roster_match(structure, container, folder_path,
                                     teams_xml=teams_xml or None, partic_xml=partic_xml or None)
         if summary is None:
-            return func.HttpResponse("No teams found in DT_PARTIC_TEAMS", status_code=422)
+            return func.HttpResponse(
+                "No teams found in the DT_PARTIC_TEAMS file — check that it is the team "
+                "export of this competition.", status_code=422)
 
         sh.write_structure(folder_path, structure)
         return sh.json_response({
@@ -1274,15 +1353,19 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
     Body: {id, op, ...}. Ops:
       add_category {name, discipline}
       remove_category {categoryId}
-      set_category {categoryId, name?, discipline?, order?, code?}
+      set_category {categoryId, name?, discipline?, order?, code?,
+                    pageEnabled?, nameMode?}
       add_segment {categoryId, name}
       remove_segment {categoryId, segmentId}
       set_segment {categoryId, segmentId, name?, order?, unitCount?}
       add_team {categoryId, org?, name?}
       remove_team {categoryId, teamId}
-      set_team {categoryId, teamId, org?, name?, members?}
+      set_team {categoryId, teamId, org?, name?, members?,
+                pageEnabled?, nameMode?, textFields?}
       set_podium {categoryId, names:[..]}
       set_page_mode {slot:'cover'|'lastPage', mode:'default'}
+      set_footer_enabled {enabled}
+      set_team_pages {enabled?, nameMode?}
     """
     if not _require_user(req):
         return func.HttpResponse("Unauthorized", status_code=401)
@@ -1320,6 +1403,14 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
                     c[k] = body[k]
             if "code" in body:
                 c["code"] = str(body["code"] or "").strip()[:32]
+            # The category's team-page defaults, tri-state exactly like a team's:
+            # an explicit null (or an unknown name mode) returns the category to
+            # the competition-wide default.
+            if "pageEnabled" in body:
+                v = body["pageEnabled"]
+                c["pageEnabled"] = None if v is None else bool(v)
+            if "nameMode" in body:
+                c["nameMode"] = st.coerce_name_mode(body["nameMode"])
         elif op == "add_segment":
             c = cat()
             c["segments"].append(st.new_segment(body.get("name", "Segment"), len(c["segments"])))
@@ -1350,6 +1441,15 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
             for k in ("org", "name", "members"):
                 if k in body:
                     t[k] = body[k]
+            # Team-page overrides are tri-state: an explicit null (or an unknown
+            # name mode) returns the team to its category's default.
+            if "pageEnabled" in body:
+                v = body["pageEnabled"]
+                t["pageEnabled"] = None if v is None else bool(v)
+            if "nameMode" in body:
+                t["nameMode"] = st.coerce_name_mode(body["nameMode"])
+            if "textFields" in body:
+                t["textFields"] = st.sanitize_text_fields(body["textFields"])
         elif op == "set_podium":
             c = cat()
             names = (list(body.get("names", [])) + ["", "", ""])[:3]
@@ -1361,6 +1461,14 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
                 structure[key] = {"mode": "default", "fileId": None}
         elif op == "set_footer_enabled":
             structure["footerEnabled"] = bool(body.get("enabled", True))
+        elif op == "set_team_pages":
+            # Competition-wide team-page defaults. No inherit state here, so an
+            # unknown name mode falls back to "full" rather than to None.
+            tp = structure.setdefault("teamPages", {"enabled": True, "nameMode": "full"})
+            if "enabled" in body:
+                tp["enabled"] = bool(body.get("enabled", True))
+            if "nameMode" in body:
+                tp["nameMode"] = st.coerce_name_mode(body["nameMode"]) or "full"
         else:
             return func.HttpResponse(f"Unknown op: {op}", status_code=400)
 

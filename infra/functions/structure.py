@@ -18,6 +18,20 @@ ROLE_KEYS = {
     "judgesDetails": "judgesDetailsPdf",
 }
 
+# How much of a synchro roster the team page prints. "none" keeps the page (photo,
+# team name, free-text rows) but drops the skater list entirely.
+NAME_MODES = ("full", "firstNames", "none")
+
+# Free-text rows a team page may carry ("Theme: Spies"). The cap is exactly what a
+# team page can print, so nothing the user types is stored and then silently
+# dropped: `generate_pages._text_block` starts its block at `TEXT_GAP` (8 mm) and
+# spends `TEXT_ROW_H` (5.5 mm) per row inside a `TEXT_MAX_H` (45 mm) budget, which
+# admits 6 rows (8 + 6 x 5.5 = 41 mm) and breaks before the 7th. Change either side
+# and change the other — tests/test_synchro_team_page.py pins them together.
+MAX_TEAM_TEXT_FIELDS = 6
+TEXT_LABEL_MAX = 60
+TEXT_VALUE_MAX = 120
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex[:6]}"
@@ -44,6 +58,9 @@ def new_structure(comp_id: str, name: str, dates: str, created_by: str, created_
         "header": {"mode": "default", "fileId": None},
         "footer": {"mode": "default", "fileId": None},
         "footerEnabled": True,   # draw the footer band on every page (toggleable)
+        # Synchro team-presentation pages: whether they are produced at all and how
+        # skater names are printed. Each team may override both (see new_team).
+        "teamPages": {"enabled": True, "nameMode": "full"},
         "scheduleParsed": False,
         # fileId -> {"filename", "kind" (pdf|image|xml), "size", "uploadedAt"}
         "files": {},
@@ -58,6 +75,10 @@ def new_category(name: str, discipline: str, order: int) -> dict:
         "code": "",          # ISU event code (from a DT_SCHEDULE import), if any
         "discipline": discipline if discipline in DISCIPLINES else "single",
         "order": order,
+        # Team-page defaults for this category's teams; None = inherit the
+        # competition-wide teamPages setting. Mirrors the per-team overrides.
+        "pageEnabled": None,
+        "nameMode": None,
         "titlePdf": None,
         "podium": {"photo": None, "names": ["", "", ""]},
         "totalResultsPdf": None,
@@ -93,6 +114,12 @@ def new_team(org: str = "", name: str = "") -> dict:
         # used at generation only when the team has no competition photo.
         "photoFallback": None,
         "members": [],
+        # Team-page overrides; None = inherit the category's setting (which in
+        # turn inherits the competition-wide teamPages one).
+        "pageEnabled": None,
+        "nameMode": None,
+        # Free-typed rows printed on the team page: {"id", "label", "value"}.
+        "textFields": [],
     }
 
 
@@ -169,6 +196,106 @@ def sorted_categories(structure: dict):
 
 def sorted_segments(category: dict):
     return sorted(category.get("segments", []), key=lambda s: (s.get("order", 0), s.get("name", "")))
+
+
+# ── team pages ────────────────────────────────────────────────────────────────
+#
+# Two settings — create the page at all, and how much of the roster to print —
+# resolve through three levels: the team's own override, else its category's,
+# else the competition-wide `teamPages`. The two upper levels are *defaults*, not
+# copies: None means "inherit", so changing a category moves every team that has
+# not overridden it. Every read goes through these resolvers, so a metadata.json
+# written before the feature existed resolves to today's behaviour (pages on,
+# full names) without a migration.
+
+def coerce_name_mode(value):
+    """A client-supplied name mode, or None when it is absent/blank/unknown — which
+    the resolvers below read as "inherit"."""
+    return value if value in NAME_MODES else None
+
+
+def team_pages_defaults(structure: dict) -> dict:
+    """The competition-wide team-page settings, filled in for structures written
+    before the setting existed."""
+    tp = structure.get("teamPages") or {}
+    return {
+        "enabled": tp.get("enabled", True) is not False,
+        "nameMode": coerce_name_mode(tp.get("nameMode")) or "full",
+    }
+
+
+def category_page_enabled(structure: dict, category: dict) -> bool:
+    """What this category hands its teams: its own override when it has one, else
+    the competition default. Only an explicit True/False overrides."""
+    override = (category or {}).get("pageEnabled")
+    if override is None:
+        return team_pages_defaults(structure)["enabled"]
+    return bool(override)
+
+
+def category_name_mode(structure: dict, category: dict) -> str:
+    """The roster mode this category hands its teams."""
+    return (coerce_name_mode((category or {}).get("nameMode"))
+            or team_pages_defaults(structure)["nameMode"])
+
+
+def team_page_enabled(structure: dict, category: dict, team: dict) -> bool:
+    """Whether this team gets a presentation page: its own override when it has
+    one, else what its category resolves to. Only an explicit True/False overrides."""
+    override = (team or {}).get("pageEnabled")
+    if override is None:
+        return category_page_enabled(structure, category)
+    return bool(override)
+
+
+def team_name_mode(structure: dict, category: dict, team: dict) -> str:
+    """'full' | 'firstNames' | 'none' for this team's roster."""
+    return (coerce_name_mode((team or {}).get("nameMode"))
+            or category_name_mode(structure, category))
+
+
+def team_text_rows(team: dict) -> list:
+    """The team's free-text rows in stored order, which is the order they print in.
+    Rows blank on both sides are dropped.
+
+    Each row comes back as {"label", "value"} — plain data, so the page renderer
+    needs no structure vocabulary. Rows stored while the feature still attached
+    them to segments carry a `segmentId`; it is ignored, never a reason to drop
+    the row."""
+    out = []
+    for row in (team or {}).get("textFields") or []:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or "").strip()
+        value = str(row.get("value") or "").strip()
+        if not label and not value:
+            continue
+        out.append({"label": label, "value": value})
+    return out
+
+
+def sanitize_text_fields(rows) -> list:
+    """Normalize a client-sent `textFields` list before it is stored: mint missing
+    ids, trim and length-cap label and value, drop rows blank on both sides, and cap
+    the list at MAX_TEAM_TEXT_FIELDS. A legacy `segmentId` is dropped rather than
+    kept, so rows written while they were segment-attached normalise on the next
+    save."""
+    out = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or "").strip()[:TEXT_LABEL_MAX]
+        value = str(row.get("value") or "").strip()[:TEXT_VALUE_MAX]
+        if not label and not value:
+            continue
+        out.append({
+            "id": str(row.get("id") or "").strip() or new_id("fld"),
+            "label": label,
+            "value": value,
+        })
+        if len(out) >= MAX_TEAM_TEXT_FIELDS:
+            break
+    return out
 
 
 # ── slot assignment ────────────────────────────────────────────────────────────

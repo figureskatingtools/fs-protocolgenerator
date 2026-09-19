@@ -57,6 +57,30 @@ re-encoded (≤2000 px JPEG) and assigned to `photoFallback` (replacing any prio
 fallback file), unmatched ones land in the tray and are reported. Generation uses
 photo → fallback → placeholder.
 
+**Team-page settings.** Two settings — whether synchro team pages are produced at
+all, and how much of each roster is printed (`NAME_MODES` = `full` | `firstNames` |
+`none`; `none` keeps the page but drops the skater list) — resolve through three
+levels: **competition → category → team**. Competition-wide `structure.teamPages`
+(`{enabled, nameMode}`) is the base; `category.pageEnabled` / `category.nameMode`
+and `team.pageEnabled` / `team.nameMode` override it, `None` meaning *inherit* at
+both lower levels. Nothing is copied down, so changing a category immediately moves
+every team that has not overridden it. Every read goes through the resolvers in
+`structure.py` (`team_pages_defaults`, `category_page_enabled`,
+`category_name_mode`, `team_page_enabled(structure, category, team)`,
+`team_name_mode(structure, category, team)`), which default a metadata.json written
+before the feature to today's behaviour — pages on, full names — so there is no
+migration.
+
+A team also carries `team.textFields`, up to `MAX_TEAM_TEXT_FIELDS` (6 — exactly the
+number `generate_pages._text_block` can draw inside `TEXT_MAX_H`, so a stored row is
+never one the page silently drops) free-typed rows
+printed on its page ("Theme: Spies"), each `{id, label, value}` — a flat list, in
+stored order, with no segment dimension. `team_text_rows(team)` is what drops the
+rows blank on both sides and hands the renderer plain `{label, value}` data;
+`sanitize_text_fields(rows)` normalises what the client sends and strips the
+`segmentId` rows written while the feature still attached them to segments (which
+`team_text_rows` likewise ignores rather than choking on).
+
 ## Assembly order (`assemble.py`)
 
 cover (custom or default) → event-info page → time-schedule page → for each
@@ -64,6 +88,12 @@ category in schedule order: *(synchro)* one team page per team → protocol head
 page PDF (the category's `titlePdf` slot; "Protocol Head Page" in the UI) →
 podium page (when a photo or name exists) → total results PDF → per segment
 (results → panel → judges details) → last page (custom or default).
+
+A synchro team whose resolved `team_page_enabled` is false — switched off
+competition-wide, by its category or by itself — contributes **no page at all**:
+no photo, no names, no text rows. It still competed, so `_competition_stats`
+(and with it the information page's Competition Units / Performances) is deliberately
+unaffected.
 
 Every *generated interior* page (event-info, schedule, podium, synchro team — not
 the cover/last page, not inserted result PDFs) is stamped with a competition-wide
@@ -120,9 +150,16 @@ event form) and `event.rink` — create seeds, hit/adopt backfill empty fields),
 `save_event_settings`, `upload_file`, `import_platform_file` (copies a file out
 of the platform's shared competition file pool — see below), `get_file`
 (streams bytes for previews),
-`assign_file`, `delete_file`, `parse_schedule`, `import_rosters`,
+`assign_file`, `delete_file`, `parse_schedule` (body upload *or* a pool
+reference, see below), `import_rosters`,
 `upload_fallback_photos` (bulk fallback-picture ZIP), `edit_structure`
-(manual add/remove/set ops), `generate_protocol`, plus the daily auto-deletion
+(manual add/remove/set ops — including `set_team_pages {enabled?, nameMode?}` for the
+competition-wide team-page defaults, `set_category`'s `pageEnabled` / `nameMode` for
+a category's, and `set_team`'s `pageEnabled` / `nameMode` / `textFields` for a team's
+overrides and its free-text rows; the two overrides are tri-state everywhere below
+the competition level — an explicit `null` clears back to *inherit* — and
+`textFields` is replaced wholesale like `members`), `generate_protocol`, plus the
+daily auto-deletion
 timer.
 
 ### Shared competition file pool + auto-assignment
@@ -134,15 +171,31 @@ entry and the optional slot assignment (`slotKind` + `categoryId`/`segmentId`/
 A target the structure no longer has leaves the file in the tray instead of
 failing the request.
 
-`POST import_platform_file?competition=&name=` copies a file the platform holds
-in `competition-data/<PlatformId>/uploads/<name>` (read-only, via
-`sh.get_platform_container_client()` / `PLATFORM_STORAGE_ACCOUNT` +
-`PLATFORM_DATA_CONTAINER`) into this competition, stamping `meta.poolName`. The
-pool folder comes from the competition's bound `PlatformId`, never from the
-client. JSON errors carry a code so the frontend can fall back to a direct
-upload: 409 `not_bound`, 503 `platform_not_configured`, 404
-`pool_file_not_found`, 502 `platform_unavailable`, 413 `file_too_large`, 400
-`unsupported_type`/`missing_parameter`.
+`POST import_platform_file?competition=&name=[&source=upload|fsm]` copies a
+file the platform holds in `competition-data/<PlatformId>/<uploads|fsm>/<name>`
+(read-only, via `sh.get_platform_container_client()` / `PLATFORM_STORAGE_ACCOUNT`
++ `PLATFORM_DATA_CONTAINER`) into this competition, stamping `meta.poolName`.
+`source` defaults to `upload` (what people uploaded); `fsm` is what the HOVTP
+listener pushed. The pool folder comes from the competition's bound `PlatformId`
+plus that fixed folder name, never from the client. JSON errors carry a code so
+the frontend can fall back to a direct upload: 409 `not_bound`, 503
+`platform_not_configured`, 404 `pool_file_not_found`, 502
+`platform_unavailable`, 413 `file_too_large`, 400
+`unsupported_type`/`invalid_source`/`missing_parameter`.
+
+`POST parse_schedule?competition=&poolName=[&source=upload|fsm][&force=true]`
+with an **empty body** parses the schedule straight out of that same pool
+(`DT_SCHEDULE_FSK….xml` or `…_CompetitionSchedule.pdf`) instead of from an
+uploaded body — the bytes come from the shared `_read_pool_file(entity,
+filename, source)` helper, so the binding check, folder resolution, size cap and
+error codes are literally `import_platform_file`'s (409 `not_bound`, 503, 502,
+404, plus a plain-text 400 `invalid_source`). Everything after that is the
+upload path unchanged (409 unless `force`, `schedule.xml|pdf` kept,
+`parse_schedule_data`, event auto-fill); the success JSON adds
+`"source": {"poolName": "<filename>", "source": "upload|fsm"}` (the query value
+`upload` reads the `uploads/` folder, `fsm` reads `fsm/`). The frontend uses this automatically: a
+bound competition with no categories and a schedule in the pool parses it on
+open, and the Schedule section offers a "Use it" / "Replace from it" button.
 
 `autoAssigned` marks a placement made by filename recognition rather than by a
 human: `&autoAssigned=1` on either upload route tags the file **only** when the
@@ -158,7 +211,9 @@ automatic with body `"autoAssigned": true`.
     `VenueName` (auto-fills `event.rink`/`event.dates`), and an ISU `Unit Code`
     used to group units into categories (so Advanced Novice L1 `…ADVNOV----` and
     L2 `…ADVNOV--01` stay distinct while a category's Short Program + Free Skating
-    merge). The category `code` is stored for future roster auto-linking.
+    merge). The category `code` (`unit_code[:22]`) is stored and is what the
+    frontend's filename auto-assignment matches FSM's exported PDFs against —
+    their names start with the very same RSC — so it must stay verbatim.
   - **Schedule PDF (fallback)** — calibrated against the Finnish "COMPETITION
     SCHEDULE" export: glued start/finish times, 2-space category|segment columns,
     multi-day segment merge, and synchro detected from the document title
@@ -168,7 +223,8 @@ automatic with body `"autoAssigned": true`.
   **DT_PARTIC** (`<Participant Code GivenName FamilyName>`) on athlete `Code`.
   One TEAMS + one PARTIC file cover the **whole competition**. Names render
   "FAMILY Given", rosters sorted alphabetically; Name/Organisation are stripped
-  (real exports carry trailing spaces).
+  (real exports carry trailing spaces). That "FAMILY Given" shape is load-bearing:
+  `generate_pages._given_names` reverses it for the team page's given-names mode.
 - `roster_matching.py` — pure team→category placement, used by `import_rosters`.
   Teams register per **event** (`RegisteredEvent="…MLAIKU----"`) but often compete
   per **block** ("Aikuiset, Mupi L1"/"L2"; DT_SCHEDULE codes `…MLAIKU--01`), and
@@ -204,9 +260,19 @@ The real cover, last page and header/footer art are now the approved brand kit (
 are unavailable, plus neutral placeholder boxes for missing team photos. The podium
 page lays the top three out in podium shape (1st centre/highest, 2nd left, 3rd
 right) and leaves the photo area empty (no placeholder) when no podium photo is set.
-The synchro team page sizes its photo box dynamically — roster rows (2 columns,
-3 past 44 skaters) are reserved first so up to 32 names always fit above the
-footer band, and the photo takes the remaining height (clamped 60–130 mm).
+The synchro team page sizes its photo box dynamically — the free-text block and the
+roster rows (2 columns, 3 past 44 skaters, or past 32 when text rows share the page)
+are reserved first so up to 32 names always fit above the footer band, and the photo
+takes the remaining height (clamped 60–130 mm, or 60–185 mm when the names are
+switched off and it can grow). `TEXT_MAX_H` (45 mm, the gap under the photo included)
+is what buys that guarantee: it is sized so the photo box never has to fall back on
+its 60 mm floor, which would be the one way the last roster line could slip into the
+footer band. `_text_block` truncates to that budget — at `TEXT_ROW_H` it admits six
+"Label  Value" rows (8 + 6 × 5.5 = 41 mm), which is why
+`structure.MAX_TEAM_TEXT_FIELDS` (and the frontend's mirror of it) is 6: the cap on
+what may be entered is exactly what prints. `generate_pages._given_names` reverses `dt_partic`'s "FAMILY Given"
+convention for the `firstNames` mode, returning an entry that does not follow it —
+a hand-edited name — whole rather than blank.
 
 ## Local development
 
