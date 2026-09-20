@@ -9,8 +9,7 @@ and connecting files together*; missing graphics fall back to generated defaults
 and is served at `https://figureskatingtools.com/protocolgenerator/`; that site's
 router handles the Entra login and proxies `/protocolgenerator/api/*` to this
 Function App with `x-proxy-secret` + `x-forwarded-user-email` (see
-**PROXY-CONTRACT.md**). The legacy `frontend/` directory is kept for reference
-only — it is not built or deployed anymore.
+**PROXY-CONTRACT.md**).
 
 ## Stack
 
@@ -279,14 +278,15 @@ a hand-edited name — whole rather than blank.
 Backend only: `cd infra/functions && func start`, then call it with the proxy
 headers (`x-proxy-secret`, `x-forwarded-user-email` — see **PROXY-CONTRACT.md**).
 To drive it from a UI, run the router + Vite dev server in `figureskatingtools-site`
-pointed at this `func start` instance. (`start_locally.sh` and the `frontend/`
-tree still reference the retired standalone SPA.)
+pointed at this `func start` instance.
 
 Backend tests (synthetic fixtures only — never commit real competition data,
 the OdfBody exports contain minors' personal data):
 
 ```bash
-cd infra/functions && uv run --with-requirements requirements-dev.txt python -m pytest tests -q
+cd infra/functions
+python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests -q
 ```
 
 ## Deploy
@@ -294,13 +294,27 @@ cd infra/functions && uv run --with-requirements requirements-dev.txt python -m 
 Push to `main` → prod via `.github/workflows/deploy.yml`; `test` via manual
 `workflow_dispatch`. Two jobs only: **deploy-infra** (`az deployment sub create`
 on `infra/main.bicep`, params `resourceGroupName` + `proxySharedSecret`) and
-**deploy-backend** (zip + `az functionapp deployment source config-zip`). Manual
-equivalents: `deploy_infra.sh`, `deploy_backend.sh`.
+**deploy-backend** (run the pytest suite, then zip +
+`az functionapp deployment source config-zip`). Manual equivalents:
+`deploy_infra.sh`, `deploy_backend.sh`. deploy-backend runs
+`python -m pytest tests -q` *before* packaging, so a red suite blocks the zip
+deploy.
 
-Only the **test** environment was ever deployed for this tool — prod never
-existed, so there is no `protocols.figureskatingtools.com` binding, redirect or
-teardown to worry about. `deploy_frontend.sh` and `create_auth_app.sh` are
-leftovers from the standalone-Web-App era and are no longer used.
+Both environments are live: **test** and **prod** (`rg-fs-protocols-prod`,
+Function App `func-fs-protocols-wcpslt4m33wkk`), prod auto-deployed on every
+push to `main`. There is no `protocols.figureskatingtools.com` binding,
+redirect or teardown to worry about — the UI is served by the site app at
+`/protocolgenerator/`.
+
+All jobs in `deploy.yml` pin `runs-on: ubuntu-26.04` rather than `ubuntu-latest`
+([actions/runner-images#14748](https://github.com/actions/runner-images/issues/14748)
+flips `-latest` from 24.04 to 26.04 between 2026-10-19 and 2026-11-19); bump that
+label deliberately — verify via a `test`-environment dispatch first, roll back to
+`ubuntu-24.04` if needed — and never set it back to `ubuntu-latest`.
+
+Dependabot version updates (weekly, grouped per ecosystem, `.github/dependabot.yml`,
+read from the default branch `main` only) open their PRs against `test`, so they
+ride the next `test` → `main` promotion instead of auto-deploying prod on merge.
 
 Required GitHub environment config: secrets `AZURE_CLIENT_ID`,
 `PROXY_SHARED_SECRET`; vars `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,

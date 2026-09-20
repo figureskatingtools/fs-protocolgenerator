@@ -43,7 +43,6 @@ login and proxies `/protocolgenerator/api/*` to this Function App, adding
   and Table (`competitions`, `generatedprotocols`).
 - **Hosting** — Flex-Consumption Function App + its storage account. IaC in `infra/`
   (Bicep). No Web App, no custom domain, no app registration in this repo.
-- `frontend/` is the retired standalone SPA, kept for reference only.
 
 ## Local development
 
@@ -56,12 +55,18 @@ curl -s http://localhost:7071/api/list_competitions \
 Requires Azure Functions Core Tools and an Azurite storage emulator. For a UI, run the
 router + Vite dev server from `figureskatingtools-site` against this backend.
 
-Tests: `cd infra/functions && uv run --with-requirements requirements-dev.txt python -m pytest tests -q`
+Tests:
+
+```bash
+cd infra/functions
+python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests -q
+```
 
 ## Deployment
 
 Pushing to `main` deploys prod via `.github/workflows/deploy.yml`; `test` is deployed by
 manual `workflow_dispatch`. The workflow has two jobs — infrastructure (Bicep) and backend
-(zip deploy). Manual equivalents: `deploy_infra.sh`, `deploy_backend.sh`. In practice only
-the **test** environment has ever been provisioned for this tool. See `CLAUDE.md` for the
-full architecture.
+(zip deploy); the backend job runs the pytest suite before packaging, so a red suite blocks
+the deploy. Manual equivalents: `deploy_infra.sh`, `deploy_backend.sh`. Both the **test** and
+**prod** environments are live. See `CLAUDE.md` for the full architecture.
