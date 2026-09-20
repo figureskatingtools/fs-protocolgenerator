@@ -144,7 +144,15 @@ competition GUID → tool record: `PlatformId` lookup → normalized-name adopti
 of pre-existing records → create; soft-deleted rows are never resurrected;
 optional `dates`/`venue` seed `event.dates` (dd.MM.yyyy, marked
 `event.datesAuto` so a schedule parse may refine it until the user saves the
-event form) and `event.rink` — create seeds, hit/adopt backfill empty fields),
+event form) and `event.rink` — create seeds, hit/adopt backfill empty fields; on a
+`PlatformId` hit whose sanitized platform name differs from the stored `Name`,
+`_sync_competition_name` MERGE-writes `Name` first (authoritative — on failure the
+old name is reported) and `_rename_structure` mirrors it into `metadata.json`
+best-effort: `name` always, `event.title` (the printed "Protocol title") only while
+it still equals the old record name, so a customised title survives; the structure
+is read once and written once together with the dates/venue backfill; `FolderPath`
+never changes (blob paths and protocol filenames hang off it); adoption and create
+never rename),
 `get_competition_details`,
 `save_event_settings`, `upload_file`, `import_platform_file` (copies a file out
 of the platform's shared competition file pool — see below), `get_file`
