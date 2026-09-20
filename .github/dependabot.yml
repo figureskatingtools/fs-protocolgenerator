@@ -1,0 +1,33 @@
+# Dependabot version updates. Weekly, grouped into one PR per ecosystem,
+# targeting `test` so updates flow through the normal test -> verify ->
+# promote-to-main process instead of auto-deploying prod on merge.
+#
+# NOTE: this file is only read from the default branch (main).
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/infra/functions"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Europe/Helsinki"
+    target-branch: "test"
+    groups:
+      pip-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Europe/Helsinki"
+    target-branch: "test"
+    groups:
+      actions-dependencies:
+        patterns:
+          - "*"

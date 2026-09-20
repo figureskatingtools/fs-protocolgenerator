@@ -344,6 +344,43 @@ def _adopt_competition_by_name(comp_table, platform_id, name):
     return entity
 
 
+def _sync_competition_name(comp_table, entity, safe_name) -> str:
+    """Table half of a platform rename: MERGE `Name` when the sanitized platform
+    name differs from the stored one. Authoritative — the new name is reported
+    only once stored; on failure the old name is returned and nothing else
+    changes. FolderPath is never touched (blob paths and protocol filenames hang
+    off it). Returns the name to report."""
+    old_name = entity.get("Name", entity["RowKey"])
+    if not safe_name or safe_name == old_name:
+        return old_name
+    try:
+        comp_table.update_entity({
+            "PartitionKey": "GLOBAL", "RowKey": entity["RowKey"], "Name": safe_name,
+        }, mode=UpdateMode.MERGE)
+    except Exception as e:
+        logging.warning(
+            f"Could not rename competition {entity['RowKey']} to '{safe_name}': {e}")
+        return old_name
+    entity["Name"] = safe_name
+    logging.info(
+        f"Renamed competition {entity['RowKey']}: '{old_name}' -> '{safe_name}'")
+    return safe_name
+
+
+def _rename_structure(structure, old_name, new_name) -> bool:
+    """Blob half of a rename: the record `name` (page heading, protocol filename)
+    always follows, while `event.title` — the user-editable "Protocol title"
+    printed on the PDFs — follows only while it still equals the old record name,
+    i.e. nobody customised it. True when something changed."""
+    if new_name == old_name:
+        return False
+    structure["name"] = new_name
+    event = structure.setdefault("event", {})
+    if event.get("title") == old_name:
+        event["title"] = new_name
+    return True
+
+
 @app.route(route="resolve_competition", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     """Map the site's active platform competition to this tool's competition,
@@ -353,7 +390,9 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     The platform's date (ISO) and venue seed `event.dates` (as Finnish dd.MM.yyyy,
     flagged `datesAuto` so the schedule's full span may later replace it) and
     `event.rink`. On a hit or an adoption the same values only *backfill* empty
-    fields."""
+    fields, and a hit also follows a rename of the platform competition (the
+    stored `Name`, the structure `name` and — while still untouched — the printed
+    protocol title; never the folder path)."""
     email = _require_user(req)
     if not email:
         return func.HttpResponse("Unauthorized", status_code=401)
@@ -379,21 +418,29 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
         if not comp_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
 
-        entity = (_find_bound_competition(comp_table, platform_id)
-                  or _adopt_competition_by_name(comp_table, platform_id, name))
+        entity = _find_bound_competition(comp_table, platform_id)
+        bound = entity is not None
+        if not bound:
+            entity = _adopt_competition_by_name(comp_table, platform_id, name)
         if entity:
-            if dates or venue:
-                folder_path = entity.get("FolderPath", entity["RowKey"])
+            folder_path = entity.get("FolderPath", entity["RowKey"])
+            old_name = entity.get("Name", entity["RowKey"])
+            # Only a PlatformId hit follows a platform rename; adoption matched *by* name.
+            new_name = _sync_competition_name(comp_table, entity, safe_name) if bound else old_name
+            if new_name != old_name or dates or venue:
                 try:
                     structure = sh.read_structure(folder_path)
-                    if structure and _backfill_platform_event(structure, dates, venue):
-                        sh.write_structure(folder_path, structure)
+                    if isinstance(structure, dict):
+                        changed = _backfill_platform_event(structure, dates, venue)
+                        changed = _rename_structure(structure, old_name, new_name) or changed
+                        if changed:
+                            sh.write_structure(folder_path, structure)
                 except Exception as e:
-                    # Backfill is a nicety; never fail the binding over it.
-                    logging.warning(f"Platform event backfill failed for {folder_path}: {e}")
+                    # Backfill and rename mirror are niceties; never fail the binding over them.
+                    logging.warning(f"Structure sync failed for {folder_path}: {e}")
             return sh.json_response({
                 "id": entity["RowKey"],
-                "name": entity.get("Name", entity["RowKey"]),
+                "name": new_name,
                 "created": False,
             })
 

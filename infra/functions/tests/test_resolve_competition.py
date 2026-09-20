@@ -41,6 +41,7 @@ class FakeTable:
     def __init__(self, *entities):
         self.rows = {e["RowKey"]: dict(e) for e in entities}
         self.queries = []
+        self.updates = []
 
     def create_table(self):
         pass
@@ -54,6 +55,7 @@ class FakeTable:
         self.rows[entity["RowKey"]] = dict(entity)
 
     def update_entity(self, entity, mode=None):
+        self.updates.append(dict(entity))
         self.rows.setdefault(entity["RowKey"], {}).update(entity)
 
     def upsert_entity(self, entity):
@@ -313,6 +315,137 @@ def test_a_competition_without_metadata_still_binds(table):
     table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
     assert payload(resolve(venue="Vierumäki Ice Hall"))["id"] == "abc12345"
     assert table.writes == []
+
+
+# ── platform rename follows through on a hit ─────────────────────────────────
+
+NEW = "Autumn Trophy 2026"
+
+
+def test_a_renamed_platform_competition_is_renamed_here_too(table):
+    """The site renamed the competition; the binding is by PlatformId, so the
+    stored name is stale. Table first, then the structure — but never the folder
+    path, which every blob and generated protocol hangs off."""
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    structure = seed_structure(table, "abc12345")
+    assert payload(resolve(name=NEW, dates="")) == {
+        "id": "abc12345", "name": NEW, "created": False}
+    assert table.rows["abc12345"]["Name"] == NEW
+    assert table.rows["abc12345"]["FolderPath"] == "Spring Trophy 2026-abc12345"
+    assert structure["name"] == NEW
+    assert structure["event"]["title"] == NEW
+    assert table.writes == ["Spring Trophy 2026-abc12345"]
+
+
+def test_a_customised_protocol_title_survives_a_rename(table):
+    """`event.title` is the user-editable title printed on the PDFs; it follows
+    the record name only while nobody has typed their own."""
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    structure = seed_structure(table, "abc12345", title="Kevätkisat — virallinen pöytäkirja")
+    assert payload(resolve(name=NEW, dates=""))["name"] == NEW
+    assert structure["name"] == NEW
+    assert structure["event"]["title"] == "Kevätkisat — virallinen pöytäkirja"
+    assert table.writes == ["Spring Trophy 2026-abc12345"]
+
+
+def test_a_rename_and_a_backfill_share_one_write(table):
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    structure = seed_structure(table, "abc12345")
+    assert payload(resolve(name=NEW, dates="", venue="Vierumäki Ice Hall"))["name"] == NEW
+    assert structure["name"] == NEW
+    assert structure["event"]["rink"] == "Vierumäki Ice Hall"
+    assert table.writes == ["Spring Trophy 2026-abc12345"]
+
+
+def test_an_unchanged_name_touches_nothing(table):
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    structure = seed_structure(table, "abc12345")
+    assert payload(resolve(dates=""))["name"] == "Spring Trophy 2026"
+    assert table.updates == []
+    assert table.writes == []
+    assert structure["name"] == "Spring Trophy 2026"
+
+
+def test_a_name_that_sanitizes_to_the_stored_one_is_not_a_rename(table):
+    """The site's name may carry characters `sanitize_name` drops; the comparison
+    happens after sanitizing, so that is not a rename."""
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    seed_structure(table, "abc12345")
+    assert payload(resolve(name="Spring Trophy 2026!!", dates=""))["name"] == "Spring Trophy 2026"
+    assert table.updates == []
+    assert table.writes == []
+
+
+def test_a_failed_table_write_reports_the_old_name(table):
+    """The table is authoritative: a rename that could not be stored is not
+    reported, and the structure is left alone."""
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    structure = seed_structure(table, "abc12345")
+
+    def _boom(entity, mode=None):
+        raise RuntimeError("table unavailable")
+
+    table.update_entity = _boom
+    assert payload(resolve(name=NEW, dates=""))["name"] == "Spring Trophy 2026"
+    assert table.rows["abc12345"]["Name"] == "Spring Trophy 2026"
+    assert structure["name"] == "Spring Trophy 2026"
+    assert table.writes == []
+
+
+def test_a_rename_without_metadata_still_updates_the_table(table):
+    """Blobs can be gone; the rename must not depend on them."""
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    assert payload(resolve(name=NEW, dates=""))["name"] == NEW
+    assert table.rows["abc12345"]["Name"] == NEW
+    assert table.writes == []
+
+
+def test_a_broken_structure_read_does_not_fail_the_rename(table, monkeypatch):
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    seed_structure(table, "abc12345")
+
+    def _boom(folder_path):
+        raise ValueError("metadata.json is corrupt")
+
+    monkeypatch.setattr(sh, "read_structure", _boom)
+    assert payload(resolve(name=NEW, dates=""))["name"] == NEW
+    assert table.rows["abc12345"]["Name"] == NEW
+    assert table.writes == []
+
+
+def test_adoption_keeps_the_stored_name(table):
+    """Adoption matched *by* name, so the platform name differs only in the
+    punctuation/whitespace the normalizer ignores — nothing to rename."""
+    table.rows["adopt000"] = entity("adopt000", "Spring Trophy 2026")
+    structure = seed_structure(table, "adopt000")
+    assert payload(resolve(name="Spring  Trophy, 2026!", dates=""))["name"] == "Spring Trophy 2026"
+    assert table.rows["adopt000"]["Name"] == "Spring Trophy 2026"
+    assert structure["name"] == "Spring Trophy 2026"
+    assert table.writes == []
+
+
+def test_rename_structure_follows_an_untouched_title():
+    structure = {"name": "Old", "event": {"title": "Old", "rink": "Hall"}}
+    assert fa._rename_structure(structure, "Old", "New") is True
+    assert structure == {"name": "New", "event": {"title": "New", "rink": "Hall"}}
+
+
+def test_rename_structure_keeps_a_customised_title():
+    structure = {"name": "Old", "event": {"title": "Mine"}}
+    assert fa._rename_structure(structure, "Old", "New") is True
+    assert structure == {"name": "New", "event": {"title": "Mine"}}
+
+
+def test_rename_structure_is_a_no_op_for_the_same_name():
+    structure = {"name": "Old", "event": {"title": "Old"}}
+    assert fa._rename_structure(structure, "Old", "Old") is False
+    assert structure == {"name": "Old", "event": {"title": "Old"}}
+
+
+def test_rename_structure_creates_a_missing_event():
+    structure = {"name": "Old"}
+    assert fa._rename_structure(structure, "Old", "New") is True
+    assert structure == {"name": "New", "event": {}}
 
 
 # ── Finnish date rendering ───────────────────────────────────────────────────

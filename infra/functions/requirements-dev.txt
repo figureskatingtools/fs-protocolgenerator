@@ -3,6 +3,7 @@
 # SDKs, assemble reportlab/pypdf, fallback_photos pillow) plus pytest.
 #
 #   cd infra/functions
-#   uv run --with-requirements requirements-dev.txt python -m pytest tests -q
+#   python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+#   .venv/bin/python -m pytest tests -q
 -r requirements.txt
-pytest~=8.3
+pytest~=9.1
