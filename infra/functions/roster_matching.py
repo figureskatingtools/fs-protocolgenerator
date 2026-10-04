@@ -26,6 +26,7 @@ report. Name folding is shared with the photo ZIP importer
 """
 from dt_partic import event_label
 from fallback_photos import normalize
+from structure import discipline_signal
 
 # Discipline prefixes an ISU event code may carry before the event token itself.
 _EVENT_PREFIXES = ("FSKXSYNCHRON", "FSKSYNCHRON", "SYNCHRON", "FSKX", "FSK")
@@ -97,15 +98,20 @@ def categories_for_event(structure: dict, event_code: str) -> list:
     results are needed to tell them apart):
 
       1. **code** — the categories a DT_SCHEDULE import stamped with a code that
-         is a prefix of, or prefixed by, this event's code;
+         equals this event's code or extends it by a dash-led block suffix (and
+         vice versa). The dash boundary matters: senior synchro is the bare
+         `FSKXSYNCHRON`, a plain string prefix of junior's `FSKXSYNCHRONJUNIOR`;
       2. **name fragment** — the event token's tail matched against the start of a
          category-name word ("MLAIKU" -> "AIKU" -> "Aikuiset, Mupi L1"), longest
          fragment first so a shorter accidental match can never win;
-      3. **ISU label** — the English label as a substring of the category name.
+      3. **ISU label** — the English label as a substring of the category name
+         (how a bare senior code, which has no token, reaches "SM-seniorit").
 
-    No discipline gate: categories parsed from a schedule *PDF* are all typed
-    `single` until an import proves otherwise, so gating on synchro would make
-    the name/label passes dead code."""
+    Every pass then prefers synchro: DT_PARTIC_TEAMS holds only synchro teams, so
+    a hit whose name signals another discipline ("SM-JUNIORI Naiset" next to
+    "SM-JUNIORI Muodostelma") is dropped. It is a preference, not a gate — when
+    every hit is so named they all stand — and it reads names only, never the
+    stored `discipline` (see `_other_discipline`)."""
     cats = structure.get("categories") or []
     ev = strip_event(event_code).casefold()
     if not ev:
@@ -114,10 +120,10 @@ def categories_for_event(structure: dict, event_code: str) -> list:
     hits = []
     for cat in cats:
         cc = strip_event(cat.get("code")).casefold()
-        if cc and (cc == ev or cc.startswith(ev) or ev.startswith(cc)):
+        if cc and (cc == ev or cc.startswith(ev + "-") or ev.startswith(cc + "-")):
             hits.append(cat)
     if hits:
-        return hits
+        return _prefer_synchro(hits)
 
     token = event_token(event_code)
     for size in range(len(token), MIN_FRAGMENT - 1, -1):
@@ -125,14 +131,32 @@ def categories_for_event(structure: dict, event_code: str) -> list:
         hits = [c for c in cats
                 if any(w.startswith(fragment) for w in normalize(c.get("name", "")).split())]
         if hits:
-            return hits
+            return _prefer_synchro(hits)
 
     label = event_label(event_code).casefold().strip()
     if label:
         hits = [c for c in cats if label in normalize(c.get("name", ""))]
         if hits:
-            return hits
+            return _prefer_synchro(hits)
     return []
+
+
+def _other_discipline(cat: dict) -> bool:
+    """The category's *name* positively signals a non-synchro discipline
+    ("…Naiset", "…Miehet", pairs, dance). The stored `discipline` is deliberately
+    not consulted: placing a team flips a category to synchro, so after a
+    partial import one block would read synchro and its untouched siblings
+    single, and preferring on that would funnel every still-unplaced team into
+    the first resulted block."""
+    signal = discipline_signal(cat.get("name", ""))
+    return signal is not None and signal != "synchro"
+
+
+def _prefer_synchro(hits: list) -> list:
+    """`hits` without the categories named for another discipline, or all of
+    them when every hit is."""
+    kept = [c for c in hits if not _other_discipline(c)]
+    return kept or hits
 
 
 # ── the matching pipeline ─────────────────────────────────────────────────────

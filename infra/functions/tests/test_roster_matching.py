@@ -149,3 +149,64 @@ def test_match_teams_does_not_mutate_the_structure():
     rm.match_teams(s, [team("Blue Herons", org="BHK", event=TULO)],
                    {"c1": [row(1, "Blue Herons", "BHK")]})
     assert s == before
+
+
+# ── senior vs junior synchro ──────────────────────────────────────────────────
+
+SENIOR = "FSKXSYNCHRON----------------------"
+JUNIOR = "FSKXSYNCHRONJUNIOR----------------"
+
+
+def test_senior_code_is_not_a_prefix_match_for_junior():
+    """Senior is the bare `FSKXSYNCHRON`, a string prefix of `FSKXSYNCHRONJUNIOR`;
+    each event must still map only onto its own category."""
+    s = struct(cat("sen", "SM-seniorit", code="FSKXSYNCHRON----------"),
+               cat("jun", "SM-juniorit", code="FSKXSYNCHRONJUNIOR----"))
+    assert [c["id"] for c in rm.categories_for_event(s, SENIOR)] == ["sen"]
+    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["jun"]
+    report = rm.match_teams(s, [team("Blue Herons", event=SENIOR),
+                                team("Silver Comets", event=JUNIOR)], {})
+    assert [(a["team"]["name"], a["categoryId"], a["method"])
+            for a in report["assignments"]] == \
+        [("Blue Herons", "sen", "event"), ("Silver Comets", "jun", "event")]
+    assert not report["unmatched"]
+
+
+def test_senior_event_finds_a_codeless_senior_category_by_label():
+    s = struct(cat("jun", "SM-juniorit"), cat("sen", "SM-seniorit"))
+    assert [c["id"] for c in rm.categories_for_event(s, SENIOR)] == ["sen"]
+    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["jun"]
+
+
+def test_mixed_singles_and_synchro_competition_prefers_the_synchro_category():
+    """A schedule-PDF competition with singles and synchro under one level name:
+    "junior" hits all three JUNIORI categories, but rosters are synchro only."""
+    s = struct(cat("jn", "SM-JUNIORI Naiset"), cat("jm", "SM-JUNIORI Miehet"),
+               cat("sm", "SM-SENIORI Miehet"), cat("sn", "SM-SENIORI Naiset"),
+               dict(cat("js", "SM-JUNIORI Muodostelma"), discipline="synchro"),
+               dict(cat("ss", "SM-SENIORI Muodostelma"), discipline="synchro"))
+    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["js"]
+    assert [c["id"] for c in rm.categories_for_event(s, SENIOR)] == ["ss"]
+    report = rm.match_teams(s, [team("Blue Herons", event=SENIOR),
+                                team("Silver Comets", event=JUNIOR)], {})
+    assert [(a["team"]["name"], a["categoryId"]) for a in report["assignments"]] == \
+        [("Blue Herons", "ss"), ("Silver Comets", "js")]
+    assert not report["unmatched"]
+
+
+def test_synchro_named_category_is_preferred_even_while_typed_single():
+    s = struct(cat("jn", "SM-JUNIORI Naiset"), cat("js", "SM-JUNIORI Muodostelma"))
+    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["js"]
+
+
+def test_partial_import_does_not_collapse_sibling_blocks():
+    """Placing a team marks its category synchro while its untouched sibling
+    block stays typed single; the stored discipline must not make the first
+    resulted block swallow every team still waiting for its own sheet."""
+    s = struct(dict(cat("c1", "Tulokkaat, Mupi L1"), discipline="synchro"),
+               cat("c2", "Tulokkaat, Mupi L2"))
+    assert [c["id"] for c in rm.categories_for_event(s, TULO)] == ["c1", "c2"]
+    report = rm.match_teams(s, [team("Blue Herons", event=TULO)],
+                            {"c1": [row(1, "Northern Lights", "NLK")]})
+    assert not report["assignments"] and not report["withdrawn"]
+    assert "matches 2 categories" in report["unmatched"][0]["reason"]

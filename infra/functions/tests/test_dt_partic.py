@@ -65,7 +65,11 @@ def test_members_are_family_given_sorted_with_unknown_codes_passed_through():
 def test_empty_event_code_has_no_label():
     """A placeholder label would substring-match every category name."""
     assert event_label("") == ""
-    assert event_label("FSKXSYNCHRON----") == ""
+    assert event_label("FSKX----") == ""
+
+
+def test_bare_synchro_code_is_senior():
+    assert event_label("FSKXSYNCHRON----------------------") == "Senior"
 
 
 def test_event_label_known_and_unknown_tokens():

@@ -111,12 +111,16 @@ def event_label(code: str) -> str:
     """Human label for an ISU event code, e.g.
     'FSKXSYNCHRONADVNOV----' -> 'Advanced Novice'.
 
-    An empty (or prefix-only) code yields `""` — callers substring-match labels
-    against category names, so a placeholder label would match everything."""
+    A bare synchro code (`'FSKXSYNCHRON----'`, no event token) is the senior
+    event and reads 'Senior'. Any other empty (or prefix-only) code yields `""` —
+    callers substring-match labels against category names, so a placeholder
+    label would match everything."""
     token = (code or "").replace("-", "").strip()
     for prefix in ("FSKXSYNCHRON", "FSKSYNCHRON", "SYNCHRON", "FSKX", "FSK"):
         if token.startswith(prefix):
             token = token[len(prefix):]
+            if not token and prefix.endswith("SYNCHRON"):
+                return "Senior"
             break
     if not token:
         return ""
