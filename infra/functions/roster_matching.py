@@ -97,11 +97,14 @@ def categories_for_event(structure: dict, event_code: str) -> list:
     results are needed to tell them apart):
 
       1. **code** — the categories a DT_SCHEDULE import stamped with a code that
-         is a prefix of, or prefixed by, this event's code;
+         equals this event's code or extends it by a dash-led block suffix (and
+         vice versa). The dash boundary matters: senior synchro is the bare
+         `FSKXSYNCHRON`, a plain string prefix of junior's `FSKXSYNCHRONJUNIOR`;
       2. **name fragment** — the event token's tail matched against the start of a
          category-name word ("MLAIKU" -> "AIKU" -> "Aikuiset, Mupi L1"), longest
          fragment first so a shorter accidental match can never win;
-      3. **ISU label** — the English label as a substring of the category name.
+      3. **ISU label** — the English label as a substring of the category name
+         (how a bare senior code, which has no token, reaches "SM-seniorit").
 
     No discipline gate: categories parsed from a schedule *PDF* are all typed
     `single` until an import proves otherwise, so gating on synchro would make
@@ -114,7 +117,7 @@ def categories_for_event(structure: dict, event_code: str) -> list:
     hits = []
     for cat in cats:
         cc = strip_event(cat.get("code")).casefold()
-        if cc and (cc == ev or cc.startswith(ev) or ev.startswith(cc)):
+        if cc and (cc == ev or cc.startswith(ev + "-") or ev.startswith(cc + "-")):
             hits.append(cat)
     if hits:
         return hits
