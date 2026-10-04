@@ -26,6 +26,7 @@ report. Name folding is shared with the photo ZIP importer
 """
 from dt_partic import event_label
 from fallback_photos import normalize
+from structure import discipline_signal
 
 # Discipline prefixes an ISU event code may carry before the event token itself.
 _EVENT_PREFIXES = ("FSKXSYNCHRON", "FSKSYNCHRON", "SYNCHRON", "FSKX", "FSK")
@@ -106,9 +107,11 @@ def categories_for_event(structure: dict, event_code: str) -> list:
       3. **ISU label** — the English label as a substring of the category name
          (how a bare senior code, which has no token, reaches "SM-seniorit").
 
-    No discipline gate: categories parsed from a schedule *PDF* are all typed
-    `single` until an import proves otherwise, so gating on synchro would make
-    the name/label passes dead code."""
+    Every pass then prefers synchro: DT_PARTIC_TEAMS holds only synchro teams, so
+    when a pass hits synchro and non-synchro categories alike ("SM-JUNIORI
+    Naiset" / "SM-JUNIORI Muodostelma") only the synchro ones are kept. It is a
+    preference, not a gate — schedule-*PDF* categories may all still be typed
+    `single`, and then every hit stands."""
     cats = structure.get("categories") or []
     ev = strip_event(event_code).casefold()
     if not ev:
@@ -120,7 +123,7 @@ def categories_for_event(structure: dict, event_code: str) -> list:
         if cc and (cc == ev or cc.startswith(ev + "-") or ev.startswith(cc + "-")):
             hits.append(cat)
     if hits:
-        return hits
+        return _prefer_synchro(hits)
 
     token = event_token(event_code)
     for size in range(len(token), MIN_FRAGMENT - 1, -1):
@@ -128,14 +131,25 @@ def categories_for_event(structure: dict, event_code: str) -> list:
         hits = [c for c in cats
                 if any(w.startswith(fragment) for w in normalize(c.get("name", "")).split())]
         if hits:
-            return hits
+            return _prefer_synchro(hits)
 
     label = event_label(event_code).casefold().strip()
     if label:
         hits = [c for c in cats if label in normalize(c.get("name", ""))]
         if hits:
-            return hits
+            return _prefer_synchro(hits)
     return []
+
+
+def _is_synchro(cat: dict) -> bool:
+    return (cat.get("discipline") == "synchro"
+            or discipline_signal(cat.get("name", "")) == "synchro")
+
+
+def _prefer_synchro(hits: list) -> list:
+    """The synchro categories among `hits`, or all of them when there are none."""
+    synchro = [c for c in hits if _is_synchro(c)]
+    return synchro or hits
 
 
 # ── the matching pipeline ─────────────────────────────────────────────────────
