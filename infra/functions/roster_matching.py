@@ -108,10 +108,10 @@ def categories_for_event(structure: dict, event_code: str) -> list:
          (how a bare senior code, which has no token, reaches "SM-seniorit").
 
     Every pass then prefers synchro: DT_PARTIC_TEAMS holds only synchro teams, so
-    when a pass hits synchro and non-synchro categories alike ("SM-JUNIORI
-    Naiset" / "SM-JUNIORI Muodostelma") only the synchro ones are kept. It is a
-    preference, not a gate — schedule-*PDF* categories may all still be typed
-    `single`, and then every hit stands."""
+    a hit whose name signals another discipline ("SM-JUNIORI Naiset" next to
+    "SM-JUNIORI Muodostelma") is dropped. It is a preference, not a gate — when
+    every hit is so named they all stand — and it reads names only, never the
+    stored `discipline` (see `_other_discipline`)."""
     cats = structure.get("categories") or []
     ev = strip_event(event_code).casefold()
     if not ev:
@@ -141,15 +141,22 @@ def categories_for_event(structure: dict, event_code: str) -> list:
     return []
 
 
-def _is_synchro(cat: dict) -> bool:
-    return (cat.get("discipline") == "synchro"
-            or discipline_signal(cat.get("name", "")) == "synchro")
+def _other_discipline(cat: dict) -> bool:
+    """The category's *name* positively signals a non-synchro discipline
+    ("…Naiset", "…Miehet", pairs, dance). The stored `discipline` is deliberately
+    not consulted: placing a team flips a category to synchro, so after a
+    partial import one block would read synchro and its untouched siblings
+    single, and preferring on that would funnel every still-unplaced team into
+    the first resulted block."""
+    signal = discipline_signal(cat.get("name", ""))
+    return signal is not None and signal != "synchro"
 
 
 def _prefer_synchro(hits: list) -> list:
-    """The synchro categories among `hits`, or all of them when there are none."""
-    synchro = [c for c in hits if _is_synchro(c)]
-    return synchro or hits
+    """`hits` without the categories named for another discipline, or all of
+    them when every hit is."""
+    kept = [c for c in hits if not _other_discipline(c)]
+    return kept or hits
 
 
 # ── the matching pipeline ─────────────────────────────────────────────────────

@@ -243,8 +243,10 @@ automatic with body `"autoAssigned": true`.
   (`categories_for_event`: trailing-dash-stripped code prefix at a dash boundary
   — bare senior `FSKXSYNCHRON` must not swallow `FSKXSYNCHRONJUNIOR` → event-token
   fragment vs. category-name words, "MLAIKU"→"Aikuiset…" → ISU/Finnish label, a
-  bare synchro code reading "Senior"; each pass keeps only its synchro hits when
-  it has any, so "SM-JUNIORI Naiset" never competes with "SM-JUNIORI Muodostelma").
+  bare synchro code reading "Senior"; each pass drops hits whose *name* signals
+  another discipline, so "SM-JUNIORI Naiset" never competes with "SM-JUNIORI
+  Muodostelma" — names only, since placing a team flips a category's stored
+  `discipline` to synchro and would otherwise skew a partial import).
   Everything else is *reported*, never guessed: `withdrawn` (registered, on no
   sheet, all blocks parsed) or `unmatched` with an actionable reason. The report
   persists as `structure["rosterImport"]` (UI panel), the XMLs are archived under

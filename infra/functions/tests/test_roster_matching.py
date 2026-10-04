@@ -197,3 +197,16 @@ def test_mixed_singles_and_synchro_competition_prefers_the_synchro_category():
 def test_synchro_named_category_is_preferred_even_while_typed_single():
     s = struct(cat("jn", "SM-JUNIORI Naiset"), cat("js", "SM-JUNIORI Muodostelma"))
     assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["js"]
+
+
+def test_partial_import_does_not_collapse_sibling_blocks():
+    """Placing a team marks its category synchro while its untouched sibling
+    block stays typed single; the stored discipline must not make the first
+    resulted block swallow every team still waiting for its own sheet."""
+    s = struct(dict(cat("c1", "Tulokkaat, Mupi L1"), discipline="synchro"),
+               cat("c2", "Tulokkaat, Mupi L2"))
+    assert [c["id"] for c in rm.categories_for_event(s, TULO)] == ["c1", "c2"]
+    report = rm.match_teams(s, [team("Blue Herons", event=TULO)],
+                            {"c1": [row(1, "Northern Lights", "NLK")]})
+    assert not report["assignments"] and not report["withdrawn"]
+    assert "matches 2 categories" in report["unmatched"][0]["reason"]
