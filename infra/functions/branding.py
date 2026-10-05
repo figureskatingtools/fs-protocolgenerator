@@ -30,6 +30,8 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
+import image_sanitize
+
 try:
     from PIL import Image, ImageOps
 except Exception:  # pragma: no cover
@@ -78,7 +80,7 @@ def _register_fonts():
         try:
             pdfmetrics.registerFont(TTFont(name, os.path.join(FONTS, filename)))
         except Exception as e:
-            logging.warning(f"Could not register font {name}: {e}")
+            logging.warning(f"Could not register font {name}: {type(e).__name__}")
     _FONTS_READY = True
 
 
@@ -211,7 +213,7 @@ def draw_cover(c, *, name: str, dates: str = "", location: str = "", organizer: 
         c.drawImage(wm, wm_right - wm_w, 72 * PX, wm_w, wm_h,
                     preserveAspectRatio=True, mask='auto')
     except Exception as e:
-        logging.warning(f"cover watermark failed: {e}")
+        logging.warning(f"cover watermark failed: {type(e).__name__}")
 
     # Top gradient hairline (11px).
     _grad_h(c, 0, PAGE_H - 11 * PX, PAGE_W, 11 * PX)
@@ -225,7 +227,7 @@ def draw_cover(c, *, name: str, dates: str = "", location: str = "", organizer: 
         c.drawImage(mk, pad_x, PAGE_H - pad_top - mark_h, mark_w, mark_h,
                     preserveAspectRatio=True, mask='auto')
     except Exception as e:
-        logging.warning(f"cover skate mark failed: {e}")
+        logging.warning(f"cover skate mark failed: {type(e).__name__}")
 
     # Dynamic name lines (Raleway Bold 65px, max-width 606px, balanced).
     name_size = 65 * PX
@@ -320,7 +322,7 @@ def draw_last_page(c):
         c.drawImage(wm, cx - wm_w / 2, PAGE_H - 843 * PX - wm_h, wm_w, wm_h,
                     preserveAspectRatio=True, mask='auto')
     except Exception as e:
-        logging.warning(f"last page watermark failed: {e}")
+        logging.warning(f"last page watermark failed: {type(e).__name__}")
 
     # Gradient hairlines (11px), top and bottom.
     _grad_h(c, 0, PAGE_H - 11 * PX, PAGE_W, 11 * PX)
@@ -335,7 +337,7 @@ def draw_last_page(c):
         c.drawImage(mk, cx - mark_w / 2, PAGE_H - 162 * PX - mark_h, mark_w, mark_h,
                     preserveAspectRatio=True, mask='auto')
     except Exception as e:
-        logging.warning(f"last page skate mark failed: {e}")
+        logging.warning(f"last page skate mark failed: {type(e).__name__}")
 
     _text_center(c, cx, 540 * PX, "THANK YOU",
                  F_RALEWAY_SEMI, 21 * PX, SLATE, char_space=6.3 * PX)
@@ -388,7 +390,7 @@ def draw_default_header(c, *, name: str = "", dates: str = "", location: str = "
         c.drawImage(img, 0, PAGE_H - HEADER_H, PAGE_W, HEADER_H,
                     preserveAspectRatio=False, mask='auto')
     except Exception as e:
-        logging.warning(f"header band image failed: {e}")
+        logging.warning(f"header band image failed: {type(e).__name__}")
 
     # Header.png is 2480×307 px; map design px into the band.
     sx = PAGE_W / 2480.0
@@ -414,7 +416,7 @@ def draw_default_footer(c):
         img = ImageReader(_asset("footer.png"))
         c.drawImage(img, 0, 0, PAGE_W, FOOTER_H, preserveAspectRatio=False, mask='auto')
     except Exception as e:
-        logging.warning(f"footer band image failed: {e}")
+        logging.warning(f"footer band image failed: {type(e).__name__}")
 
 
 # ── competition-information page (page 2) ──────────────────────────────────────
@@ -448,7 +450,7 @@ def draw_event_info(c, *, name="", organization="", authorization="",
         c.drawImage(wm, (440 + 50) * SX - wm_w, PAGE_H - 578 * SY, wm_w, wm_h,
                     preserveAspectRatio=True, mask='auto')
     except Exception as e:
-        logging.warning(f"event-info watermark failed: {e}")
+        logging.warning(f"event-info watermark failed: {type(e).__name__}")
 
     # Eyebrow.
     _text(c, pad_l, 96 * SY, "COMPETITION INFORMATION",
@@ -686,26 +688,16 @@ def schedule_page(rows) -> bytes:
 # photo is supplied the photo area is left as plain white space (per design).
 
 def _load_reader(img_bytes):
-    """ImageReader for a photo plus its pixel size (EXIF-rotated, RGB)."""
+    """ImageReader for a photo plus its pixel size — EXIF-rotated and re-encoded
+    from its pixels alone (image_sanitize), so no upload metadata is embedded."""
     try:
-        if Image is not None:
-            im = Image.open(io.BytesIO(img_bytes))
-            try:
-                im = ImageOps.exif_transpose(im)
-            except Exception:
-                pass
-            if im.mode not in ("RGB", "L"):
-                im = im.convert("RGB")
-            iw, ih = im.size
-            out = io.BytesIO()
-            im.save(out, format="JPEG", quality=88)
-            out.seek(0)
-            return ImageReader(out), iw, ih
-        reader = ImageReader(io.BytesIO(img_bytes))
-        iw, ih = reader.getSize()
-        return reader, iw, ih
+        cleaned = image_sanitize.clean_jpeg(img_bytes)
+        if cleaned is None:
+            return None, 0, 0
+        jpeg, iw, ih = cleaned
+        return ImageReader(io.BytesIO(jpeg)), iw, ih
     except Exception as e:
-        logging.warning(f"podium photo load failed: {e}")
+        logging.warning(f"podium photo load failed: {type(e).__name__}")
         return None, 0, 0
 
 

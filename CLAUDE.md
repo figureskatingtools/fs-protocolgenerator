@@ -264,6 +264,27 @@ automatic with body `"autoAssigned": true`.
   ("1Shadows ETK 69.29 1"), and the nation/club is the last non-numeric column
   (often mixed-case: "KaTa", "SeiTL").
 
+## Output privacy (`image_sanitize.py`, `pdf_sanitize.py`)
+
+The published protocol must hold nothing beyond its visible pages. Every photo
+(podium, team, fallback, custom header/footer/cover image) goes through
+`image_sanitize.clean_jpeg`, which rebuilds the picture from its decoded pixels
+(EXIF orientation applied first) — Pillow would otherwise copy a JPEG's COM
+comment into the re-save; without Pillow nothing is embedded. Then, right before
+the single `writer.write`, `pdf_sanitize.sanitize` strips annotations (links,
+comments, widgets), page actions, page/XObject XMP and private data, the APPn/COM
+segments of every embedded JPEG (inserted PDFs included, lossless — APP0/APP14
+kept; image XObjects reached via /XObject, soft masks, tiling patterns and Type 3
+glyphs, plus inline BI/ID/EI images), page/XObject `/AF` associated files, any
+outline/name tree/form/open action/structure tree, sets the Document
+Info to exactly Title (event title) / Author (`event.organization`) / Creator /
+Producer, and frees every object not reachable from the trailer
+(`collect_garbage` — pypdf's `remove_unreferenced` misses self-referencing
+clusters). A JPEG it cannot decode or parse raises `SanitizeError` and
+`generate_protocol` answers 422 instead of publishing it. Generation-path logs print exception *types* only, since a message can
+quote page text. `tests/test_pdf_privacy.py` checks all of it with pikepdf
+(test-only dependency) on deliberately dirty, invented inputs.
+
 ## Defaults / backups
 
 The real cover, last page and header/footer art are now the approved brand kit (see

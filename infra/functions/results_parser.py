@@ -94,7 +94,7 @@ def parse_result_rows(pdf_bytes) -> list:
     try:
         text = _read_text(pdf_bytes)
     except Exception as e:
-        logging.warning(f"Could not read results PDF: {e}")
+        logging.warning(f"Could not read results PDF: {type(e).__name__}")
         return []
 
     rows, seen = [], set()

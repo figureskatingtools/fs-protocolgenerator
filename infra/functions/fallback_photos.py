@@ -25,12 +25,7 @@ import unicodedata
 import zipfile
 from pathlib import PurePosixPath
 
-try:
-    from PIL import Image, ImageOps, UnidentifiedImageError
-except Exception:  # pragma: no cover
-    Image = None
-    ImageOps = None
-    UnidentifiedImageError = Exception
+import image_sanitize
 
 # Guards: a ZIP is operator-supplied, so cap the work it can ask for. The
 # per-entry limit is checked against the *claimed* uncompressed size, before any
@@ -144,22 +139,14 @@ def parse_zip(zip_bytes):
 
 
 def _reencode(raw: bytes) -> bytes:
-    """EXIF-rotate, downscale to TARGET_LONG_EDGE and re-encode as JPEG (mirrors
-    branding._load_reader). PIL's decompression-bomb cap stays on deliberately:
-    an oversized picture is rejected rather than decoded."""
-    if Image is None:
+    """EXIF-rotate, downscale to TARGET_LONG_EDGE and re-encode as a metadata-free
+    JPEG (image_sanitize.clean_jpeg — the same path every embedded photo takes).
+    PIL's decompression-bomb cap stays on deliberately: an oversized picture is
+    rejected rather than decoded."""
+    cleaned = image_sanitize.clean_jpeg(raw, max_edge=TARGET_LONG_EDGE, quality=JPEG_QUALITY)
+    if cleaned is None:
         raise RuntimeError("PIL is not available")
-    im = Image.open(io.BytesIO(raw))
-    try:
-        im = ImageOps.exif_transpose(im)
-    except Exception:
-        pass
-    if im.mode != "RGB":
-        im = im.convert("RGB")
-    im.thumbnail((TARGET_LONG_EDGE, TARGET_LONG_EDGE))
-    out = io.BytesIO()
-    im.save(out, format="JPEG", quality=JPEG_QUALITY)
-    return out.getvalue()
+    return cleaned[0]
 
 
 # ── matching an image onto a team ─────────────────────────────────────────────
