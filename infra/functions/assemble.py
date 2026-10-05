@@ -28,6 +28,7 @@ from pypdf import PdfReader, PdfWriter
 
 import branding
 import generate_pages
+import pdf_sanitize
 import results_parser
 from structure import (sorted_categories, sorted_segments,
                        team_name_mode, team_page_enabled, team_text_rows)
@@ -113,7 +114,7 @@ def _append_pdf_bytes(writer: PdfWriter, pdf_bytes: bytes, skip_empty: bool = Fa
             writer.add_page(page)
         return True
     except Exception as e:
-        logging.warning(f"Failed to append a PDF: {e}")
+        logging.warning(f"Failed to append a PDF: {type(e).__name__}")
         return False
 
 
@@ -219,7 +220,7 @@ def _append_branded_cover(writer: PdfWriter, structure: dict, event: dict):
                 location=location, organizer=organizer))
             return
     except Exception as e:
-        logging.warning(f"Branded cover failed, using plain cover: {e}")
+        logging.warning(f"Branded cover failed, using plain cover: {type(e).__name__}")
     _append_pdf_bytes(writer, generate_pages.default_cover_page(name, event.get("dates", "")))
 
 
@@ -230,7 +231,7 @@ def _append_branded_last_page(writer: PdfWriter):
         if _append_pdf_bytes(writer, branding.last_page_pdf()):
             return
     except Exception as e:
-        logging.warning(f"Branded last page failed, using plain last page: {e}")
+        logging.warning(f"Branded last page failed, using plain last page: {type(e).__name__}")
     _append_pdf_bytes(writer, generate_pages.default_last_page())
 
 
@@ -315,6 +316,12 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
     else:
         _append_branded_last_page(writer)
 
+    # Nothing but the visible pages leaves this function: strip annotations,
+    # actions, XMP, image metadata etc. from every page (inserted PDFs included),
+    # set the Document Info to the competition / organising club, drop orphaned
+    # objects, then write the file once — a fresh, non-incremental save.
+    pdf_sanitize.sanitize(writer, title=chrome["name"],
+                          author=(event.get("organization") or "").strip())
     out = io.BytesIO()
     writer.write(out)
     out.seek(0)

@@ -1,9 +1,12 @@
 # Test dependencies: the runtime requirements (the tests import the real
 # modules — function_app pulls in azure.functions, storage_helpers the storage
-# SDKs, assemble reportlab/pypdf, fallback_photos pillow) plus pytest.
+# SDKs, assemble reportlab/pypdf, fallback_photos pillow) plus pytest and pikepdf.
 #
 #   cd infra/functions
 #   python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 #   .venv/bin/python -m pytest tests -q
 -r requirements.txt
 pytest~=9.1
+# Independent PDF inspector (qpdf) for tests/test_pdf_privacy.py — test-only, so
+# the privacy checks do not trust the very library (pypdf) that wrote the file.
+pikepdf~=10.16

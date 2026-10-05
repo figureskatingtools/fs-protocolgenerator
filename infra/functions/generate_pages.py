@@ -20,12 +20,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 import branding
-
-try:
-    from PIL import Image, ImageOps
-except Exception:  # pragma: no cover
-    Image = None
-    ImageOps = None
+import image_sanitize
 
 PAGE_W, PAGE_H = A4
 MARGIN = 22 * mm
@@ -114,25 +109,18 @@ def _centered(c, text, y, font, size, color=INK):
 
 def _fit_image_box(img_bytes, box_w, box_h):
     """Return (ImageReader, draw_w, draw_h) scaled to fit a box, preserving aspect
-    ratio. Falls back gracefully if PIL is unavailable."""
+    ratio. The picture is re-encoded from its pixels first (image_sanitize), so no
+    EXIF/XMP/IPTC/comment of the upload reaches the PDF; without PIL nothing is
+    embedded and the caller draws its placeholder."""
     try:
-        if Image is not None:
-            im = Image.open(io.BytesIO(img_bytes))
-            im = ImageOps.exif_transpose(im)
-            if im.mode not in ("RGB", "L"):
-                im = im.convert("RGB")
-            iw, ih = im.size
-            out = io.BytesIO()
-            im.save(out, format="JPEG", quality=88)
-            out.seek(0)
-            reader = ImageReader(out)
-        else:
-            reader = ImageReader(io.BytesIO(img_bytes))
-            iw, ih = reader.getSize()
+        cleaned = image_sanitize.clean_jpeg(img_bytes)
+        if cleaned is None:
+            return None, 0, 0
+        jpeg, iw, ih = cleaned
         scale = min(box_w / iw, box_h / ih)
-        return reader, iw * scale, ih * scale
+        return ImageReader(io.BytesIO(jpeg)), iw * scale, ih * scale
     except Exception as e:
-        logging.warning(f"Could not load image for embedding: {e}")
+        logging.warning(f"Could not load image for embedding: {type(e).__name__}")
         return None, 0, 0
 
 
@@ -195,7 +183,7 @@ def event_info_page(event: dict, chrome=None, stats=None) -> bytes:
             )
             return _finish(buf, c)
         except Exception as e:
-            logging.warning(f"Branded event-info page failed, using plain: {e}")
+            logging.warning(f"Branded event-info page failed, using plain: {type(e).__name__}")
 
     buf, c = _new_canvas()
     _draw_chrome(c, chrome)
@@ -240,7 +228,7 @@ def time_schedule_page(rows, chrome=None) -> bytes:
                                    new_page=lambda: _draw_chrome(c, chrome))
             return _finish(buf, c)
         except Exception as e:
-            logging.warning(f"Branded time-schedule page failed, using plain: {e}")
+            logging.warning(f"Branded time-schedule page failed, using plain: {type(e).__name__}")
 
     buf, c = _new_canvas()
     _draw_chrome(c, chrome)
@@ -302,7 +290,7 @@ def podium_page(category_name: str, photo_bytes, names, chrome=None) -> bytes:
                                  photo_bytes=photo_bytes, entries=names)
             return _finish(buf, c)
         except Exception as e:
-            logging.warning(f"Branded podium page failed, using plain: {e}")
+            logging.warning(f"Branded podium page failed, using plain: {type(e).__name__}")
 
     buf, c = _new_canvas()
     _draw_chrome(c, chrome)
@@ -608,7 +596,7 @@ def synchro_team_page(team: dict, photo_bytes, chrome=None,
             _draw_branded_team(c, name, org, members, photo_bytes, text_rows, show_names)
             return _finish(buf, c)
         except Exception as e:
-            logging.warning(f"Branded team page failed, using plain: {e}")
+            logging.warning(f"Branded team page failed, using plain: {type(e).__name__}")
 
     buf, c = _new_canvas()
     _draw_chrome(c, chrome)

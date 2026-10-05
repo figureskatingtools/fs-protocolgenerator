@@ -4,6 +4,7 @@ import os
 import io
 import json
 import re
+import traceback
 import unicodedata
 import zipfile
 from datetime import date, datetime, timedelta, timezone
@@ -1563,7 +1564,10 @@ def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
         sh.create_and_store_sas_link(blob_service_client, blob_name, comp_id, out_name, len(pdf_bytes))
         return sh.json_response({"fileName": out_name, "size": len(pdf_bytes)})
     except Exception as e:
-        logging.error(f"Error generating protocol: {e}", exc_info=True)
+        # Type + stack frames only: the exception message can quote page text
+        # (skater/official names) and the protocol's logs must not hold names.
+        frames = "".join(traceback.format_tb(e.__traceback__))
+        logging.error(f"Error generating protocol: {type(e).__name__}\n{frames}")
         return func.HttpResponse("Error generating protocol. Check server logs.", status_code=500)
 
 
