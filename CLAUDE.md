@@ -325,6 +325,17 @@ python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 ## Deploy
 
+**Flow (no long-lived `test` branch):** branch from `main` → dispatch
+`deploy.yml` on that branch with `environment=test` → PR to `main` → merge →
+push to `main` deploys prod → the branch is auto-deleted on merge. `main` is
+guarded by a ruleset: PR required, the `pytest` check
+(`.github/workflows/ci.yml`, runs on every PR) must pass, code-owner review
+required (`.github/CODEOWNERS`: `* @mmaraa`), no force-push/deletion; repository
+admins can bypass, which is how the owner merges their own PRs. The `prod` GitHub
+environment only accepts deployments from `main` (deployment branch policy), so
+a dispatch with `environment=prod` from any other branch is rejected; `test`
+accepts any branch, and holds whichever branch was deployed last.
+
 Push to `main` → prod via `.github/workflows/deploy.yml`; `test` via manual
 `workflow_dispatch`. Two jobs only: **deploy-infra** (`az deployment sub create`
 on `infra/main.bicep`, params `resourceGroupName` + `proxySharedSecret`) and
@@ -347,8 +358,9 @@ label deliberately — verify via a `test`-environment dispatch first, roll back
 `ubuntu-24.04` if needed — and never set it back to `ubuntu-latest`.
 
 Dependabot version updates (weekly, grouped per ecosystem, `.github/dependabot.yml`,
-read from the default branch `main` only) open their PRs against `test`, so they
-ride the next `test` → `main` promotion instead of auto-deploying prod on merge.
+read from the default branch `main` only) open their PRs against `main` like any
+feature branch: CI tests them, they wait for code-owner review, and merging one
+deploys prod — dispatch its branch to `test` first when the update is risky.
 
 Required GitHub environment config: secrets `AZURE_CLIENT_ID`,
 `PROXY_SHARED_SECRET`; vars `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
