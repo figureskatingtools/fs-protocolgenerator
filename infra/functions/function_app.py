@@ -20,6 +20,7 @@ import fallback_photos
 import roster_matching
 from results_parser import parse_top_three, count_result_rows, parse_result_rows
 from assemble import assemble_protocol
+from pdf_sanitize import SanitizeError
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -1563,6 +1564,13 @@ def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
 
         sh.create_and_store_sas_link(blob_service_client, blob_name, comp_id, out_name, len(pdf_bytes))
         return sh.json_response({"fileName": out_name, "size": len(pdf_bytes)})
+    except SanitizeError as e:
+        # Fail closed: an uploaded PDF holds content that could not be proven
+        # free of hidden metadata, so nothing is published.
+        logging.warning(f"Protocol not generated, uncleanable content: {e}")
+        return func.HttpResponse(
+            "An uploaded PDF contains an image that could not be checked for hidden "
+            "metadata. Re-export or re-save that PDF and try again.", status_code=422)
     except Exception as e:
         # Type + stack frames only: the exception message can quote page text
         # (skater/official names) and the protocol's logs must not hold names.

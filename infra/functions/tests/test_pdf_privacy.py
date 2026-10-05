@@ -16,6 +16,7 @@ library that wrote it — and checked for metadata, image metadata, incremental
 updates, orphaned objects, attachments, forms, JavaScript, annotations, outlines,
 alt text and object names. Never use real skaters' or officials' data here.
 """
+import base64
 import io
 import re
 
@@ -25,7 +26,8 @@ from PIL import ExifTags, Image
 from PIL.PngImagePlugin import PngInfo
 from pypdf import PdfReader, PdfWriter
 from pypdf.annotations import Text
-from pypdf.generic import DictionaryObject, NameObject, TextStringObject
+from pypdf.generic import (ArrayObject, DecodedStreamObject, DictionaryObject, NameObject,
+                           NumberObject, TextStringObject)
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
@@ -480,4 +482,184 @@ def test_strip_jpeg_metadata_is_lossless_and_keeps_jfif():
     markers = _jpeg_markers(stripped)
     assert 0xE0 in markers and not {0xE1, 0xE2, 0xED, 0xFE} & set(markers)
     assert Image.open(io.BytesIO(stripped)).tobytes() == Image.open(io.BytesIO(raw)).tobytes()
-    assert pdf_sanitize.strip_jpeg_metadata(b"not a jpeg") == b"not a jpeg"
+    with pytest.raises(ValueError):
+        pdf_sanitize.strip_jpeg_metadata(b"not a jpeg")
+
+
+# ── sanitizer edge cases (one per way metadata could slip past it) ────────────
+
+def _with_post_scan_comment(jpeg: bytes, text: bytes) -> bytes:
+    """A COM segment between the last scan and EOI, where a naive stripper that
+    stops at the first SOS never looks."""
+    assert jpeg.endswith(b"\xff\xd9")
+    com = b"\xff\xfe" + (len(text) + 2).to_bytes(2, "big") + text
+    return jpeg[:-2] + com + b"\xff\xd9"
+
+
+def _base_writer() -> PdfWriter:
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    c.drawString(60, 780, "visible line")
+    c.showPage()
+    c.save()
+    return PdfWriter(clone_from=PdfReader(io.BytesIO(buf.getvalue())))
+
+
+def _image_xobject(writer, jpeg: bytes, filter_=None):
+    img = DecodedStreamObject()
+    img.set_data(jpeg)
+    w, h = Image.open(io.BytesIO(jpeg)).size
+    img.update({NameObject("/Type"): NameObject("/XObject"),
+                NameObject("/Subtype"): NameObject("/Image"),
+                NameObject("/Width"): NumberObject(w), NameObject("/Height"): NumberObject(h),
+                NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+                NameObject("/BitsPerComponent"): NumberObject(8),
+                NameObject("/Filter"): filter_ or NameObject("/DCTDecode")})
+    return writer._add_object(img)
+
+
+def _page_resources(writer) -> DictionaryObject:
+    page = writer.pages[0]
+    if "/Resources" not in page:
+        page[NameObject("/Resources")] = DictionaryObject()
+    return page["/Resources"]
+
+
+def _add_xobject(writer, name, ref):
+    res = _page_resources(writer)
+    if "/XObject" not in res:
+        res[NameObject("/XObject")] = DictionaryObject()
+    res["/XObject"][NameObject(name)] = ref
+
+
+def _sanitized(writer) -> bytes:
+    pdf_sanitize.sanitize(writer, title=COMPETITION, author=ORGANIZER)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def _leaks(data: bytes, token: bytes) -> bool:
+    with pikepdf.open(io.BytesIO(data)) as doc:
+        return any(token in hay for hay in [data, *_stream_bytes(doc)])
+
+
+def test_metadata_after_the_scan_is_stripped():
+    raw = _with_post_scan_comment(camera_jpeg(), b"POSTSCAN-SECRET")
+    assert b"POSTSCAN-SECRET" in raw
+    stripped = pdf_sanitize.strip_jpeg_metadata(raw)
+    assert b"POSTSCAN-SECRET" not in stripped
+    assert Image.open(io.BytesIO(stripped)).tobytes() == Image.open(io.BytesIO(raw)).tobytes()
+
+
+def test_associated_files_on_pages_and_xobjects_are_dropped():
+    writer = _base_writer()
+
+    def filespec(payload: bytes):
+        ef = DecodedStreamObject()
+        ef.set_data(payload)
+        ef[NameObject("/Type")] = NameObject("/EmbeddedFile")
+        return writer._add_object(DictionaryObject({
+            NameObject("/Type"): NameObject("/Filespec"),
+            NameObject("/F"): TextStringObject("af.txt"),
+            NameObject("/EF"): DictionaryObject({NameObject("/F"): writer._add_object(ef)})}))
+
+    writer.pages[0][NameObject("/AF")] = ArrayObject([filespec(b"AF-PAGE-SECRET")])
+    img = _image_xobject(writer, camera_jpeg())
+    img.get_object()[NameObject("/AF")] = ArrayObject([filespec(b"AF-IMAGE-SECRET")])
+    _add_xobject(writer, "/Im1", img)
+    data = _sanitized(writer)
+    assert not _leaks(data, b"AF-PAGE-SECRET")
+    assert not _leaks(data, b"AF-IMAGE-SECRET")
+
+
+def test_indirect_filter_entries_are_resolved():
+    writer = _base_writer()
+    name_ref = writer._add_object(NameObject("/DCTDecode"))
+    _add_xobject(writer, "/Im1", _image_xobject(writer, camera_jpeg(), name_ref))
+    _add_xobject(writer, "/Im2", _image_xobject(
+        writer, camera_jpeg((1, 2, 3)), ArrayObject([writer._add_object(NameObject("/DCTDecode"))])))
+    data = _sanitized(writer)
+    assert not _leaks(data, b"Pellervo")
+    assert not _leaks(data, b"FAKECAM-SN-0042")
+
+
+@pytest.mark.parametrize("filter_, payload", [
+    (NameObject("/DCTDecode"), b"not a jpeg at all"),
+    (ArrayObject([NameObject("/FlateDecode"), NameObject("/DCTDecode")]), b"not flate data"),
+])
+def test_a_jpeg_that_cannot_be_cleaned_fails_generation(filter_, payload):
+    writer = _base_writer()
+    img = DecodedStreamObject()
+    img.set_data(payload)
+    img.update({NameObject("/Subtype"): NameObject("/Image"), NameObject("/Filter"): filter_})
+    _add_xobject(writer, "/Im1", writer._add_object(img))
+    with pytest.raises(pdf_sanitize.SanitizeError):
+        pdf_sanitize.sanitize(writer, title=COMPETITION, author=ORGANIZER)
+
+
+def test_soft_mask_groups_are_sanitized():
+    writer = _base_writer()
+    xmp = DecodedStreamObject()
+    xmp.set_data(b"XMP-SMASK-SECRET")
+    xmp[NameObject("/Type")] = NameObject("/Metadata")
+    group = DecodedStreamObject()
+    group.set_data(b"q /Im1 Do Q")
+    group.update({
+        NameObject("/Type"): NameObject("/XObject"), NameObject("/Subtype"): NameObject("/Form"),
+        NameObject("/BBox"): ArrayObject([NumberObject(0), NumberObject(0),
+                                          NumberObject(10), NumberObject(10)]),
+        NameObject("/Metadata"): writer._add_object(xmp),
+        NameObject("/Resources"): DictionaryObject({NameObject("/XObject"): DictionaryObject({
+            NameObject("/Im1"): _image_xobject(writer, camera_jpeg())})})})
+    gs = DictionaryObject({NameObject("/SMask"): DictionaryObject({
+        NameObject("/S"): NameObject("/Luminosity"),
+        NameObject("/G"): writer._add_object(group)})})
+    _page_resources(writer)[NameObject("/ExtGState")] = DictionaryObject(
+        {NameObject("/GS1"): writer._add_object(gs)})
+    data = _sanitized(writer)
+    assert not _leaks(data, b"XMP-SMASK-SECRET")
+    assert not _leaks(data, b"Pellervo")
+
+
+def _add_inline_image(writer, settings: bytes, jpeg: bytes):
+    stream = DecodedStreamObject()
+    stream.set_data(b"q 20 0 0 20 100 100 cm\nBI " + settings + b" ID " + jpeg + b"\nEI\nQ\n")
+    page = writer.pages[0]
+    page[NameObject("/Contents")] = ArrayObject([page.raw_get("/Contents"),
+                                                 writer._add_object(stream)])
+
+
+def test_inline_jpegs_are_sanitized():
+    writer = _base_writer()
+    jpeg = camera_jpeg(size=(8, 8))
+    _add_inline_image(writer, b"/W 8 /H 8 /CS /RGB /BPC 8 /F /DCT", jpeg)
+    data = _sanitized(writer)
+    assert not _leaks(data, b"Pellervo")
+    assert not _leaks(data, b"FAKECAM-SN-0042")
+    with pikepdf.open(io.BytesIO(data)) as doc:     # still a drawable inline image
+        inline = [ops for ops, op in pikepdf.parse_content_stream(doc.pages[0])
+                  if str(op) == "INLINE IMAGE"]
+        assert len(inline) == 1
+
+
+def test_an_inline_jpeg_behind_other_filters_fails_generation():
+    writer = _base_writer()
+    jpeg = camera_jpeg(size=(8, 8))
+    a85 = base64.a85encode(jpeg, adobe=True)[2:]      # PDF ASCII85: no "<~"
+    _add_inline_image(writer, b"/W 8 /H 8 /CS /RGB /BPC 8 /F [/A85 /DCT]", a85)
+    with pytest.raises(pdf_sanitize.SanitizeError):
+        pdf_sanitize.sanitize(writer, title=COMPETITION, author=ORGANIZER)
+
+
+def test_cyclic_resources_do_not_recurse_forever():
+    writer = _base_writer()
+    resources = DictionaryObject()
+    pattern = DecodedStreamObject()
+    pattern.set_data(b"0 0 1 1 re f")
+    pattern.update({NameObject("/PatternType"): NumberObject(1),
+                    NameObject("/Resources"): writer._add_object(resources)})
+    pattern_ref = writer._add_object(pattern)
+    resources[NameObject("/Pattern")] = DictionaryObject({NameObject("/P1"): pattern_ref})
+    writer.pages[0][NameObject("/Resources")] = pattern["/Resources"].indirect_reference
+    _sanitized(writer)                          # must simply finish
