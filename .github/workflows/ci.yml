@@ -1,0 +1,32 @@
+name: CI
+
+# Backend tests on every pull request, so a red suite blocks the merge instead of
+# surfacing as a failed prod deploy. The `pytest` job name is the required status
+# check in the `main` ruleset — rename it there too if it ever changes.
+# Runner pinned like deploy.yml (see the note there); never ubuntu-latest.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Run backend tests
+        run: |
+          cd infra/functions
+          pip install -r requirements-dev.txt
+          python -m pytest tests -q
