@@ -322,6 +322,10 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
     # objects, then write the file once — a fresh, non-incremental save.
     pdf_sanitize.sanitize(writer, title=chrome["name"],
                           author=(event.get("organization") or "").strip())
+    # Every generated page is its own canvas, so the header/footer band (brand
+    # PNG or custom graphic) arrives once per page; re-encoding is deterministic,
+    # so those copies are byte-identical and collapse into one object here.
+    pdf_sanitize.dedupe(writer)
     out = io.BytesIO()
     writer.write(out)
     out.seek(0)

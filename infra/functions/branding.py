@@ -22,6 +22,7 @@ import io
 import os
 import logging
 
+from reportlab import rl_config
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
@@ -31,6 +32,11 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
 import image_sanitize
+
+# Binary (Flate/DCT only) streams instead of reportlab's default ASCII85 text
+# wrapping, which inflates every image and content stream by a quarter. Read at
+# draw time, so this covers every canvas (generate_pages imports this module).
+rl_config.useA85 = 0
 
 try:
     from PIL import Image, ImageOps
@@ -687,11 +693,12 @@ def schedule_page(rows) -> bytes:
 # "<club> - <name>" string and no scores, so the score pill is omitted. When no
 # photo is supplied the photo area is left as plain white space (per design).
 
-def _load_reader(img_bytes):
-    """ImageReader for a photo plus its pixel size — EXIF-rotated and re-encoded
-    from its pixels alone (image_sanitize), so no upload metadata is embedded."""
+def _load_reader(img_bytes, box_w, box_h):
+    """ImageReader for a photo plus its pixel size — EXIF-rotated, re-encoded
+    from its pixels alone (image_sanitize), so no upload metadata is embedded,
+    and downscaled to what a `box_w` × `box_h` pt box needs at PRINT_DPI."""
     try:
-        cleaned = image_sanitize.clean_jpeg(img_bytes)
+        cleaned = image_sanitize.clean_jpeg(img_bytes, box=(box_w, box_h))
         if cleaned is None:
             return None, 0, 0
         jpeg, iw, ih = cleaned
@@ -705,7 +712,7 @@ def _rounded_fit_image(c, img_bytes, x, top_y, w, max_h, radius):
     """Draw the *whole* photo (no crop) into a rounded box that hugs the scaled
     image: fit to the available width, capped at `max_h`, centred horizontally.
     `top_y` is the top edge of the area; returns the actual box height drawn."""
-    reader, iw, ih = _load_reader(img_bytes)
+    reader, iw, ih = _load_reader(img_bytes, w, max_h)
     if reader is None or iw == 0 or ih == 0:
         return 0.0
     scale = min(w / iw, max_h / ih)

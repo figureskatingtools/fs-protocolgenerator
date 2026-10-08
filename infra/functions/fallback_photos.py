@@ -37,7 +37,7 @@ MAX_ENTRY_BYTES = 30 * 1024 * 1024
 TARGET_LONG_EDGE = 2000
 JPEG_QUALITY = 88
 
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp") + image_sanitize.HEIF_EXTS
 
 
 # ── name normalisation ────────────────────────────────────────────────────────

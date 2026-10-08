@@ -110,10 +110,11 @@ def _centered(c, text, y, font, size, color=INK):
 def _fit_image_box(img_bytes, box_w, box_h):
     """Return (ImageReader, draw_w, draw_h) scaled to fit a box, preserving aspect
     ratio. The picture is re-encoded from its pixels first (image_sanitize), so no
-    EXIF/XMP/IPTC/comment of the upload reaches the PDF; without PIL nothing is
-    embedded and the caller draws its placeholder."""
+    EXIF/XMP/IPTC/comment of the upload reaches the PDF, and downscaled to what
+    the box needs at image_sanitize.PRINT_DPI; without PIL nothing is embedded
+    and the caller draws its placeholder."""
     try:
-        cleaned = image_sanitize.clean_jpeg(img_bytes)
+        cleaned = image_sanitize.clean_jpeg(img_bytes, box=(box_w, box_h))
         if cleaned is None:
             return None, 0, 0
         jpeg, iw, ih = cleaned
