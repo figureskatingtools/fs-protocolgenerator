@@ -17,6 +17,7 @@ import structure as st
 from schedule_parser import parse_schedule_data
 from dt_partic import parse_participants, parse_team_rosters
 import fallback_photos
+import image_sanitize
 import roster_matching
 from results_parser import parse_top_three, count_result_rows, parse_result_rows
 from assemble import assemble_protocol
@@ -24,7 +25,11 @@ from pdf_sanitize import SanitizeError
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
-IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp") + image_sanitize.HEIF_EXTS
+# HEIC/HEIF uploads are converted to JPEG on arrival (browsers other than Safari
+# cannot preview them); full resolution, generous quality — the protocol
+# re-encodes it to its printed size anyway.
+HEIF_STORE_QUALITY = 92
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
@@ -632,6 +637,25 @@ def save_event_settings(req: func.HttpRequest) -> func.HttpResponse:
 
 # ── files: upload / fetch / assign / delete ───────────────────────────────────
 
+class UnreadableImage(ValueError):
+    """An upload claiming to be an image that cannot be decoded."""
+
+
+def _heif_to_jpeg(filename, body):
+    """(filename, body) unchanged for anything but HEIC/HEIF; those become a
+    metadata-free JPEG named `<stem>.jpg` (raises UnreadableImage)."""
+    stem, ext = os.path.splitext(filename)
+    if ext.lower() not in image_sanitize.HEIF_EXTS:
+        return filename, body
+    try:
+        cleaned = image_sanitize.clean_jpeg(body, quality=HEIF_STORE_QUALITY)
+    except Exception as e:
+        raise UnreadableImage(type(e).__name__) from None
+    if cleaned is None:
+        raise UnreadableImage("PIL is not available")
+    return f"{stem}.jpg", cleaned[0]
+
+
 def _register_upload(structure, folder_path, filename, body, params):
     """Store an uploaded file's bytes, register it in the structure and — when
     the caller named a slot — assign it there straight away. Returns
@@ -641,7 +665,9 @@ def _register_upload(structure, folder_path, filename, body, params):
     upload and the competition-pool import describe a target identically:
     `slotKind` (+ `categoryId`/`segmentId`/`teamId`/`role`) and `autoAssigned`.
     A target the structure does not have (a stale category id) leaves the file
-    in the tray rather than failing the upload."""
+    in the tray rather than failing the upload. A HEIC/HEIF image is stored
+    converted to JPEG (UnreadableImage when it does not decode)."""
+    filename, body = _heif_to_jpeg(filename, body)
     file_id = st.new_id("file")
     blob_path = f"{folder_path}/uploads/{file_id}_{filename}"
     container = sh.get_container_client()
@@ -715,6 +741,8 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         file_id, meta = _register_upload(structure, folder_path, filename, body, dict(req.params))
         sh.write_structure(folder_path, structure)
         return sh.json_response({"fileId": file_id, "file": meta})
+    except UnreadableImage:
+        return func.HttpResponse("Could not read the image file.", status_code=400)
     except Exception as e:
         logging.error(f"Error uploading file: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
@@ -819,6 +847,9 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
         meta["poolName"] = filename
         sh.write_structure(folder_path, structure)
         return sh.json_response({"fileId": file_id, "file": meta})
+    except UnreadableImage:
+        return sh.json_response(
+            {"error": "unreadable_image", "message": "Could not read the image file"}, 400)
     except Exception as e:
         logging.error(f"Error importing platform file: {e}")
         return sh.json_response({"error": "internal_error", "message": "Internal server error"}, 500)

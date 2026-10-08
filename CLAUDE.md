@@ -285,6 +285,27 @@ clusters). A JPEG it cannot decode or parse raises `SanitizeError` and
 quote page text. `tests/test_pdf_privacy.py` checks all of it with pikepdf
 (test-only dependency) on deliberately dirty, invented inputs.
 
+## Output size
+
+Photos are embedded at the size they are printed, not as uploaded:
+`generate_pages._fit_image_box` and `branding._load_reader` pass the drawn box to
+`clean_jpeg(…, box=(w_pt, h_pt))`, which downscales to `image_sanitize.PRINT_DPI`
+(200) at that size — never upscaling — and encodes q85 with `optimize=True`
+(large JPEGs scale down while decoding via `Image.draft`). Every generated page is
+its own reportlab canvas, so the header/footer band arrives once per page;
+`pdf_sanitize.dedupe` (after `sanitize`, before the write) merges the identical
+copies — repeating pypdf's single-pass `compress_identical_objects` until stable,
+since an image only matches its twins once their `/SMask`s have merged.
+`branding.py` sets `rl_config.useA85 = 0` so reportlab writes binary streams
+rather than ASCII85 (+25%). `tests/test_image_size.py` covers it.
+
+**HEIC/HEIF** (iPhone default) decodes through `pillow-heif`'s opener, registered
+in `image_sanitize`. `_register_upload` (both upload routes) converts a
+`.heic`/`.heif` to a metadata-free full-resolution JPEG (q92) stored as
+`<stem>.jpg`, so browser previews and filename matching keep working; one that
+won't decode is a 400 (`unreadable_image` on `import_platform_file`). The
+fallback ZIP accepts them too.
+
 ## Defaults / backups
 
 The real cover, last page and header/footer art are now the approved brand kit (see

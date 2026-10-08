@@ -5,3 +5,5 @@ azure-data-tables~=12.7.0
 pypdf~=6.19.0
 reportlab~=5.0.1
 pillow~=12.3
+# HEIC/HEIF decoding (iPhone photos); manylinux wheels bundle libheif.
+pillow-heif~=1.8

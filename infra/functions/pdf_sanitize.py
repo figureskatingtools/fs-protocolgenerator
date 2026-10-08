@@ -306,6 +306,23 @@ def sanitize(writer: PdfWriter, *, title: str = "", author: str = "") -> None:
     collect_garbage(writer)
 
 
+def dedupe(writer: PdfWriter, max_passes: int = 8) -> None:
+    """Merge byte-identical objects (the header/footer band every generated page
+    brings along) into one. pypdf's `compress_identical_objects` makes a single
+    pass, so an image whose /SMask copies only became one object in that pass
+    still differs from its twins by reference; repeat until nothing merges."""
+    def live():
+        return sum(1 for o in writer._objects if o is not None)
+    before = live()
+    for _ in range(max_passes):
+        writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)
+        after = live()
+        if after == before:
+            break
+        before = after
+    collect_garbage(writer)
+
+
 def collect_garbage(writer: PdfWriter) -> int:
     """Free every object not reachable from the trailer (/Root, /Info), so the
     written file holds only what the document references. pypdf's own
