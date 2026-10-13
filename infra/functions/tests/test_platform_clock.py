@@ -1,10 +1,12 @@
 """Retention follows the platform's clock (`platform_clock.py`).
 
 The site's competition registry owns each competition's deletion date (created
-+ 60 days, extended a week at a time on the site). A record here that is bound
-to a platform competition (`PlatformId`) follows that date; an unbound one
-keeps its own 60-day clock. The one rule that must never bend: when the
-platform cannot be read, nothing is deleted early.
++ 60 days, extended a week at a time on the site only). This tool keeps no
+clock of its own: every record is bound to a platform competition
+(`PlatformId`) and its `DeletionDate` is just a cached copy of the platform's.
+Only legacy rows that were never bound still go on their stored date. The one
+rule that must never bend: when the platform cannot be read (or is not
+configured), nothing is deleted.
 
 Deleted rows keep no e-mail address — neither the ones deleted from now on nor
 the ones deleted before (the nightly scrub). Both tables are faked with dicts;
@@ -118,6 +120,7 @@ class World:
             "DeletionDate": FUTURE,
         }
         row.update(extra)
+        row = {key: value for key, value in row.items() if value is not None}
         self.comp.rows[("GLOBAL", comp_id)] = row
         self.container.blobs[f"{row['FolderPath']}/metadata.json"] = b"{}"
         self.structures[row["FolderPath"]] = st.new_structure(
@@ -322,59 +325,35 @@ def details():
     return _json(_call(fa.get_competition_details, params={"id": "abc12345"}))
 
 
-def test_details_show_the_platform_date(world):
+def test_details_show_and_cache_the_platform_date(world):
     world.record(PlatformId=PID, DeletionDate=PAST)
     world.platform_row(deletion=FUTURE)
     body = details()
-    assert (body["deletionDate"], body["retentionManagedBy"]) == (FUTURE, "platform")
-
-
-def test_details_of_an_unbound_record_show_its_own_clock(world):
-    world.record(DeletionDate=PAST)
-    body = details()
-    assert (body["deletionDate"], body["retentionManagedBy"]) == (PAST, "tool")
-
-
-def test_details_fall_back_to_the_last_synced_date(world):
-    world.record(PlatformId=PID, DeletionDate=FUTURE)
-    world.platform.error = HttpResponseError("throttled")
-    body = details()
-    assert (body["deletionDate"], body["retentionManagedBy"]) == (FUTURE, "platform")
-
-
-def test_details_of_a_record_the_platform_does_not_know(world):
-    world.record(PlatformId=PID, DeletionDate=FUTURE)
-    assert details()["retentionManagedBy"] == "tool"
-
-
-# ── extend_competition_deletion ──────────────────────────────────────────────
-
-def extend():
-    return _call(fa.extend_competition_deletion, "POST", params={"id": "abc12345"})
-
-
-def test_extending_a_bound_record_only_syncs_the_platform_date(world):
-    world.record(PlatformId=PID, DeletionDate=PAST)
-    world.platform_row(deletion="2026-12-08T00:00:00Z")
-    body = _json(extend())
-    assert body == {"deletionDate": "2026-12-08T00:00:00Z", "retentionManagedBy": "platform"}
-    assert world.row()["DeletionDate"] == "2026-12-08T00:00:00Z"
-
-
-def test_extending_an_unbound_record_adds_a_week(world):
-    world.record(DeletionDate=FUTURE)
-    body = _json(extend())
-    assert body["retentionManagedBy"] == "tool"
-    assert pc.parse_utc(body["deletionDate"]) == pc.parse_utc(FUTURE) + timedelta(days=7)
-    assert world.row()["DeletionDate"] == body["deletionDate"]
-
-
-def test_extending_when_the_platform_is_unreadable_changes_nothing(world):
-    world.record(PlatformId=PID, DeletionDate=FUTURE)
-    world.platform.error = HttpResponseError("throttled")
-    assert _json(extend(), 502)["error"] == "platform_unavailable"
+    assert body["deletionDate"] == FUTURE
+    assert "retentionManagedBy" not in body
     assert world.row()["DeletionDate"] == FUTURE
+
+
+def test_details_fall_back_to_the_cached_date(world):
+    world.record(PlatformId=PID, DeletionDate=FUTURE)
+    world.platform.error = HttpResponseError("throttled")
+    assert details()["deletionDate"] == FUTURE
     assert world.comp.updates == []
+
+
+def test_details_of_a_record_without_a_platform_date_show_none(world):
+    world.record(PlatformId=PID, DeletionDate=None)
+    assert details()["deletionDate"] is None
+
+
+def test_details_of_a_legacy_unbound_record_show_its_stored_date(world):
+    world.record(DeletionDate=PAST)
+    assert details()["deletionDate"] == PAST
+
+
+def test_there_is_no_extend_route():
+    """Extending is the platform's alone (POST /api/competitions/{id}/extend)."""
+    assert not hasattr(fa, "extend_competition_deletion")
 
 
 # ── the nightly sweep ────────────────────────────────────────────────────────
@@ -419,36 +398,61 @@ def test_an_unreadable_platform_never_deletes_early(world, caplog):
                for r in caplog.records)
 
 
-def test_a_record_the_platform_does_not_know_keeps_its_own_clock(world):
-    world.record(PlatformId=PID, DeletionDate=PAST)
-    sweep()
-    assert world.row()["Visible"] is False
-
-
-def test_a_platform_row_without_a_date_leaves_the_local_clock_in_charge(world):
-    """The platform backfills dates on its own nightly run; until then the
-    record must not lose the clock it already had."""
-    world.record("expired0", PlatformId=PID, DeletionDate=PAST)
-    world.platform_row(deletion=None)
-    sweep()
-    assert world.row("expired0")["Visible"] is False
-
-
-def test_unbound_records_keep_the_local_clock(world):
-    world.record("expired0", DeletionDate=PAST)
-    world.record("current0", DeletionDate=FUTURE)
-    sweep()
-    assert world.row("expired0")["Visible"] is False
-    assert world.row("current0")["Visible"] is True
-
-
-def test_the_feature_off_keeps_every_record_on_its_own_clock(world, monkeypatch):
-    monkeypatch.setattr(pc, "get_platform_table_client", lambda: None)
+def test_a_record_the_platform_does_not_know_goes_on_its_cached_date(world):
     world.record("expired0", PlatformId=PID, DeletionDate=PAST)
     world.record("current0", PlatformId=PID, DeletionDate=FUTURE)
     sweep()
     assert world.row("expired0")["Visible"] is False
     assert world.row("current0")["Visible"] is True
+
+
+def test_a_record_with_no_date_at_all_is_kept(world):
+    """A bound record the platform has not dated yet has no clock here, and the
+    legacy backfill must not hand it one."""
+    world.record(PlatformId=PID, DeletionDate=None)
+    sweep()
+    assert world.row()["Visible"] is True
+    assert "DeletionDate" not in world.row()
+
+
+def test_a_platform_row_without_a_date_is_not_deleted(world):
+    """The platform alone decides for a row it knows: no date there, no
+    deletion here — the cached date does not take over."""
+    world.record(PlatformId=PID, DeletionDate=PAST)
+    world.platform_row(deletion=None)
+    sweep()
+    assert world.row()["Visible"] is True
+
+
+def test_legacy_unbound_records_go_on_their_stored_date(world):
+    world.record("expired0", DeletionDate=PAST)
+    world.record("current0", DeletionDate=FUTURE)
+    world.record("undated0", DeletionDate=None)      # backfilled to the legacy date
+    sweep()
+    assert world.row("expired0")["Visible"] is False
+    assert world.row("current0")["Visible"] is True
+    assert world.row("undated0")["Visible"] is False
+
+
+def test_an_unconfigured_platform_deletes_nothing_bound(world, monkeypatch, caplog):
+    monkeypatch.setattr(pc, "get_platform_table_client", lambda: None)
+    world.record("expired0", PlatformId=PID, DeletionDate=PAST)
+    world.record("legacy00", DeletionDate=PAST)
+    sweep()
+    assert world.row("expired0")["Visible"] is True
+    assert world.row("legacy00")["Visible"] is False
+    assert any("skipped 1" in r.getMessage() and r.levelname == "ERROR"
+               for r in caplog.records)
+
+
+def test_a_failing_platform_client_deletes_nothing_bound(world, monkeypatch):
+    def _boom():
+        raise ValueError("no credential")
+
+    monkeypatch.setattr(pc, "get_platform_table_client", _boom)
+    world.record(PlatformId=PID, DeletionDate=PAST)
+    sweep()
+    assert world.row()["Visible"] is True
 
 
 # ── no e-mail address outlives the data ──────────────────────────────────────

@@ -131,7 +131,7 @@ def test_a_bound_competition_is_returned_as_is(table):
     table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
     assert payload(resolve()) == {"id": "abc12345", "name": "Spring Trophy 2026",
                                  "created": False,
-                                 "deletionDate": sh.LEGACY_DELETION_DATE}
+                                 "deletionDate": None}
     assert table.queries[0] == "PartitionKey eq 'GLOBAL' and PlatformId eq 'p-1'"
 
 
@@ -177,7 +177,7 @@ def test_an_unbound_competition_is_adopted_by_name_and_stamped(table):
     table.rows["adopt000"] = entity("adopt000", "Spring Trophy 2026")
     assert payload(resolve(name="Spring  Trophy, 2026!")) == {
         "id": "adopt000", "name": "Spring Trophy 2026", "created": False,
-        "deletionDate": sh.LEGACY_DELETION_DATE}
+        "deletionDate": None}
     assert table.rows["adopt000"]["PlatformId"] == "p-1"
     assert table.written == {}
 
@@ -202,7 +202,8 @@ def test_an_unknown_platform_competition_is_created_and_bound(table):
     assert row["CreatedBy"] == "organizer@example.com"
     assert row["Name"] == "Spring Trophy 2026"
     assert row["FolderPath"] == f"Spring Trophy 2026-{body['id']}"
-    assert row["DeletionDate"] > row["CreatedDate"]
+    # No clock of its own: the date is only ever the platform's (none here).
+    assert "DeletionDate" not in row
 
     structure = table.written[row["FolderPath"]]
     assert structure["id"] == body["id"]
@@ -239,15 +240,10 @@ def test_a_missing_platform_date_leaves_the_field_unflagged(table):
     assert "datesAuto" not in event
 
 
-def test_the_legacy_create_route_stays_unbound(table):
-    req = func.HttpRequest(
-        "POST", "/api/create_competition",
-        headers={"x-forwarded-user-email": "organizer@example.com"},
-        params={"name": "Spring Trophy 2026", "dates": "1.-2.5.2026"}, body=b"")
-    body = payload(fa.create_competition._function.get_user_function()(req))
-    assert body["name"] == "Spring Trophy 2026"
-    assert "PlatformId" not in table.rows[body["id"]]
-    assert "platformId" not in table.written[table.rows[body["id"]]["FolderPath"]]
+def test_there_is_no_route_that_creates_an_unbound_competition():
+    """Every record is bound to a platform competition, whose date it follows."""
+    assert not hasattr(fa, "create_competition")
+    assert not hasattr(fa, "extend_competition_deletion")
 
 
 # ── platform event backfill on hit / adoption ─────────────────────────────────
@@ -332,7 +328,7 @@ def test_a_renamed_platform_competition_is_renamed_here_too(table):
     structure = seed_structure(table, "abc12345")
     assert payload(resolve(name=NEW, dates="")) == {
         "id": "abc12345", "name": NEW, "created": False,
-        "deletionDate": sh.LEGACY_DELETION_DATE}
+        "deletionDate": None}
     assert table.rows["abc12345"]["Name"] == NEW
     assert table.rows["abc12345"]["FolderPath"] == "Spring Trophy 2026-abc12345"
     assert structure["name"] == NEW
