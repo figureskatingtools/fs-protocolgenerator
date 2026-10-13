@@ -281,6 +281,53 @@ def test_resolve_does_not_rewrite_a_date_already_in_sync(world):
     assert world.comp.updates == []
 
 
+def test_a_competition_the_platform_does_not_know_is_not_bound(world):
+    """A record bound to a nonexistent platform competition would never be
+    deleted, so neither a create nor an adoption happens."""
+    world.record("adopt000", name="Spring Trophy 2026")      # unbound, same name
+    assert _json(resolve(), 404)["error"] == "platform_not_found"
+    assert set(world.comp.rows) == {("GLOBAL", "adopt000")}
+    assert "PlatformId" not in world.row("adopt000")
+
+
+def test_a_non_guid_platform_id_is_not_found(world):
+    assert _json(resolve(platform_id="p-1"), 404)["error"] == "platform_not_found"
+    assert world.comp.rows == {}
+
+
+def test_no_new_binding_while_the_platform_is_unreadable(world):
+    world.record("adopt000", name="Spring Trophy 2026")
+    world.platform.error = HttpResponseError("throttled")
+    assert _json(resolve(), 503)["error"] == "platform_unavailable"
+    assert set(world.comp.rows) == {("GLOBAL", "adopt000")}
+    assert "PlatformId" not in world.row("adopt000")
+
+
+def test_a_failing_platform_client_blocks_a_new_binding(world, monkeypatch):
+    def _boom():
+        raise ValueError("no credential")
+
+    monkeypatch.setattr(pc, "get_platform_table_client", _boom)
+    assert _json(resolve(), 503)["error"] == "platform_unavailable"
+    assert world.comp.rows == {}
+
+
+def test_without_a_platform_a_new_binding_has_no_date(world, monkeypatch):
+    """Local dev: no PLATFORM_STORAGE_ACCOUNT, so nothing to confirm against."""
+    monkeypatch.setattr(pc, "get_platform_table_client", lambda: None)
+    body = _json(resolve())
+    assert (body["created"], body["deletionDate"]) == (True, None)
+    assert "DeletionDate" not in world.row(body["id"])
+
+
+def test_an_adoption_the_platform_confirms_takes_its_date(world):
+    world.record("adopt000", name="Spring Trophy 2026", DeletionDate=None)
+    world.platform_row(deletion=FUTURE)
+    body = _json(resolve())
+    assert (body["id"], body["deletionDate"]) == ("adopt000", FUTURE)
+    assert world.row("adopt000")["PlatformId"] == PID
+
+
 def test_a_new_record_takes_the_platform_date(world):
     world.platform_row(deletion=FUTURE)
     body = _json(resolve())

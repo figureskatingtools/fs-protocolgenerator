@@ -248,6 +248,33 @@ def _platform_deleted(clock) -> bool:
     return bool(clock) and (clock.get("purged") or clock.get("status") == "deleted")
 
 
+def _refuse_new_binding(clock, unavailable):
+    """The error response that blocks a *new* binding (adoption or create), or
+    None. A record bound to a platform competition that does not exist would
+    never be deleted, so the platform must confirm it: 404 `platform_not_found`
+    when it has no such competition, 503 `platform_unavailable` when it cannot
+    be read. With the platform not configured (local dev) the binding goes
+    ahead without a date. Existing bound records never come here."""
+    if unavailable:
+        return sh.json_response(
+            {"error": "platform_unavailable",
+             "message": "Could not reach the competition registry"}, 503)
+    if clock is not None:
+        return None
+    try:
+        configured = pc.get_platform_table_client() is not None
+    except Exception as e:
+        logging.error(f"Platform registry client creation failed: {type(e).__name__}")
+        return sh.json_response(
+            {"error": "platform_unavailable",
+             "message": "Could not reach the competition registry"}, 503)
+    if not configured:
+        return None
+    return sh.json_response(
+        {"error": "platform_not_found",
+         "message": "No such competition in the competition registry"}, 404)
+
+
 def _cached_date_passed(entity, now) -> bool:
     """The record's stored DeletionDate has passed (False when it has none)."""
     deletion = pc.parse_utc(entity.get("DeletionDate"))
@@ -399,8 +426,11 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
 
     The platform owns the deletion date: it is cached on the record and
     returned (null until the platform reports one). A platform competition that
-    has been deleted is a 410 `platform_deleted` (no record is created for it);
-    when the platform cannot be read the record reports its cached date.
+    has been deleted is a 410 `platform_deleted` (no record is created for it).
+    A *new* binding (adoption or create) needs the platform to confirm the
+    competition: 404 `platform_not_found` / 503 `platform_unavailable`
+    otherwise (`_refuse_new_binding`). An existing bound record resolves on its
+    cached date when the platform cannot be read or does not know it.
 
     The platform's date (ISO) and venue seed `event.dates` (as Finnish dd.MM.yyyy,
     flagged `datesAuto` so the schedule's full span may later replace it) and
@@ -433,7 +463,7 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
         if not comp_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
 
-        clock, _ = _read_clock(platform_id)
+        clock, unavailable = _read_clock(platform_id)
         if _platform_deleted(clock):
             return sh.json_response(
                 {"error": "platform_deleted",
@@ -442,6 +472,9 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
         entity = _find_bound_competition(comp_table, platform_id)
         bound = entity is not None
         if not bound:
+            refusal = _refuse_new_binding(clock, unavailable)
+            if refusal:
+                return refusal
             entity = _adopt_competition_by_name(comp_table, platform_id, name)
         if entity:
             folder_path = entity.get("FolderPath", entity["RowKey"])

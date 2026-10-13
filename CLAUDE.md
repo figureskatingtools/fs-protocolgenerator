@@ -192,7 +192,12 @@ other failure.
   the last known value. `resolve_competition` and `get_competition_details` return
   it as `deletionDate` (null when there is none). `resolve_competition` answers
   **410 `platform_deleted`** — creating nothing — when the platform row is deleted
-  or purged; if the platform cannot be read it still resolves (error logged).
+  or purged. A **new** binding (adoption or create) must be confirmed by the
+  platform: 404 `platform_not_found` when it has no such competition, 503
+  `platform_unavailable` when it cannot be read (a record bound to a nonexistent
+  competition would never be deleted); with `PLATFORM_STORAGE_ACCOUNT` unset (local
+  dev) it binds without a date. An existing bound record still resolves on its
+  cached date when the platform is unreachable or does not know it.
 - The 03:00 UTC timer (`_run_auto_delete`): a bound record is deleted when
   `platform_says_delete` (date passed, deleted or purged — a purge is acted on that
   night); a platform that does not know the competition leaves the cached date in
