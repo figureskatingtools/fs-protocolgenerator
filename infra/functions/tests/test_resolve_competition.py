@@ -130,7 +130,8 @@ def payload(response):
 def test_a_bound_competition_is_returned_as_is(table):
     table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
     assert payload(resolve()) == {"id": "abc12345", "name": "Spring Trophy 2026",
-                                 "created": False}
+                                 "created": False,
+                                 "deletionDate": sh.LEGACY_DELETION_DATE}
     assert table.queries[0] == "PartitionKey eq 'GLOBAL' and PlatformId eq 'p-1'"
 
 
@@ -175,7 +176,8 @@ def test_a_quoted_platform_id_is_escaped_in_the_filter(table):
 def test_an_unbound_competition_is_adopted_by_name_and_stamped(table):
     table.rows["adopt000"] = entity("adopt000", "Spring Trophy 2026")
     assert payload(resolve(name="Spring  Trophy, 2026!")) == {
-        "id": "adopt000", "name": "Spring Trophy 2026", "created": False}
+        "id": "adopt000", "name": "Spring Trophy 2026", "created": False,
+        "deletionDate": sh.LEGACY_DELETION_DATE}
     assert table.rows["adopt000"]["PlatformId"] == "p-1"
     assert table.written == {}
 
@@ -329,7 +331,8 @@ def test_a_renamed_platform_competition_is_renamed_here_too(table):
     table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
     structure = seed_structure(table, "abc12345")
     assert payload(resolve(name=NEW, dates="")) == {
-        "id": "abc12345", "name": NEW, "created": False}
+        "id": "abc12345", "name": NEW, "created": False,
+        "deletionDate": sh.LEGACY_DELETION_DATE}
     assert table.rows["abc12345"]["Name"] == NEW
     assert table.rows["abc12345"]["FolderPath"] == "Spring Trophy 2026-abc12345"
     assert structure["name"] == NEW

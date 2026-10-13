@@ -167,7 +167,43 @@ overrides and its free-text rows; the two overrides are tri-state everywhere bel
 the competition level — an explicit `null` clears back to *inherit* — and
 `textFields` is replaced wholesale like `members`), `generate_protocol`, plus the
 daily auto-deletion
-timer.
+timer (see **Retention** below).
+
+### Retention: one platform clock
+
+The site's platform registry owns every competition's deletion date (table
+`competitions` on the `stfsplat*` account, PK `COMPETITION` / RK the lowercase
+platform GUID: `DeletionDate` = created + 60 d at midnight UTC, extended a week at a
+time on the site, plus `Status` and `PurgedUtc`). `platform_clock.py` reads it
+through a **Storage Table Data Reader** grant on that one table (site repo's
+`shared-data-access.bicep`); the file is **byte-identical** in fs-judgepapers and
+fs-scoremodifier — change it in all three. `read_platform_clock` returns None when
+the id is not a GUID, the row does not exist or `PLATFORM_STORAGE_ACCOUNT` is unset
+(feature off), and raises `PlatformClockUnavailable` on any other failure.
+
+- A record bound to a platform competition (`PlatformId`) follows the platform's
+  date: `resolve_competition` copies it onto the row (`sh.sync_local_deletion_date`,
+  so the stored `DeletionDate` is the last known platform date) and returns it as
+  `deletionDate`, and answers **410 `platform_deleted`** — creating nothing — when the
+  platform row is deleted or purged. If the platform cannot be read, resolve still
+  works on the stored date (logged as an error).
+- `get_competition_details` returns the effective `deletionDate` plus
+  `retentionManagedBy`: `"platform"` (the platform has a date, or could not be read)
+  or `"tool"`. `extend_competition_deletion` on a platform-managed record only syncs
+  and returns the platform's date (502 `platform_unavailable` if unreadable); the
+  real Extend is the site's. Unbound records (the legacy `create_competition`, or a
+  platform that does not know the id) keep their own 60-day clock and +7-day extend.
+- The 03:00 UTC timer (`_run_auto_delete`) deletes a bound record when
+  `platform_says_delete` (date passed, deleted or purged — a purge is acted on that
+  same night) and falls back to the stored date only when the platform has no date
+  for it; when the platform **cannot be read it skips the record and logs an error —
+  never deleting early**.
+- No e-mail address outlives the data: `_delete_competition_data` merges
+  `CreatedBy=""` and `DeletedBy="user"|"auto-cleanup"`, and every nightly run ends
+  with `_scrub_hidden_rows`, which blanks `CreatedBy`/`DeletedBy` on soft-deleted rows
+  deleted before that rule. Logs carry no addresses (nor fallback-photo or pool
+  filenames); App Insights keeps 30 days (`RetentionInDays` in
+  `modules/function.bicep`). Covered by `tests/test_platform_clock.py`.
 
 ### Shared competition file pool + auto-assignment
 
@@ -387,7 +423,7 @@ Required GitHub environment config: secrets `AZURE_CLIENT_ID`,
 `PROXY_SHARED_SECRET`; vars `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
 `LOCATION`, `RESOURCE_GROUP_NAME`, plus optional `PLATFORM_STORAGE_ACCOUNT` (the
 site repo's `stfsplat*` account for this environment — unset leaves
-`import_platform_file` off). (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and
+`import_platform_file` off and every record on its own 60-day clock). (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and
 `CUSTOM_DOMAIN` are gone.)
 
 ## Cross-repo handoff (figureskatingtools-site)
