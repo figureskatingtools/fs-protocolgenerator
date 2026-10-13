@@ -1,12 +1,14 @@
 """Retention follows the platform's clock (`platform_clock.py`).
 
 The site's competition registry owns each competition's deletion date (created
-+ 60 days, extended a week at a time on the site only). This tool keeps no
-clock of its own: every record is bound to a platform competition
-(`PlatformId`) and its `DeletionDate` is just a cached copy of the platform's.
-Only legacy rows that were never bound still go on their stored date. The one
-rule that must never bend: when the platform cannot be read (or is not
-configured), nothing is deleted.
++ 60 days, extended a week at a time on the site only) and mirrors it into its
+`retentionclock` table, which is all this tool reads. This tool keeps no clock
+of its own: every record is bound to a platform competition (`PlatformId`, a
+lowercase GUID), its `DeletionDate` is just a cached copy of the platform's,
+and its data is deleted only on the platform's verdict (deleted or purged) —
+never on a date alone. Only legacy rows that were never bound still go on
+their stored date. The one rule that must never bend: when the platform cannot
+be read, is not configured or has no clock row, nothing is deleted.
 
 Deleted rows keep no e-mail address — neither the ones deleted from now on nor
 the ones deleted before (the nightly scrub). Both tables are faked with dicts;
@@ -223,6 +225,32 @@ def test_an_unknown_platform_row_is_none(world):
     assert pc.read_platform_clock(PID) is None
 
 
+@pytest.mark.parametrize("raw, expected", [
+    (PID, PID),
+    (f"  {PID.upper()} ", PID),
+    ("p-1", None),
+    (f"{PID}' or ''='", None),
+    ("", None),
+    (None, None),
+])
+def test_normalize_platform_id(raw, expected):
+    assert pc.normalize_platform_id(raw) == expected
+
+
+def test_a_missing_clock_table_is_unavailable_not_absent(world):
+    """A not-yet-provisioned table must not read as "no such competition"."""
+    world.platform.error = ResourceNotFoundError(
+        "The table specified does not exist. ErrorCode:TableNotFound")
+    with pytest.raises(pc.PlatformClockUnavailable):
+        pc.read_platform_clock(PID)
+
+
+def test_the_clock_table_is_the_platform_mirror(monkeypatch):
+    monkeypatch.setenv("PLATFORM_STORAGE_ACCOUNT", "stfsplattest")
+    monkeypatch.delenv("PLATFORM_CLOCK_TABLE", raising=False)
+    assert pc.get_platform_table_client().table_name == "retentionclock"
+
+
 def test_an_unreadable_platform_raises(world):
     world.platform.error = HttpResponseError("403 AuthorizationPermissionMismatch")
     with pytest.raises(pc.PlatformClockUnavailable):
@@ -254,14 +282,16 @@ def test_the_platform_date_wins_over_the_local_one():
 @pytest.mark.parametrize("clock, expected", [
     (None, False),
     ({"deletionDate": pc.parse_utc(FUTURE), "status": "active", "purged": False}, False),
-    ({"deletionDate": pc.parse_utc(PAST), "status": "active", "purged": False}, True),
-    ({"deletionDate": NOW, "status": "active", "purged": False}, True),
+    # The date alone is never the verdict: the platform may be in dry-run, or
+    # an overdue competition may just have been extended.
+    ({"deletionDate": pc.parse_utc(PAST), "status": "active", "purged": False}, False),
+    ({"deletionDate": None, "status": "active", "purged": False}, False),
     ({"deletionDate": pc.parse_utc(FUTURE), "status": "deleted", "purged": False}, True),
     ({"deletionDate": pc.parse_utc(FUTURE), "status": "deleted", "purged": True}, True),
-    ({"deletionDate": None, "status": "active", "purged": False}, False),
+    ({"deletionDate": pc.parse_utc(FUTURE), "status": "active", "purged": True}, True),
 ])
 def test_platform_says_delete(clock, expected):
-    assert pc.platform_says_delete(clock, NOW) is expected
+    assert pc.platform_says_delete(clock) is expected
 
 
 # ── resolve_competition ──────────────────────────────────────────────────────
@@ -290,8 +320,24 @@ def test_a_competition_the_platform_does_not_know_is_not_bound(world):
     assert "PlatformId" not in world.row("adopt000")
 
 
-def test_a_non_guid_platform_id_is_not_found(world):
-    assert _json(resolve(platform_id="p-1"), 404)["error"] == "platform_not_found"
+def test_a_non_guid_platform_id_is_a_bad_request(world):
+    assert _json(resolve(platform_id="p-1"), 400)["error"] == "invalid_platform_id"
+    assert world.platform.reads == []
+    assert world.comp.rows == {}
+
+
+def test_a_differently_cased_guid_resolves_to_the_same_record(world):
+    world.platform_row(deletion=FUTURE)
+    first = _json(resolve(platform_id=PID.upper()))
+    again = _json(resolve(platform_id=PID))
+    assert (again["id"], again["created"]) == (first["id"], False)
+    assert world.row(first["id"])["PlatformId"] == PID
+    assert {key for (_, key) in world.platform.reads} == {PID}
+
+
+def test_a_missing_clock_table_blocks_a_new_binding(world):
+    world.platform.error = ResourceNotFoundError("ErrorCode:TableNotFound")
+    assert _json(resolve(), 503)["error"] == "platform_unavailable"
     assert world.comp.rows == {}
 
 
@@ -409,9 +455,9 @@ def sweep():
     fa._run_auto_delete(NOW)
 
 
-def test_a_bound_record_is_deleted_on_the_platform_date(world):
+def test_a_deleted_platform_competition_is_deleted_here(world):
     world.record(PlatformId=PID, DeletionDate=FUTURE)
-    world.platform_row(deletion=PAST)
+    world.platform_row(deletion=PAST, status="deleted")
     sweep()
     row = world.row()
     assert row["Visible"] is False
@@ -419,13 +465,30 @@ def test_a_bound_record_is_deleted_on_the_platform_date(world):
     assert world.container.blobs == {}
 
 
-def test_the_platform_date_wins_over_an_expired_local_one(world):
+def test_a_passed_date_alone_deletes_nothing(world):
+    """Only the platform's verdict counts — it may be in dry-run, or the
+    competition may have been extended since the date passed."""
+    world.record(PlatformId=PID, DeletionDate=PAST)
+    world.platform_row(deletion=PAST)
+    sweep()
+    assert world.row()["Visible"] is True
+    assert world.container.blobs != {}
+
+
+def test_the_sweep_caches_the_platform_date(world):
     world.record(PlatformId=PID, DeletionDate=PAST)
     world.platform_row(deletion=FUTURE)
     sweep()
     assert world.row()["Visible"] is True
-    assert world.row()["DeletionDate"] == FUTURE      # synced for the fallback
-    assert world.container.blobs != {}
+    assert world.row()["DeletionDate"] == FUTURE
+
+
+def test_the_sweep_runs_after_the_platform_sweep():
+    """The platform sweeps at 03:00 UTC; following it at 04:00 acts on its
+    verdicts the same night."""
+    trigger = next(t for t in fa.auto_delete_expired_competitions._function.get_bindings()
+                   if t.type == "timerTrigger")
+    assert trigger.schedule == "0 0 4 * * *"
 
 
 def test_a_purged_platform_competition_is_deleted_at_once(world):
@@ -445,12 +508,36 @@ def test_an_unreadable_platform_never_deletes_early(world, caplog):
                for r in caplog.records)
 
 
-def test_a_record_the_platform_does_not_know_goes_on_its_cached_date(world):
+def test_a_record_without_a_clock_row_is_kept(world, caplog):
+    """No clock row: no verdict, so no deletion — whatever the cached date."""
     world.record("expired0", PlatformId=PID, DeletionDate=PAST)
-    world.record("current0", PlatformId=PID, DeletionDate=FUTURE)
     sweep()
-    assert world.row("expired0")["Visible"] is False
-    assert world.row("current0")["Visible"] is True
+    assert world.row("expired0")["Visible"] is True
+    assert any(r.levelname == "WARNING" and "expired0" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_missing_clock_table_deletes_nothing(world, caplog):
+    world.record(PlatformId=PID, DeletionDate=PAST)
+    world.platform.error = ResourceNotFoundError("ErrorCode:TableNotFound")
+    sweep()
+    assert world.row()["Visible"] is True
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_one_platform_client_serves_the_whole_sweep(world, monkeypatch):
+    made = []
+
+    def _client():
+        made.append(1)
+        return world.platform
+
+    monkeypatch.setattr(pc, "get_platform_table_client", _client)
+    world.record("first000", PlatformId=PID)
+    world.record("second00", PlatformId=PID)
+    sweep()
+    assert len(made) == 1
+    assert len(world.platform.reads) == 2
 
 
 def test_a_record_with_no_date_at_all_is_kept(world):

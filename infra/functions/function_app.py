@@ -231,24 +231,35 @@ def _create_competition_record(comp_table, email, safe_name, dates, platform_id,
 
 # ── platform retention clock (see platform_clock.py) ─────────────────────────
 
-def _read_clock(platform_id, table_client=None):
-    """`(clock, unavailable)` for a bound platform id: the platform row's
-    deletion clock (None when unbound, unknown to the platform or the feature
-    is off) and whether the platform could not be read at all."""
+def _platform_table():
+    """`(client, error)`: the one platform clock table client for this request
+    or sweep (None when PLATFORM_STORAGE_ACCOUNT is unset), or the exception
+    type name when it could not be created."""
+    try:
+        return pc.get_platform_table_client(), None
+    except Exception as e:
+        logging.error(f"Platform clock client creation failed: {type(e).__name__}")
+        return None, type(e).__name__
+
+
+def _read_clock(platform_id, table_client, table_error=None):
+    """`(clock, unavailable)` for a bound platform id: the platform's clock row
+    (None when unbound, not a GUID, absent, or the feature is off) and whether
+    the platform could not be read at all."""
     if not platform_id:
         return None, False
+    if table_error:
+        return None, True
+    if table_client is None:
+        return None, False
     try:
-        return pc.read_platform_clock(platform_id, table_client), False
+        return pc.read_platform_clock(platform_id, table_client=table_client), False
     except pc.PlatformClockUnavailable:
         logging.error(f"Platform clock unavailable for platform competition {platform_id}")
         return None, True
 
 
-def _platform_deleted(clock) -> bool:
-    return bool(clock) and (clock.get("purged") or clock.get("status") == "deleted")
-
-
-def _refuse_new_binding(clock, unavailable):
+def _refuse_new_binding(clock, unavailable, configured):
     """The error response that blocks a *new* binding (adoption or create), or
     None. A record bound to a platform competition that does not exist would
     never be deleted, so the platform must confirm it: 404 `platform_not_found`
@@ -259,16 +270,7 @@ def _refuse_new_binding(clock, unavailable):
         return sh.json_response(
             {"error": "platform_unavailable",
              "message": "Could not reach the competition registry"}, 503)
-    if clock is not None:
-        return None
-    try:
-        configured = pc.get_platform_table_client() is not None
-    except Exception as e:
-        logging.error(f"Platform registry client creation failed: {type(e).__name__}")
-        return sh.json_response(
-            {"error": "platform_unavailable",
-             "message": "Could not reach the competition registry"}, 503)
-    if not configured:
+    if clock is not None or not configured:
         return None
     return sh.json_response(
         {"error": "platform_not_found",
@@ -448,12 +450,19 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     if not isinstance(body, dict):
         return func.HttpResponse("Invalid JSON body", status_code=400)
 
-    platform_id = (body.get('platformId') or '').strip()
+    raw_platform_id = (body.get('platformId') or '').strip()
     name = (body.get('name') or '').strip()
     dates = body.get('dates') or ''
     venue = (body.get('venue') or '').strip()
-    if not platform_id:
+    if not raw_platform_id:
         return func.HttpResponse("Missing platformId", status_code=400)
+    # One canonical form (lowercase GUID) for the platform read and every local
+    # lookup and store, so differently-cased ids never make a second record.
+    platform_id = pc.normalize_platform_id(raw_platform_id)
+    if not platform_id:
+        return sh.json_response(
+            {"error": "invalid_platform_id",
+             "message": "platformId must be a competition GUID"}, 400)
     safe_name = sh.sanitize_name(name)
     if not safe_name:
         return func.HttpResponse("Invalid name", status_code=400)
@@ -463,8 +472,9 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
         if not comp_table:
             return func.HttpResponse("Storage configuration invalid", status_code=500)
 
-        clock, unavailable = _read_clock(platform_id)
-        if _platform_deleted(clock):
+        platform_table, table_error = _platform_table()
+        clock, unavailable = _read_clock(platform_id, platform_table, table_error)
+        if pc.platform_says_delete(clock):
             return sh.json_response(
                 {"error": "platform_deleted",
                  "message": "This competition has been deleted"}, 410)
@@ -472,7 +482,8 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
         entity = _find_bound_competition(comp_table, platform_id)
         bound = entity is not None
         if not bound:
-            refusal = _refuse_new_binding(clock, unavailable)
+            refusal = _refuse_new_binding(clock, unavailable,
+                                          configured=platform_table is not None or bool(table_error))
             if refusal:
                 return refusal
             entity = _adopt_competition_by_name(comp_table, platform_id, name)
@@ -591,28 +602,27 @@ def delete_competition(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
-@app.timer_trigger(schedule="0 0 3 * * *", arg_name="timer", run_on_startup=False)
+# 04:00 UTC: after the platform's 03:00 sweep, so its verdicts land the same night.
+@app.timer_trigger(schedule="0 0 4 * * *", arg_name="timer", run_on_startup=False)
 def auto_delete_expired_competitions(timer: func.TimerRequest) -> None:
     _run_auto_delete(datetime.now(timezone.utc))
 
 
 def _run_auto_delete(now):
-    """The nightly sweep. The platform owns every competition's deletion date:
-    a bound record is deleted when `platform_says_delete` (date passed, deleted
-    or purged). A platform that cannot be read — or is not configured — means
-    *skip*, never delete early. A platform that does not know the competition
-    leaves its cached DeletionDate in charge (nothing extends it). Legacy rows
-    with no PlatformId go on their stored date. Finally, deleted rows still
-    holding an address are scrubbed."""
+    """The nightly sweep. The platform decides: a bound record's data is
+    deleted only on its verdict (`platform_says_delete`: the competition is
+    deleted or purged) — never on a date alone. A clock row that is not found
+    keeps the record (warning); a platform that cannot be read or is not
+    configured means skip (error) — never delete. Legacy rows with no
+    PlatformId go on their stored date. Finally, deleted rows still holding an
+    address are scrubbed."""
     try:
         comp_table = sh.get_table_client("competitions")
         if not comp_table:
             return
-        try:
-            platform_table = pc.get_platform_table_client()
-            platform_error = None if platform_table else "PLATFORM_STORAGE_ACCOUNT unset"
-        except Exception as e:
-            platform_table, platform_error = None, type(e).__name__
+        platform_table, table_error = _platform_table()
+        platform_error = table_error or (
+            None if platform_table else "PLATFORM_STORAGE_ACCOUNT unset")
         skipped = 0
         for entity in list(comp_table.query_entities("PartitionKey eq 'GLOBAL'")):
             if entity.get("Visible") is False or "FolderPath" not in entity:
@@ -630,10 +640,11 @@ def _run_auto_delete(now):
                                   "platform clock unavailable")
                     continue
                 if clock is None:
-                    due = _cached_date_passed(entity, now)
-                else:
-                    sh.sync_local_deletion_date(comp_table, entity, clock)
-                    due = pc.platform_says_delete(clock, now)
+                    logging.warning(f"Auto-deletion kept {entity['RowKey']}: "
+                                    "no platform clock row for its competition")
+                    continue
+                sh.sync_local_deletion_date(comp_table, entity, clock)
+                due = pc.platform_says_delete(clock)
             if not due:
                 continue
             try:
@@ -691,7 +702,8 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
             logging.warning(f"Could not fetch generated links: {e}")
 
         comp_table = sh.get_table_client("competitions")
-        clock, _ = _read_clock(entity.get("PlatformId"))
+        clock, _ = (_read_clock(entity["PlatformId"], *_platform_table())
+                    if entity.get("PlatformId") else (None, False))
         deletion_date = (sh.sync_local_deletion_date(comp_table, entity, clock)
                          if comp_table else entity.get("DeletionDate"))
         return sh.json_response({

@@ -25,6 +25,10 @@ import storage_helpers as sh
 import structure as st
 
 
+P1 = "0b5c7e0e-6f3a-4d55-9c1e-2a7d8b9c0d11"
+P2 = "7d1f2e3a-4b5c-4d6e-8f90-a1b2c3d4e5f6"
+
+
 # ── a dict-backed stand-in for the `competitions` table ───────────────────────
 
 def _parse_filter(query):
@@ -108,7 +112,7 @@ def table(monkeypatch):
     return fake
 
 
-def resolve(platform_id="p-1", name="Spring Trophy 2026", dates="2026-05-01",
+def resolve(platform_id=P1, name="Spring Trophy 2026", dates="2026-05-01",
             email="organizer@example.com", venue=None):
     body = {"platformId": platform_id, "name": name, "dates": dates}
     if venue is not None:
@@ -128,18 +132,18 @@ def payload(response):
 # ── lookup by platform id ─────────────────────────────────────────────────────
 
 def test_a_bound_competition_is_returned_as_is(table):
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     assert payload(resolve()) == {"id": "abc12345", "name": "Spring Trophy 2026",
                                  "created": False,
                                  "deletionDate": None}
-    assert table.queries[0] == "PartitionKey eq 'GLOBAL' and PlatformId eq 'p-1'"
+    assert table.queries[0] == f"PartitionKey eq 'GLOBAL' and PlatformId eq '{P1}'"
 
 
 def test_the_newest_of_several_bound_rows_wins(table):
     table.rows["old00000"] = entity("old00000", "Spring Trophy 2026",
-                                    created="2026-04-01T09:00:00Z", PlatformId="p-1")
+                                    created="2026-04-01T09:00:00Z", PlatformId=P1)
     table.rows["new00000"] = entity("new00000", "Spring Trophy 2026",
-                                    created="2026-04-30T08:00:00Z", PlatformId="p-1")
+                                    created="2026-04-30T08:00:00Z", PlatformId=P1)
     assert payload(resolve())["id"] == "new00000"
 
 
@@ -147,7 +151,7 @@ def test_a_soft_deleted_row_is_never_resurrected(table):
     """Deletion clears the blobs but keeps PlatformId, and the name no longer
     matches anything visible — so the route has to create a fresh competition."""
     table.rows["gone0000"] = entity("gone0000", "Spring Trophy 2026",
-                                    Visible=False, PlatformId="p-1")
+                                    Visible=False, PlatformId=P1)
     body = payload(resolve())
     assert body["created"] is True
     assert body["id"] != "gone0000"
@@ -155,20 +159,37 @@ def test_a_soft_deleted_row_is_never_resurrected(table):
 
 
 def test_a_legacy_row_without_visible_still_counts_as_visible(table):
-    row = entity("legacy00", "Spring Trophy 2026", PlatformId="p-1")
+    row = entity("legacy00", "Spring Trophy 2026", PlatformId=P1)
     del row["Visible"]
     table.rows["legacy00"] = row
     assert payload(resolve())["id"] == "legacy00"
 
 
-def test_a_quoted_platform_id_is_escaped_in_the_filter(table):
-    table.rows["quoted00"] = entity("quoted00", "Spring Trophy 2026",
-                                    PlatformId="p-1' or Visible eq true--")
-    body = payload(resolve(platform_id="p-1' or Visible eq true--"))
-    assert body["id"] == "quoted00"
-    assert table.queries[0] == (
-        "PartitionKey eq 'GLOBAL' and PlatformId eq "
-        "'p-1'' or Visible eq true--'")
+def test_the_platform_id_is_normalized_before_every_lookup(table):
+    """The same GUID in another casing (or with stray spaces) is the same
+    competition: it finds the existing record rather than creating a second."""
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
+    body = payload(resolve(platform_id=f"  {P1.upper()} "))
+    assert (body["id"], body["created"]) == ("abc12345", False)
+    assert table.queries[0] == f"PartitionKey eq 'GLOBAL' and PlatformId eq '{P1}'"
+
+
+def test_a_new_record_stores_the_normalized_platform_id(table):
+    body = payload(resolve(platform_id=P1.upper()))
+    row = table.rows[body["id"]]
+    assert row["PlatformId"] == P1
+    assert table.written[row["FolderPath"]]["platformId"] == P1
+    assert payload(resolve(platform_id=P1))["id"] == body["id"]
+
+
+@pytest.mark.parametrize("platform_id", ["p-1", "p-1' or Visible eq true--", f"{'0' * 36}"])
+def test_a_platform_id_that_is_not_a_guid_is_a_bad_request(table, platform_id):
+    """Only a GUID ever reaches a table filter — nothing to inject."""
+    response = resolve(platform_id=platform_id)
+    assert response.status_code == 400
+    assert json.loads(response.get_body())["error"] == "invalid_platform_id"
+    assert table.queries == []
+    assert table.rows == {}
 
 
 # ── adoption of pre-binding competitions ─────────────────────────────────────
@@ -178,17 +199,17 @@ def test_an_unbound_competition_is_adopted_by_name_and_stamped(table):
     assert payload(resolve(name="Spring  Trophy, 2026!")) == {
         "id": "adopt000", "name": "Spring Trophy 2026", "created": False,
         "deletionDate": None}
-    assert table.rows["adopt000"]["PlatformId"] == "p-1"
+    assert table.rows["adopt000"]["PlatformId"] == P1
     assert table.written == {}
 
 
 def test_adoption_skips_deleted_and_already_bound_rows(table):
     table.rows["deleted0"] = entity("deleted0", "Spring Trophy 2026", Visible=False)
-    table.rows["other000"] = entity("other000", "Spring Trophy 2026", PlatformId="p-2")
+    table.rows["other000"] = entity("other000", "Spring Trophy 2026", PlatformId=P2)
     body = payload(resolve())
     assert body["created"] is True
     assert body["id"] not in ("deleted0", "other000")
-    assert table.rows["other000"]["PlatformId"] == "p-2"
+    assert table.rows["other000"]["PlatformId"] == P2
 
 
 # ── create fallback ──────────────────────────────────────────────────────────
@@ -197,7 +218,7 @@ def test_an_unknown_platform_competition_is_created_and_bound(table):
     body = payload(resolve())
     assert (body["created"], body["name"]) == (True, "Spring Trophy 2026")
     row = table.rows[body["id"]]
-    assert row["PlatformId"] == "p-1"
+    assert row["PlatformId"] == P1
     assert row["Visible"] is True
     assert row["CreatedBy"] == "organizer@example.com"
     assert row["Name"] == "Spring Trophy 2026"
@@ -207,7 +228,7 @@ def test_an_unknown_platform_competition_is_created_and_bound(table):
 
     structure = table.written[row["FolderPath"]]
     assert structure["id"] == body["id"]
-    assert structure["platformId"] == "p-1"
+    assert structure["platformId"] == P1
     assert structure["event"]["dates"] == "01.05.2026"
 
     # A second call for the same platform id now finds the record it just made.
@@ -260,7 +281,7 @@ def seed_structure(table, comp_id, **event):
 
 
 def test_a_bound_competition_gets_its_empty_event_fields_backfilled(table):
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345")
     assert payload(resolve(dates="2025-01-25", venue="Vierumäki Ice Hall"))["id"] == "abc12345"
     assert structure["event"]["dates"] == "25.01.2025"
@@ -272,7 +293,7 @@ def test_a_bound_competition_gets_its_empty_event_fields_backfilled(table):
 def test_backfill_never_overwrites_existing_event_fields(table):
     """A date span already computed from the schedule (or typed by the user) and a
     rink already set must survive every re-resolve — and nothing is written."""
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345",
                                dates="25.01.2025 – 26.01.2025", rink="Oulunkylä")
     resolve(dates="2025-01-25", venue="Vierumäki Ice Hall")
@@ -283,7 +304,7 @@ def test_backfill_never_overwrites_existing_event_fields(table):
 
 
 def test_backfill_writes_once_for_a_partial_fill(table):
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345", rink="Oulunkylä")
     resolve(dates="2025-01-25", venue="Vierumäki Ice Hall")
     assert (structure["event"]["rink"], structure["event"]["dates"]) == ("Oulunkylä", "25.01.2025")
@@ -293,7 +314,7 @@ def test_backfill_writes_once_for_a_partial_fill(table):
 def test_a_raw_iso_date_left_by_the_old_route_is_repaired(table):
     """Competitions bound before this fix stored the platform's ISO date verbatim —
     nobody types that, so it is rewritten Finnish and flagged for the schedule."""
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345", dates="2025-01-25")
     resolve(dates="2025-01-25")
     assert structure["event"]["dates"] == "25.01.2025"
@@ -310,7 +331,7 @@ def test_an_adopted_competition_is_backfilled_too(table):
 
 def test_a_competition_without_metadata_still_binds(table):
     """Blobs can be gone (or the read can fail) — binding must not depend on it."""
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     assert payload(resolve(venue="Vierumäki Ice Hall"))["id"] == "abc12345"
     assert table.writes == []
 
@@ -324,7 +345,7 @@ def test_a_renamed_platform_competition_is_renamed_here_too(table):
     """The site renamed the competition; the binding is by PlatformId, so the
     stored name is stale. Table first, then the structure — but never the folder
     path, which every blob and generated protocol hangs off."""
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345")
     assert payload(resolve(name=NEW, dates="")) == {
         "id": "abc12345", "name": NEW, "created": False,
@@ -339,7 +360,7 @@ def test_a_renamed_platform_competition_is_renamed_here_too(table):
 def test_a_customised_protocol_title_survives_a_rename(table):
     """`event.title` is the user-editable title printed on the PDFs; it follows
     the record name only while nobody has typed their own."""
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345", title="Kevätkisat — virallinen pöytäkirja")
     assert payload(resolve(name=NEW, dates=""))["name"] == NEW
     assert structure["name"] == NEW
@@ -348,7 +369,7 @@ def test_a_customised_protocol_title_survives_a_rename(table):
 
 
 def test_a_rename_and_a_backfill_share_one_write(table):
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345")
     assert payload(resolve(name=NEW, dates="", venue="Vierumäki Ice Hall"))["name"] == NEW
     assert structure["name"] == NEW
@@ -357,7 +378,7 @@ def test_a_rename_and_a_backfill_share_one_write(table):
 
 
 def test_an_unchanged_name_touches_nothing(table):
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345")
     assert payload(resolve(dates=""))["name"] == "Spring Trophy 2026"
     assert table.updates == []
@@ -368,7 +389,7 @@ def test_an_unchanged_name_touches_nothing(table):
 def test_a_name_that_sanitizes_to_the_stored_one_is_not_a_rename(table):
     """The site's name may carry characters `sanitize_name` drops; the comparison
     happens after sanitizing, so that is not a rename."""
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     seed_structure(table, "abc12345")
     assert payload(resolve(name="Spring Trophy 2026!!", dates=""))["name"] == "Spring Trophy 2026"
     assert table.updates == []
@@ -378,7 +399,7 @@ def test_a_name_that_sanitizes_to_the_stored_one_is_not_a_rename(table):
 def test_a_failed_table_write_reports_the_old_name(table):
     """The table is authoritative: a rename that could not be stored is not
     reported, and the structure is left alone."""
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345")
 
     def _boom(entity, mode=None):
@@ -393,14 +414,14 @@ def test_a_failed_table_write_reports_the_old_name(table):
 
 def test_a_rename_without_metadata_still_updates_the_table(table):
     """Blobs can be gone; the rename must not depend on them."""
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     assert payload(resolve(name=NEW, dates=""))["name"] == NEW
     assert table.rows["abc12345"]["Name"] == NEW
     assert table.writes == []
 
 
 def test_a_broken_structure_read_does_not_fail_the_rename(table, monkeypatch):
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     seed_structure(table, "abc12345")
 
     def _boom(folder_path):
@@ -489,7 +510,7 @@ def test_schedule_meta_keeps_a_user_reviewed_date():
 
 
 def test_saving_the_event_form_clears_the_auto_flag(table):
-    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId="p-1")
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     structure = seed_structure(table, "abc12345", dates="25.01.2025", datesAuto=True)
     req = func.HttpRequest(
         "POST", "/api/save_event_settings",
