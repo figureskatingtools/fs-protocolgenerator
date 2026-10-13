@@ -19,6 +19,8 @@ from azure.identity import DefaultAzureCredential
 from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import TableClient, UpdateMode
 
+import platform_clock as pc
+
 # Blob container holding every competition folder.
 CONTAINER_NAME = "fs-protocolgenerator"
 
@@ -39,6 +41,11 @@ DELETION_RETENTION_DAYS = 60
 DELETION_EXTENSION_DAYS = 7
 LEGACY_DELETION_DATE = "2026-06-12T00:00:00Z"
 AUTO_CLEANUP_ACTOR = "auto-cleanup"
+# A deleted row records *how* it went, never who: no e-mail address outlives
+# the competition's data.
+USER_DELETE_ACTOR = "user"
+# CreatedBy / DeletedBy values that are not an address (and so need no scrub).
+NON_PERSONAL_ACTORS = ("", "-", USER_DELETE_ACTOR, AUTO_CLEANUP_ACTOR)
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────
@@ -224,6 +231,30 @@ def ensure_deletion_date(comp_table, entity):
     except Exception as e:
         logging.warning(f"Failed to backfill DeletionDate for {entity['RowKey']}: {e}")
     return entity
+
+
+def sync_local_deletion_date(comp_table, entity, clock):
+    """Copy the platform's deletion date onto a bound record (MERGE), so the
+    stored DeletionDate is the last date the platform reported — what the
+    record falls back to while the platform cannot be read. Best-effort; a
+    no-op when the platform has no date or the stored one already matches.
+    Returns the record's effective DeletionDate string."""
+    platform_date = (clock or {}).get("deletionDate")
+    if platform_date is None:
+        return entity.get("DeletionDate")
+    platform_str = pc.to_iso_z(platform_date)
+    if pc.parse_utc(entity.get("DeletionDate")) != platform_date:
+        try:
+            comp_table.update_entity({
+                "PartitionKey": "GLOBAL",
+                "RowKey": entity["RowKey"],
+                "DeletionDate": platform_str,
+            }, mode=UpdateMode.MERGE)
+        except Exception as e:
+            logging.warning(
+                f"Could not sync DeletionDate for {entity['RowKey']}: {type(e).__name__}")
+    entity["DeletionDate"] = platform_str
+    return platform_str
 
 
 # ── metadata.json (the per-competition structure document) ────────────────────

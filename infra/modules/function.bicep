@@ -35,6 +35,8 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   kind: 'web'
   properties: {
     Application_Type: 'web'
+    // Logs and traces are kept 30 days (the privacy notice's figure).
+    RetentionInDays: 30
   }
 }
 
