@@ -139,7 +139,8 @@ remain as plain fallbacks only if fonts/assets are missing.
 
 ## Backend routes (`function_app.py`)
 
-`list/create/delete/extend_competition`, `resolve_competition` (platform
+`list_competitions`, `delete_competition`, `resolve_competition` — the only
+route that creates a competition, always bound to a platform one (platform
 competition GUID → tool record: `PlatformId` lookup → normalized-name adoption
 of pre-existing records → create; soft-deleted rows are never resurrected;
 optional `dates`/`venue` seed `event.dates` (dd.MM.yyyy, marked
@@ -167,7 +168,56 @@ overrides and its free-text rows; the two overrides are tri-state everywhere bel
 the competition level — an explicit `null` clears back to *inherit* — and
 `textFields` is replaced wholesale like `members`), `generate_protocol`, plus the
 daily auto-deletion
-timer.
+timer (see **Retention** below).
+
+### Retention: one platform clock
+
+There is **one retention rule per competition, owned by the platform**; this tool
+has no clock of its own and no extend route. The site's platform registry holds
+every competition's deletion date (created + 60 d at midnight UTC, extended a week
+at a time only through the platform's `POST /api/competitions/{id}/extend`) and
+mirrors the non-personal part into its own table **`retentionclock`** on the
+`stfsplat*` account (PK `COMPETITION` / RK the lowercase platform GUID;
+`DeletionDate`, `Status`, `PurgedUtc`; override the name with
+`PLATFORM_CLOCK_TABLE`). `platform_clock.py` reads only that table, through a
+**Storage Table Data Reader** grant scoped to it (site repo's
+`shared-data-access.bicep`) — never the registry's `competitions` table. The file
+is **byte-identical** in fs-judgepapers and fs-scoremodifier — change it in all
+three. `read_platform_clock` returns None when the id is not a GUID, the row does
+not exist or `PLATFORM_STORAGE_ACCOUNT` is unset, and raises
+`PlatformClockUnavailable` on any other failure, a missing table (`TableNotFound`)
+included. One table client per request or sweep (`_platform_table()`, passed as
+`table_client=`).
+
+- Every record is bound (`PlatformId`, always stored as
+  `pc.normalize_platform_id` — trimmed, lowercase GUID — so differently-cased ids
+  never make a second record; a non-GUID is 400 `invalid_platform_id`);
+  `resolve_competition` is the only creation path. A record's `DeletionDate` is
+  only a **cached copy** of the platform's date (`sh.sync_local_deletion_date`,
+  refreshed by resolve, `get_competition_details` and the timer) — absent until
+  the platform reports one — for display only. `resolve_competition` and
+  `get_competition_details` return it as `deletionDate` (null when there is none).
+  `resolve_competition` answers **410 `platform_deleted`** — creating nothing —
+  when the platform competition is deleted or purged. A **new** binding (adoption
+  or create) must be confirmed by the platform: 404 `platform_not_found` when it
+  has no such competition, 503 `platform_unavailable` when it cannot be read (a
+  record bound to a nonexistent competition would never be deleted); with
+  `PLATFORM_STORAGE_ACCOUNT` unset (local dev) it binds without a date. An existing
+  bound record still resolves on its cached date when the platform is unreachable
+  or does not know it.
+- The **04:00 UTC** timer (`_run_auto_delete`, after the platform's 03:00 sweep)
+  deletes a bound record's data **only on the platform's verdict**
+  (`platform_says_delete`: `Status == "deleted"` or `PurgedUtc`) — never on a date
+  alone (the platform may be in dry-run, or the competition just extended). No
+  clock row means keep + `logging.warning`; a platform that **cannot be read, or
+  `PLATFORM_STORAGE_ACCOUNT` unset, means skip + `logging.error`** — never delete.
+  Legacy rows with no `PlatformId` go on their stored date (`ensure_deletion_date`
+  backfills `LEGACY_DELETION_DATE` for those only).
+- No e-mail address outlives the data: `_delete_competition_data` merges
+  `CreatedBy=""` and `DeletedBy="user"|"auto-cleanup"`, and every nightly run ends
+  with `_scrub_hidden_rows`, which blanks `CreatedBy`/`DeletedBy` on soft-deleted rows
+  deleted before that rule. Logs carry no addresses (nor fallback-photo or pool
+  filenames). Covered by `tests/test_platform_clock.py`.
 
 ### Shared competition file pool + auto-assignment
 
@@ -387,7 +437,8 @@ Required GitHub environment config: secrets `AZURE_CLIENT_ID`,
 `PROXY_SHARED_SECRET`; vars `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
 `LOCATION`, `RESOURCE_GROUP_NAME`, plus optional `PLATFORM_STORAGE_ACCOUNT` (the
 site repo's `stfsplat*` account for this environment — unset leaves
-`import_platform_file` off). (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and
+`import_platform_file` off and **stops auto-deletion of every bound competition**,
+logged as an error each night — so it is required in practice). (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and
 `CUSTOM_DOMAIN` are gone.)
 
 ## Cross-repo handoff (figureskatingtools-site)

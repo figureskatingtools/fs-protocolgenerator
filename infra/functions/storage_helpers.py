@@ -19,6 +19,8 @@ from azure.identity import DefaultAzureCredential
 from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import TableClient, UpdateMode
 
+import platform_clock as pc
+
 # Blob container holding every competition folder.
 CONTAINER_NAME = "fs-protocolgenerator"
 
@@ -34,11 +36,17 @@ MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 # HTTP request body at ~100 MB, so this is the practical ceiling.
 MAX_ZIP_UPLOAD_SIZE = 100 * 1024 * 1024
 
-# Automatic competition deletion lifecycle (same policy as fs-judgepapers).
-DELETION_RETENTION_DAYS = 60
-DELETION_EXTENSION_DAYS = 7
+# Automatic competition deletion. The platform registry owns every
+# competition's deletion date (platform_clock.py); this tool keeps no clock of
+# its own. LEGACY_DELETION_DATE only dates legacy rows that were never bound to
+# a platform competition and predate the DeletionDate property.
 LEGACY_DELETION_DATE = "2026-06-12T00:00:00Z"
 AUTO_CLEANUP_ACTOR = "auto-cleanup"
+# A deleted row records *how* it went, never who: no e-mail address outlives
+# the competition's data.
+USER_DELETE_ACTOR = "user"
+# CreatedBy / DeletedBy values that are not an address (and so need no scrub).
+NON_PERSONAL_ACTORS = ("", "-", USER_DELETE_ACTOR, AUTO_CLEANUP_ACTOR)
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────
@@ -212,7 +220,9 @@ def parse_iso_utc(value):
 
 
 def ensure_deletion_date(comp_table, entity):
-    if entity.get("DeletionDate"):
+    """Backfill LEGACY_DELETION_DATE onto a legacy *unbound* row without a
+    date. A bound row is left alone: its date is the platform's."""
+    if entity.get("DeletionDate") or entity.get("PlatformId"):
         return entity
     entity["DeletionDate"] = LEGACY_DELETION_DATE
     try:
@@ -224,6 +234,30 @@ def ensure_deletion_date(comp_table, entity):
     except Exception as e:
         logging.warning(f"Failed to backfill DeletionDate for {entity['RowKey']}: {e}")
     return entity
+
+
+def sync_local_deletion_date(comp_table, entity, clock):
+    """Cache the platform's deletion date on a bound record (MERGE), so the
+    stored DeletionDate is the last date the platform reported — shown while
+    the platform cannot be read. Best-effort; a no-op when the platform has no
+    date or the cached one already matches. Returns the record's DeletionDate
+    string (None when it has none)."""
+    platform_date = (clock or {}).get("deletionDate")
+    if platform_date is None:
+        return entity.get("DeletionDate")
+    platform_str = pc.to_iso_z(platform_date)
+    if pc.parse_utc(entity.get("DeletionDate")) != platform_date:
+        try:
+            comp_table.update_entity({
+                "PartitionKey": "GLOBAL",
+                "RowKey": entity["RowKey"],
+                "DeletionDate": platform_str,
+            }, mode=UpdateMode.MERGE)
+        except Exception as e:
+            logging.warning(
+                f"Could not sync DeletionDate for {entity['RowKey']}: {type(e).__name__}")
+    entity["DeletionDate"] = platform_str
+    return platform_str
 
 
 # ── metadata.json (the per-competition structure document) ────────────────────

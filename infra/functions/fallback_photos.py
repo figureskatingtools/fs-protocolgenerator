@@ -123,7 +123,9 @@ def parse_zip(zip_bytes):
             try:
                 jpeg = _reencode(zf.read(info))
             except Exception as e:   # UnidentifiedImage / DecompressionBomb / OSError
-                logging.warning(f"Fallback photo {filename} rejected: {e}")
+                # The filename names a team and club (and the message may
+                # quote it), so only the exception type is logged.
+                logging.warning(f"A fallback photo was rejected: {type(e).__name__}")
                 rejected.append(filename)
                 continue
 
