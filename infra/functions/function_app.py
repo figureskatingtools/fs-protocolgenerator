@@ -1375,7 +1375,17 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
     imported, moved, touched = _apply_assignments(structure, report, auto=auto)
     now = f"{datetime.utcnow().isoformat()}Z"
     pool = pool or {}
-    files = dict((structure.get("rosterImport") or {}).get("files") or {})
+    previous = structure.get("rosterImport") or {}
+    if "files" in previous:
+        files = dict(previous["files"])
+    else:
+        # A report from before `files`: its `at` is when the archived roster was
+        # supplied, and this pass is about to overwrite it.
+        files = {}
+        if previous.get("at"):
+            files["teams"] = {"at": previous["at"]}
+            if partic_xml is not None and not fresh_partic:
+                files["partic"] = {"at": previous["at"]}
     if not auto:
         files["teams"] = {"at": now, **pool.get("teams", {})}
         # A fresh TEAMS file is never joined with the archived DT_PARTIC.
@@ -1449,7 +1459,7 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id:
         return func.HttpResponse("Missing id", status_code=400)
     refs = {kind: ref for kind, ref in refs.items()
-            if ref and not (teams_xml if kind == "teams" else partic_xml)}
+            if ref is not None and not (teams_xml if kind == "teams" else partic_xml)}
     for ref in refs.values():
         if not isinstance(ref, dict) or not ref.get('name'):
             return sh.json_response(

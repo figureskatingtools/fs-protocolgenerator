@@ -94,4 +94,7 @@ def test_document_type_falls_back_on_the_shape():
 
 def test_document_type_of_anything_else_is_none():
     assert document_type(b'<OdfBody DocumentType="DT_SCHEDULE"><Unit /></OdfBody>') is None
+    # An increment carries participants too, but is not the full file.
+    update = PARTIC_XML.replace('DocumentType="DT_PARTIC"', 'DocumentType="DT_PARTIC_UPDATE"')
+    assert document_type(update.encode()) is None
     assert document_type(b"not xml") is None

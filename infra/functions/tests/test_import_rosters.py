@@ -316,6 +316,12 @@ def test_a_reference_without_a_name_is_a_400(bound, pool):
     assert response.status_code == 400 and error_of(response) == "missing_parameter"
 
 
+def test_an_empty_reference_is_a_400_not_a_rematch(bound, storage, pool):
+    storage.container.upload_blob(f"{FOLDER}/rosters/teams.xml", TEAMS_XML.encode())
+    response = import_rosters(particPool={})
+    assert response.status_code == 400 and error_of(response) == "missing_parameter"
+
+
 def test_an_unbound_competition_cannot_read_the_pool(comp, pool):
     response = import_rosters(teamsPool=fsm(TEAMS_NAME))
     assert response.status_code == 409 and error_of(response) == "not_bound"
@@ -327,11 +333,34 @@ def test_an_unconfigured_platform_is_a_503(bound, monkeypatch):
     assert response.status_code == 503 and error_of(response) == "platform_not_configured"
 
 
-def test_a_rematch_of_an_older_import_records_no_files(bound, storage):
-    """Imported before `files` existed: the automatic re-match has nothing to
-    record, and leaving the key out lets the UI fall back on `at`."""
+LEGACY_REPORT = {"at": "2026-01-01T00:00:00Z", "imported": 1, "moved": 0,
+                 "unmatched": [], "withdrawn": []}
+
+
+def test_a_rematch_of_an_older_import_keeps_when_it_was_imported(bound, storage):
+    """Imported before `files` existed, the report's `at` is the only record of
+    when the archived files were supplied; the re-match rewrites `at`, so it has
+    to move into `files` first — or a pool file pushed between the import and the
+    re-match would look already imported."""
     storage.container.upload_blob(f"{FOLDER}/rosters/teams.xml", TEAMS_XML.encode())
-    bound["rosterImport"] = {"at": "2026-01-01T00:00:00Z", "imported": 1, "moved": 0,
-                             "unmatched": [], "withdrawn": []}
+    storage.container.upload_blob(f"{FOLDER}/rosters/partic.xml", PARTIC_XML.encode())
+    bound["rosterImport"] = dict(LEGACY_REPORT)
     fa._run_roster_match(bound, storage.container, FOLDER)
-    assert "files" not in bound["rosterImport"]
+    assert bound["rosterImport"]["files"] == {"teams": {"at": LEGACY_REPORT["at"]},
+                                              "partic": {"at": LEGACY_REPORT["at"]}}
+
+
+def test_a_legacy_teams_only_import_records_no_partic(bound, storage):
+    storage.container.upload_blob(f"{FOLDER}/rosters/teams.xml", TEAMS_XML.encode())
+    bound["rosterImport"] = dict(LEGACY_REPORT)
+    fa._run_roster_match(bound, storage.container, FOLDER)
+    assert bound["rosterImport"]["files"] == {"teams": {"at": LEGACY_REPORT["at"]}}
+
+
+def test_a_partic_added_to_a_legacy_import_keeps_the_teams_time(bound, storage, pool):
+    storage.container.upload_blob(f"{FOLDER}/rosters/teams.xml", TEAMS_XML.encode())
+    bound["rosterImport"] = dict(LEGACY_REPORT)
+    payload(import_rosters(particPool=fsm(PARTIC_NAME)))
+    files = bound["rosterImport"]["files"]
+    assert files["teams"] == {"at": LEGACY_REPORT["at"]}
+    assert files["partic"]["poolName"] == PARTIC_NAME

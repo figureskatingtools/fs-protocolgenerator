@@ -261,14 +261,16 @@ open, and the Schedule section offers a "Use it" / "Replace from it" button.
 `_read_pool_file` with the same JSON errors; inline XML wins over a reference to
 the same file, a reference without a name is 400 `missing_parameter`, and a
 pooled file whose content is not the type it was referenced as
-(`dt_partic.document_type`: root `DocumentType`, else `<Composition>` vs
-`<Participant>`) is 400 `wrong_document_type` — the pool is picked by filename.
+(`dt_partic.document_type`: root `DocumentType` — any other declared type, e.g.
+`DT_PARTIC_UPDATE`, is neither — else `<Composition>` vs `<Participant>`) is 400
+`wrong_document_type` — the pool is picked by filename.
 The success JSON adds `"source": {teams?, partic?}` → `{poolName, source}`.
 `rosterImport.files` (`{teams?, partic?}` → `{at, poolName?, source?}`) records
 which files are in use and when each was supplied; a pass that does not supply a
 file — the automatic re-match included — keeps its entry, and a fresh TEAMS file
-drops the `partic` entry (it is never joined with the archived DT_PARTIC); the key is
-omitted while empty (a re-match of a roster imported before it existed). The
+drops the `partic` entry (it is never joined with the archived DT_PARTIC). A report
+written before `files` existed seeds it from its own `at` on the next pass (the
+archived TEAMS, plus the archived PARTIC when a re-match reads it). The
 frontend auto-imports the newest pool pair on open when a synchro category has no
 roster import yet, and offers "Update from them" once a pool file is newer than
 its `files` entry.
