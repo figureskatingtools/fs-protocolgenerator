@@ -325,3 +325,13 @@ def test_an_unconfigured_platform_is_a_503(bound, monkeypatch):
     monkeypatch.setattr(sh, "get_platform_container_client", lambda: None)
     response = import_rosters(teamsPool=fsm(TEAMS_NAME))
     assert response.status_code == 503 and error_of(response) == "platform_not_configured"
+
+
+def test_a_rematch_of_an_older_import_records_no_files(bound, storage):
+    """Imported before `files` existed: the automatic re-match has nothing to
+    record, and leaving the key out lets the UI fall back on `at`."""
+    storage.container.upload_blob(f"{FOLDER}/rosters/teams.xml", TEAMS_XML.encode())
+    bound["rosterImport"] = {"at": "2026-01-01T00:00:00Z", "imported": 1, "moved": 0,
+                             "unmatched": [], "withdrawn": []}
+    fa._run_roster_match(bound, storage.container, FOLDER)
+    assert "files" not in bound["rosterImport"]

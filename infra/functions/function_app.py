@@ -1388,8 +1388,9 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
         "moved": moved,
         "unmatched": report["unmatched"],
         "withdrawn": report["withdrawn"],
-        "files": files,
     }
+    if files:   # a re-match of a roster imported before `files` existed has none
+        structure["rosterImport"]["files"] = files
     return {"imported": imported, "moved": moved, "touched": touched, "report": report}
 
 

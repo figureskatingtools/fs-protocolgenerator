@@ -267,7 +267,8 @@ The success JSON adds `"source": {teams?, partic?}` → `{poolName, source}`.
 `rosterImport.files` (`{teams?, partic?}` → `{at, poolName?, source?}`) records
 which files are in use and when each was supplied; a pass that does not supply a
 file — the automatic re-match included — keeps its entry, and a fresh TEAMS file
-drops the `partic` entry (it is never joined with the archived DT_PARTIC). The
+drops the `partic` entry (it is never joined with the archived DT_PARTIC); the key is
+omitted while empty (a re-match of a roster imported before it existed). The
 frontend auto-imports the newest pool pair on open when a synchro category has no
 roster import yet, and offers "Update from them" once a pool file is newer than
 its `files` entry.
