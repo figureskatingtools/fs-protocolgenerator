@@ -17,7 +17,10 @@ import azure.functions as func
 import pytest
 
 import function_app as fa
+import storage_helpers as sh
 import structure as st
+
+from conftest import FakeContainerClient
 
 EMAIL = "organizer@example.com"
 COMP_ID = "abc12345"
@@ -177,3 +180,148 @@ def test_a_body_without_an_id_is_a_400(comp):
 
 def test_an_unknown_competition_is_a_404(comp):
     assert import_rosters(comp_id="nosuchid", teamsXml=TEAMS_XML).status_code == 404
+
+
+# ── from the shared competition files ─────────────────────────────────────────
+# FS Manager pushes both roster files into the platform pool over HOVTP
+# (`<guid>/fsm/DT_PARTIC_TEAMS_<code>.xml`, `DT_PARTIC_<code>.xml`), and people can
+# upload them there too. A body may reference either file by pool name instead
+# of carrying it.
+
+TEAMS_NAME = "DT_PARTIC_TEAMS_FSK-------------------------------.xml"
+PARTIC_NAME = "DT_PARTIC_FSK-------------------------------.xml"
+
+
+@pytest.fixture
+def bound(storage):
+    """`comp`, bound to platform competition `p-1`."""
+    structure = storage.competition(PlatformId="p-1")
+    category = st.new_category("Tulokkaat, Mupi L1", "synchro", 0)
+    category["code"] = "FSKXSYNCHRONMLTULO--01"
+    structure["categories"].append(category)
+    return structure
+
+
+@pytest.fixture
+def pool(monkeypatch):
+    """The platform's competition-data container: FSM's pair in `fsm/`, and in
+    `uploads/` a TEAMS file under the PARTIC name (picked by name, wrong inside)
+    plus a corrected DT_PARTIC."""
+    fake = FakeContainerClient({
+        f"p-1/fsm/{TEAMS_NAME}": TEAMS_XML.encode(),
+        f"p-1/fsm/{PARTIC_NAME}": PARTIC_XML.encode(),
+        f"p-1/uploads/{PARTIC_NAME}": TEAMS_XML.encode(),
+        "p-1/uploads/corrected.xml": CORRECTED_PARTIC_XML.encode(),
+    })
+    monkeypatch.setattr(sh, "get_platform_container_client", lambda: fake)
+    return fake
+
+
+def fsm(name):
+    return {"name": name, "source": "fsm"}
+
+
+def error_of(response):
+    return json.loads(response.get_body())["error"]
+
+
+def test_both_files_can_come_from_the_pool(bound, storage, pool):
+    data = payload(import_rosters(teamsPool=fsm(TEAMS_NAME), particPool=fsm(PARTIC_NAME)))
+    assert data["imported"] == 1
+    assert teams_of(bound)[0]["members"] == ["AHLBERG Bertil", "KOSKINEN Aino"]
+    assert data["source"] == {"teams": {"poolName": TEAMS_NAME, "source": "fsm"},
+                              "partic": {"poolName": PARTIC_NAME, "source": "fsm"}}
+    # Archived like an upload, so the automatic re-match works the same.
+    assert storage.container.blobs[f"{FOLDER}/rosters/teams.xml"] == TEAMS_XML.encode()
+    assert storage.container.blobs[f"{FOLDER}/rosters/partic.xml"] == PARTIC_XML.encode()
+
+
+def test_the_report_records_which_pool_files_are_in_use(bound, pool):
+    payload(import_rosters(teamsPool=fsm(TEAMS_NAME), particPool=fsm(PARTIC_NAME)))
+    files = bound["rosterImport"]["files"]
+    assert files["teams"]["poolName"] == TEAMS_NAME and files["teams"]["source"] == "fsm"
+    assert files["partic"]["poolName"] == PARTIC_NAME
+    assert files["teams"]["at"] == bound["rosterImport"]["at"]
+
+
+def test_a_teams_only_pool_import_falls_back_to_athlete_codes(bound, pool):
+    payload(import_rosters(teamsPool=fsm(TEAMS_NAME)))
+    assert teams_of(bound)[0]["members"] == ["A0001", "A0002"]
+    assert "partic" not in bound["rosterImport"]["files"]
+
+
+def test_a_pool_partic_adds_names_to_the_archived_roster(bound, storage, pool):
+    payload(import_rosters(teamsPool=fsm(TEAMS_NAME)))
+    teams_entry = bound["rosterImport"]["files"]["teams"]
+    payload(import_rosters(particPool={"name": "corrected.xml"}))   # source defaults to upload
+    assert teams_of(bound)[0]["members"] == ["AHLBERG Bertil", "KOSKINEN Aino Maria"]
+    files = bound["rosterImport"]["files"]
+    # The re-matched TEAMS is still the one from FSM, imported when it was.
+    assert files["teams"] == teams_entry
+    assert files["partic"]["poolName"] == "corrected.xml"
+    assert files["partic"]["source"] == "upload"
+
+
+def test_a_fresh_teams_file_drops_the_partic_it_is_not_joined_with(bound, pool):
+    payload(import_rosters(teamsPool=fsm(TEAMS_NAME), particPool=fsm(PARTIC_NAME)))
+    payload(import_rosters(teamsXml=TEAMS_XML))
+    assert set(bound["rosterImport"]["files"]) == {"teams"}
+    assert "poolName" not in bound["rosterImport"]["files"]["teams"]
+
+
+def test_the_automatic_rematch_keeps_the_file_record(bound, storage, pool):
+    """A Total Results PDF re-runs the match without supplying any file; the
+    record of what was imported (and when) must survive, or an older pool file
+    would look newer than the import and the UI would offer it again."""
+    payload(import_rosters(teamsPool=fsm(TEAMS_NAME), particPool=fsm(PARTIC_NAME)))
+    files = bound["rosterImport"]["files"]
+    fa._run_roster_match(bound, storage.container, FOLDER)
+    assert bound["rosterImport"]["files"] == files
+
+
+def test_inline_xml_wins_over_a_pool_reference(bound, pool):
+    payload(import_rosters(teamsPool=fsm(TEAMS_NAME), particXml=CORRECTED_PARTIC_XML,
+                           particPool=fsm(PARTIC_NAME)))
+    assert teams_of(bound)[0]["members"] == ["AHLBERG Bertil", "KOSKINEN Aino Maria"]
+    assert "poolName" not in bound["rosterImport"]["files"]["partic"]
+
+
+def test_a_file_of_the_other_type_is_refused(bound, storage, pool):
+    response = import_rosters(teamsPool=fsm(TEAMS_NAME), particPool={"name": PARTIC_NAME})
+    assert response.status_code == 400 and error_of(response) == "wrong_document_type"
+    assert teams_of(bound) == []
+    assert f"{FOLDER}/rosters/teams.xml" not in storage.container.blobs
+
+
+def test_the_pool_name_cannot_leave_the_competition_folder(bound, pool):
+    # Another competition's TEAMS file holds no teams: reading it would be a 422.
+    pool.blobs["p-2/fsm/" + TEAMS_NAME] = EMPTY_TEAMS_XML.encode()
+    data = payload(import_rosters(teamsPool=fsm("../../p-2/fsm/" + TEAMS_NAME)))
+    assert data["imported"] == 1
+    assert data["source"]["teams"]["poolName"] == TEAMS_NAME
+
+
+def test_a_missing_pool_file_is_a_404(bound, pool):
+    response = import_rosters(teamsPool=fsm("DT_PARTIC_TEAMS_other.xml"))
+    assert response.status_code == 404 and error_of(response) == "pool_file_not_found"
+
+
+def test_an_invalid_source_is_a_400(bound, pool):
+    response = import_rosters(teamsPool={"name": TEAMS_NAME, "source": "elsewhere"})
+    assert response.status_code == 400 and error_of(response) == "invalid_source"
+
+
+def test_a_reference_without_a_name_is_a_400(bound, pool):
+    response = import_rosters(teamsPool={"source": "fsm"})
+    assert response.status_code == 400 and error_of(response) == "missing_parameter"
+
+
+def test_an_unbound_competition_cannot_read_the_pool(comp, pool):
+    response = import_rosters(teamsPool=fsm(TEAMS_NAME))
+    assert response.status_code == 409 and error_of(response) == "not_bound"
+
+
+def test_an_unconfigured_platform_is_a_503(bound, monkeypatch):
+    monkeypatch.setattr(sh, "get_platform_container_client", lambda: None)
+    response = import_rosters(teamsPool=fsm(TEAMS_NAME))
+    assert response.status_code == 503 and error_of(response) == "platform_not_configured"

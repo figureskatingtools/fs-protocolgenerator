@@ -16,6 +16,7 @@ import platform_clock as pc
 import storage_helpers as sh
 import structure as st
 from schedule_parser import parse_schedule_data
+import dt_partic
 from dt_partic import parse_participants, parse_team_rosters
 import fallback_photos
 import image_sanitize
@@ -1320,7 +1321,8 @@ def _roster_blob(container, folder_path: str, name: str):
     return container.get_blob_client(f"{folder_path}/rosters/{name}")
 
 
-def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_xml=None):
+def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_xml=None,
+                      pool=None):
     """Match every registered team onto a category and apply the result in place.
 
     Shared by the `import_rosters` route and the automatic re-match that runs when
@@ -1336,8 +1338,14 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
     therefore keyed on `teams_xml` alone, never on `partic_xml`.
 
     The structure is mutated (the caller persists it) and the report is stored in
-    `structure["rosterImport"]` for the UI. Returns the summary, or None when
-    there is nothing to match (no archived roster, or no teams in the XML)."""
+    `structure["rosterImport"]` for the UI. Besides the outcome, `files` records
+    the roster files in use — `{teams?, partic?}` → `{at}` (when it was supplied)
+    plus `{poolName, source}` when it came from the competition pool (`pool`, same
+    shape without `at`) — which is what the UI compares the pool against to offer
+    newer files. A file this pass did not supply keeps its entry, so the automatic
+    re-match after a results upload never makes an older pool file look imported.
+    Returns the summary, or None when there is nothing to match (no archived
+    roster, or no teams in the XML)."""
     auto = teams_xml is None
     fresh_partic = partic_xml is not None
     if auto:
@@ -1365,12 +1373,22 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
     rows_by_cat = _result_rows_for_categories(structure, container, folder_path)
     report = roster_matching.match_teams(structure, teams, rows_by_cat)
     imported, moved, touched = _apply_assignments(structure, report, auto=auto)
+    now = f"{datetime.utcnow().isoformat()}Z"
+    pool = pool or {}
+    files = dict((structure.get("rosterImport") or {}).get("files") or {})
+    if not auto:
+        files["teams"] = {"at": now, **pool.get("teams", {})}
+        # A fresh TEAMS file is never joined with the archived DT_PARTIC.
+        files.pop("partic", None)
+    if fresh_partic:
+        files["partic"] = {"at": now, **pool.get("partic", {})}
     structure["rosterImport"] = {
-        "at": f"{datetime.utcnow().isoformat()}Z",
+        "at": now,
         "imported": imported,
         "moved": moved,
         "unmatched": report["unmatched"],
         "withdrawn": report["withdrawn"],
+        "files": files,
     }
     return {"imported": imported, "moved": moved, "touched": touched, "report": report}
 
@@ -1394,10 +1412,20 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
     """Import synchro team rosters for the *whole competition* from one
     DT_PARTIC_TEAMS file joined with one DT_PARTIC file (XML strings in the body).
 
-    Body: {id, teamsXml?, particXml?} — without `teamsXml` the roster archived by
-    an earlier import is re-matched instead (409 when nothing was imported yet),
-    against the `particXml` of this call when it carries one (that is how skater
-    names are added to a TEAMS-only import) and otherwise against the archived one.
+    Body: {id, teamsXml?, particXml?, teamsPool?, particPool?} — without a TEAMS
+    file the roster archived by an earlier import is re-matched instead (409 when
+    nothing was imported yet), against the DT_PARTIC of this call when it carries
+    one (that is how skater names are added to a TEAMS-only import) and otherwise
+    against the archived one.
+
+    Either file may instead be a reference into the platform's shared competition
+    file pool, `{name, source: "upload"|"fsm"}` — FS Manager pushes both over HOVTP
+    — read exactly as `import_platform_file` reads (`_read_pool_file`: bound
+    `PlatformId`, fixed folder, the same JSON error codes). Inline XML wins over a
+    reference to the same file. A referenced file must really be the type it is
+    referenced as (`dt_partic.document_type`), or the request is a 400
+    `wrong_document_type`: the pool is picked by filename, and a TEAMS file taken
+    for DT_PARTIC would import with bare athlete codes for names.
 
     One TEAMS file spans every synchro event, but teams register per *event* and
     compete per *block*: which block a team skated in shows up only in that block's
@@ -1414,14 +1442,44 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
         comp_id = body.get('id')
         teams_xml = body.get('teamsXml')
         partic_xml = body.get('particXml')
+        refs = {kind: body.get(f'{kind}Pool') for kind in ("teams", "partic")}
     except ValueError:
         return func.HttpResponse("Invalid JSON body", status_code=400)
     if not comp_id:
         return func.HttpResponse("Missing id", status_code=400)
+    refs = {kind: ref for kind, ref in refs.items()
+            if ref and not (teams_xml if kind == "teams" else partic_xml)}
+    for ref in refs.values():
+        if not isinstance(ref, dict) or not ref.get('name'):
+            return sh.json_response(
+                {"error": "missing_parameter",
+                 "message": "A competition file reference needs a name"}, 400)
+        if (ref.get('source') or 'upload') not in ('upload', 'fsm'):
+            return sh.json_response(
+                {"error": "invalid_source", "message": "source must be 'upload' or 'fsm'"}, 400)
     try:
         entity, folder_path = _resolve(comp_id)
         if not entity:
             return func.HttpResponse("Competition not found", status_code=404)
+
+        pool = {}
+        for kind, ref in refs.items():
+            filename = os.path.basename(ref['name'])
+            source = ref.get('source') or 'upload'
+            xml, err = _read_pool_file(entity, filename, source)
+            if err:
+                return err
+            expected = dt_partic.TEAMS if kind == "teams" else dt_partic.PARTIC
+            if dt_partic.document_type(xml) != expected:
+                return sh.json_response(
+                    {"error": "wrong_document_type",
+                     "message": f"{filename} is not a {expected} file"}, 400)
+            if kind == "teams":
+                teams_xml = xml
+            else:
+                partic_xml = xml
+            pool[kind] = {"poolName": filename, "source": source}
+
         structure = sh.read_structure(folder_path)
         container = sh.get_container_client()
 
@@ -1431,7 +1489,8 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
                 "DT_PARTIC_TEAMS file as well, not just DT_PARTIC.", status_code=409)
 
         summary = _run_roster_match(structure, container, folder_path,
-                                    teams_xml=teams_xml or None, partic_xml=partic_xml or None)
+                                    teams_xml=teams_xml or None, partic_xml=partic_xml or None,
+                                    pool=pool)
         if summary is None:
             return func.HttpResponse(
                 "No teams found in the DT_PARTIC_TEAMS file — check that it is the team "
@@ -1443,6 +1502,7 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
             "moved": summary["moved"],
             "categories": len(summary["touched"]),
             "report": summary["report"],
+            "source": pool,
             "structure": structure,
         })
     except Exception as e:

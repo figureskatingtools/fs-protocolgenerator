@@ -254,6 +254,24 @@ upload path unchanged (409 unless `force`, `schedule.xml|pdf` kept,
 bound competition with no categories and a schedule in the pool parses it on
 open, and the Schedule section offers a "Use it" / "Replace from it" button.
 
+`import_rosters` takes the synchro roster pair the same way: besides the inline
+`teamsXml`/`particXml` strings, the JSON body may carry `teamsPool`/`particPool`
+= `{name, source: upload|fsm}` (FSM pushes `DT_PARTIC_TEAMS_<code>.xml` and
+`DT_PARTIC_<code>.xml` over HOVTP). Each reference reads through
+`_read_pool_file` with the same JSON errors; inline XML wins over a reference to
+the same file, a reference without a name is 400 `missing_parameter`, and a
+pooled file whose content is not the type it was referenced as
+(`dt_partic.document_type`: root `DocumentType`, else `<Composition>` vs
+`<Participant>`) is 400 `wrong_document_type` — the pool is picked by filename.
+The success JSON adds `"source": {teams?, partic?}` → `{poolName, source}`.
+`rosterImport.files` (`{teams?, partic?}` → `{at, poolName?, source?}`) records
+which files are in use and when each was supplied; a pass that does not supply a
+file — the automatic re-match included — keeps its entry, and a fresh TEAMS file
+drops the `partic` entry (it is never joined with the archived DT_PARTIC). The
+frontend auto-imports the newest pool pair on open when a synchro category has no
+roster import yet, and offers "Update from them" once a pool file is newer than
+its `files` entry.
+
 `autoAssigned` marks a placement made by filename recognition rather than by a
 human: `&autoAssigned=1` on either upload route tags the file **only** when the
 slot assignment actually succeeded, and any later manual `assign_file` (including
