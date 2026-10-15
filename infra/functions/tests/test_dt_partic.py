@@ -4,7 +4,7 @@ The XML below is invented (real exports carry minors' names); it only reproduces
 the *shape* of the real files, including their untidiness: padded attributes, a
 leading empty `RegisteredEvent` and an athlete with no participant record.
 """
-from dt_partic import event_label, parse_participants, parse_team_rosters
+from dt_partic import document_type, event_label, parse_participants, parse_team_rosters
 
 TEAMS_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <OdfBody DocumentType="DT_PARTIC_TEAMS">
@@ -76,3 +76,25 @@ def test_event_label_known_and_unknown_tokens():
     assert event_label("FSKXSYNCHRONMLTULO----------------") == "Tulokkaat"
     assert event_label("FSKXSYNCHRONADVNOV----") == "Advanced Novice"
     assert event_label("FSKXSYNCHRONWIDGET----") == "Widget"
+
+
+def test_document_type_reads_the_declared_type():
+    assert document_type(TEAMS_XML.encode()) == "DT_PARTIC_TEAMS"
+    assert document_type(PARTIC_XML.encode()) == "DT_PARTIC"
+    padded = PARTIC_XML.replace('DocumentType="DT_PARTIC"', 'DocumentType=" DT_PARTIC "')
+    assert document_type(padded.encode()) == "DT_PARTIC"
+
+
+def test_document_type_falls_back_on_the_shape():
+    assert document_type(TEAMS_XML.replace(' DocumentType="DT_PARTIC_TEAMS"', '').encode()) \
+        == "DT_PARTIC_TEAMS"
+    assert document_type(PARTIC_XML.replace(' DocumentType="DT_PARTIC"', '').encode()) \
+        == "DT_PARTIC"
+
+
+def test_document_type_of_anything_else_is_none():
+    assert document_type(b'<OdfBody DocumentType="DT_SCHEDULE"><Unit /></OdfBody>') is None
+    # An increment carries participants too, but is not the full file.
+    update = PARTIC_XML.replace('DocumentType="DT_PARTIC"', 'DocumentType="DT_PARTIC_UPDATE"')
+    assert document_type(update.encode()) is None
+    assert document_type(b"not xml") is None

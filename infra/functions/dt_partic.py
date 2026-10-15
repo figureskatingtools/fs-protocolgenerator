@@ -23,6 +23,34 @@ def _local(tag: str) -> str:
     return tag.split('}')[-1] if isinstance(tag, str) else ""
 
 
+TEAMS = "DT_PARTIC_TEAMS"
+PARTIC = "DT_PARTIC"
+
+
+def document_type(xml_bytes):
+    """Which of the two roster files `xml_bytes` is: `TEAMS`, `PARTIC` or None.
+
+    The root's `DocumentType` decides (real exports pad it), and any other
+    declared type — a `DT_PARTIC_UPDATE` increment, say — is neither; a file
+    without one is recognised by its shape — `<Composition>` only appears in the team file,
+    `<Participant>` only in the participant file. Used to vet a file picked from
+    the competition pool by name, where a TEAMS file taken for DT_PARTIC would
+    import "successfully" with bare athlete codes for names."""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except Exception:
+        return None
+    declared = (root.get("DocumentType") or "").strip().upper()
+    if declared:
+        return declared if declared in (TEAMS, PARTIC) else None
+    tags = {_local(el.tag) for el in root.iter()}
+    if "Composition" in tags:
+        return TEAMS
+    if "Participant" in tags:
+        return PARTIC
+    return None
+
+
 def parse_participants(xml_bytes) -> dict:
     """DT_PARTIC -> {athleteCode: {"given","family","printName"}}."""
     out = {}
