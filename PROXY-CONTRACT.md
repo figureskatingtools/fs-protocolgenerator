@@ -28,7 +28,9 @@ Browser ── https://figureskatingtools.com/protocolgenerator/api/list_competi
 Both are implemented in `infra/functions/storage_helpers.py`
 (`_proxy_secret_ok`, `get_user_email_from_header`); every route calls
 `function_app._require_user`, which returns `None` → HTTP 401 when no identity
-can be established.
+can be established. The one exception is `GET health`: it needs neither identity
+nor the secret and answers `{"status": "ok", "service": "fs-protocolgenerator"}`
+without touching storage, for the site's admin diagnostics.
 
 ### Shared secret
 
