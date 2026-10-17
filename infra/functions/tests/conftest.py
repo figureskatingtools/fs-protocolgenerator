@@ -8,8 +8,57 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+import platform_access as pa
 import storage_helpers as sh
 import structure as st
+
+
+# ── the router's gate (PROXY-CONTRACT.md) ─────────────────────────────────────
+
+PROXY_SECRET = "test-proxy-secret"
+TID = "11111111-2222-4333-8444-555555555555"
+OID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+def auth_headers(email="organizer@example.com", admin=True, tid=TID, oid=OID, **extra):
+    """Headers exactly as the site router forwards a signed-in user. Admin by
+    default: route tests that are not about access then need no grants (an
+    admin is "owner" everywhere, legacy unbound records included); the access
+    rules themselves are covered by test_competition_access.py."""
+    headers = {"x-proxy-secret": PROXY_SECRET,
+               "x-forwarded-user-tid": tid,
+               "x-forwarded-user-oid": oid}
+    if email:
+        headers["x-forwarded-user-email"] = email
+    if admin:
+        headers["x-forwarded-user-admin"] = "1"
+    headers.update(extra)
+    return headers
+
+
+_HTTP_ROUTES = None
+
+
+def http_routes():
+    """{function name: handler} for every HTTP-triggered function. Built once:
+    the SDK's `get_functions()` refuses a second call (duplicate names)."""
+    global _HTTP_ROUTES
+    if _HTTP_ROUTES is None:
+        import function_app as fa
+        _HTTP_ROUTES = {fn.get_function_name(): fn.get_user_function()
+                        for fn in fa.app.get_functions()
+                        if type(fn.get_trigger()).__name__ == "HttpTrigger"}
+    return _HTTP_ROUTES
+
+
+@pytest.fixture(autouse=True)
+def proxy_gate(monkeypatch):
+    """Every test runs with the gate configured, as deployed, and a cold
+    access cache."""
+    monkeypatch.setenv("PROXY_SHARED_SECRET", PROXY_SECRET)
+    pa.clear_cache()
+    yield
+    pa.clear_cache()
 
 
 # ── dict-backed stand-ins for blob storage ────────────────────────────────────

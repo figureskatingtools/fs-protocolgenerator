@@ -20,7 +20,7 @@ import function_app as fa
 import storage_helpers as sh
 import structure as st
 
-from conftest import FakeContainerClient
+from conftest import FakeContainerClient, auth_headers
 
 EMAIL = "organizer@example.com"
 SCHEDULE_NAME = "DT_SCHEDULE_FSK-------------------------------.xml"
@@ -70,7 +70,7 @@ def parse(body=b"", comp_id="abc12345", email=EMAIL, **params):
     query.update({k: v for k, v in params.items() if v is not None})
     req = func.HttpRequest(
         "POST", "/api/parse_schedule",
-        headers={"x-forwarded-user-email": email} if email else {},
+        headers=auth_headers(email) if email else {},
         params=query, body=body)
     return fa.parse_schedule._function.get_user_function()(req)
 

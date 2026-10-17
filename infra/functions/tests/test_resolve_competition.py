@@ -4,7 +4,8 @@ selector to this tool's registry.
 The route is the only way the new UI reaches a competition, so the awkward cases
 matter: a soft-deleted row keeps its PlatformId but its blobs are gone (it must
 never be resurrected), rows created before this feature carry no PlatformId at
-all (adopted by name), and the platform id goes straight into a table filter
+all (never adopted by name: that let anyone claim another user's record), and
+the platform id goes straight into a table filter
 (single quotes have to be escaped). The registry is faked with a dict-backed
 table client; competition names are invented.
 
@@ -23,6 +24,7 @@ from azure.core.exceptions import ResourceNotFoundError
 import function_app as fa
 import storage_helpers as sh
 import structure as st
+from conftest import auth_headers
 
 
 P1 = "0b5c7e0e-6f3a-4d55-9c1e-2a7d8b9c0d11"
@@ -119,7 +121,7 @@ def resolve(platform_id=P1, name="Spring Trophy 2026", dates="2026-05-01",
         body["venue"] = venue
     req = func.HttpRequest(
         "POST", "/api/resolve_competition",
-        headers={"x-forwarded-user-email": email} if email else {},
+        headers=auth_headers(email) if email else {},
         body=json.dumps(body).encode("utf-8"))
     return fa.resolve_competition._function.get_user_function()(req)
 
@@ -192,18 +194,22 @@ def test_a_platform_id_that_is_not_a_guid_is_a_bad_request(table, platform_id):
     assert table.rows == {}
 
 
-# ── adoption of pre-binding competitions ─────────────────────────────────────
+# ── no adoption by name ───────────────────────────────────────────────────────
 
-def test_an_unbound_competition_is_adopted_by_name_and_stamped(table):
-    table.rows["adopt000"] = entity("adopt000", "Spring Trophy 2026")
-    assert payload(resolve(name="Spring  Trophy, 2026!")) == {
-        "id": "adopt000", "name": "Spring Trophy 2026", "created": False,
-        "deletionDate": None}
-    assert table.rows["adopt000"]["PlatformId"] == P1
-    assert table.written == {}
+def test_an_unbound_record_with_the_same_name_is_never_adopted(table):
+    """Adopting an unbound record by name let anyone claim another user's
+    record (and its files) just by naming a competition the same — gone. A
+    legacy unbound record is left exactly as it was, and a new one is made."""
+    table.rows["legacy00"] = entity("legacy00", "Spring Trophy 2026")
+    body = payload(resolve(name="Spring  Trophy, 2026!"))
+    assert body["created"] is True
+    assert body["id"] != "legacy00"
+    assert "PlatformId" not in table.rows["legacy00"]
+    assert all(u["RowKey"] != "legacy00" for u in table.updates)
+    assert not hasattr(fa, "_adopt_competition_by_name")
 
 
-def test_adoption_skips_deleted_and_already_bound_rows(table):
+def test_deleted_and_otherwise_bound_rows_are_not_taken_either(table):
     table.rows["deleted0"] = entity("deleted0", "Spring Trophy 2026", Visible=False)
     table.rows["other000"] = entity("other000", "Spring Trophy 2026", PlatformId=P2)
     body = payload(resolve())
@@ -267,7 +273,7 @@ def test_there_is_no_route_that_creates_an_unbound_competition():
     assert not hasattr(fa, "extend_competition_deletion")
 
 
-# ── platform event backfill on hit / adoption ─────────────────────────────────
+# ── platform event backfill on a hit ─────────────────────────────────
 
 def seed_structure(table, comp_id, **event):
     """Give an existing registry row a metadata.json with the given event fields."""
@@ -320,13 +326,6 @@ def test_a_raw_iso_date_left_by_the_old_route_is_repaired(table):
     assert structure["event"]["dates"] == "25.01.2025"
     assert structure["event"]["datesAuto"] is True
     assert table.writes == ["Spring Trophy 2026-abc12345"]
-
-
-def test_an_adopted_competition_is_backfilled_too(table):
-    table.rows["adopt000"] = entity("adopt000", "Spring Trophy 2026")
-    structure = seed_structure(table, "adopt000")
-    assert payload(resolve(venue="Vierumäki Ice Hall"))["id"] == "adopt000"
-    assert structure["event"]["rink"] == "Vierumäki Ice Hall"
 
 
 def test_a_competition_without_metadata_still_binds(table):
@@ -433,17 +432,6 @@ def test_a_broken_structure_read_does_not_fail_the_rename(table, monkeypatch):
     assert table.writes == []
 
 
-def test_adoption_keeps_the_stored_name(table):
-    """Adoption matched *by* name, so the platform name differs only in the
-    punctuation/whitespace the normalizer ignores — nothing to rename."""
-    table.rows["adopt000"] = entity("adopt000", "Spring Trophy 2026")
-    structure = seed_structure(table, "adopt000")
-    assert payload(resolve(name="Spring  Trophy, 2026!", dates=""))["name"] == "Spring Trophy 2026"
-    assert table.rows["adopt000"]["Name"] == "Spring Trophy 2026"
-    assert structure["name"] == "Spring Trophy 2026"
-    assert table.writes == []
-
-
 def test_rename_structure_follows_an_untouched_title():
     structure = {"name": "Old", "event": {"title": "Old", "rink": "Hall"}}
     assert fa._rename_structure(structure, "Old", "New") is True
@@ -514,7 +502,7 @@ def test_saving_the_event_form_clears_the_auto_flag(table):
     structure = seed_structure(table, "abc12345", dates="25.01.2025", datesAuto=True)
     req = func.HttpRequest(
         "POST", "/api/save_event_settings",
-        headers={"x-forwarded-user-email": "organizer@example.com"},
+        headers=auth_headers("organizer@example.com"),
         body=json.dumps({"id": "abc12345",
                          "event": {"dates": "25.-26.1.2025"}}).encode("utf-8"))
     body = payload(fa.save_event_settings._function.get_user_function()(req))

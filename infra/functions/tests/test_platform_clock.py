@@ -25,6 +25,7 @@ import function_app as fa
 import platform_clock as pc
 import storage_helpers as sh
 import structure as st
+from conftest import auth_headers
 
 PID = "6f1c2a9e-3b4d-4e5f-8a7b-9c0d1e2f3a4b"
 NOW = datetime(2026, 10, 13, 3, 0, tzinfo=timezone.utc)
@@ -163,7 +164,7 @@ def world(monkeypatch):
 def _call(route, method="GET", params=None, body=None, email=ADDRESS):
     req = func.HttpRequest(
         method, "/api/route",
-        headers={"x-forwarded-user-email": email} if email else {},
+        headers=auth_headers(email) if email else {},
         params=params or {},
         body=json.dumps(body).encode("utf-8") if body is not None else b"")
     return route._function.get_user_function()(req)
@@ -364,14 +365,6 @@ def test_without_a_platform_a_new_binding_has_no_date(world, monkeypatch):
     body = _json(resolve())
     assert (body["created"], body["deletionDate"]) == (True, None)
     assert "DeletionDate" not in world.row(body["id"])
-
-
-def test_an_adoption_the_platform_confirms_takes_its_date(world):
-    world.record("adopt000", name="Spring Trophy 2026", DeletionDate=None)
-    world.platform_row(deletion=FUTURE)
-    body = _json(resolve())
-    assert (body["id"], body["deletionDate"]) == ("adopt000", FUTURE)
-    assert world.row("adopt000")["PlatformId"] == PID
 
 
 def test_a_new_record_takes_the_platform_date(world):

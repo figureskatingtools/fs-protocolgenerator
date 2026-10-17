@@ -5,13 +5,13 @@ import io
 import json
 import re
 import traceback
-import unicodedata
 import zipfile
 from datetime import date, datetime, timezone
 
 from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import UpdateMode
 
+import platform_access as pa
 import platform_clock as pc
 import storage_helpers as sh
 import structure as st
@@ -37,15 +37,68 @@ HEIF_STORE_QUALITY = 92
 # ── small helpers ─────────────────────────────────────────────────────────────
 
 def _require_user(req):
-    return sh.get_user_email_from_header(req)
+    """The router-forwarded caller (`sh.Caller`), or None → 401."""
+    return sh.get_caller(req)
 
 
-def _resolve(comp_id):
-    """Return (entity, folder_path) for a competition id, or (None, None)."""
+def _unauthorized():
+    return func.HttpResponse("Unauthorized", status_code=401)
+
+
+# ── competition access (see platform_access.py) ───────────────────────────────
+#
+# The platform registry decides who may see or change a competition. Every
+# route that names a competition — by this tool's record id or by a platform
+# GUID — asks for "read" or "write" and gets one of three refusals:
+# 404 platform_not_found (no access, unknown, or deleted here: existence is
+# never revealed), 403 platform_read_only (a read grant on a write route),
+# 503 platform_unavailable (the access tables could not be read — fail closed).
+
+def _platform_error(code, message, status):
+    return sh.json_response({"error": code, "message": message}, status)
+
+
+def _not_found():
+    return _platform_error("platform_not_found",
+                           "No such competition, or you do not have access to it", 404)
+
+
+def _role_for(caller, platform_id):
+    """The caller's role on a platform competition ("owner"|"write"|"read"|None).
+    A record with no (valid) PlatformId is legacy, from before platform
+    binding: only an admin may touch it. Raises pa.PlatformAccessUnavailable."""
+    if pc.normalize_platform_id(platform_id) is None:
+        return "owner" if caller.is_admin else None
+    return pa.role_for(platform_id, caller.tid, caller.oid, is_admin=caller.is_admin)
+
+
+def _check_access(caller, platform_id, need):
+    """`(role, None)` when the caller holds `need` ("read"|"write") on that
+    platform competition, else `(None, error response)`."""
+    try:
+        role = _role_for(caller, platform_id)
+    except pa.PlatformAccessUnavailable:
+        return None, _platform_error("platform_unavailable",
+                                     "Could not check access to this competition", 503)
+    if role is None:
+        return None, _not_found()
+    if not pa.role_satisfies(role, need):
+        return None, _platform_error("platform_read_only",
+                                     "You have view-only access to this competition", 403)
+    return role, None
+
+
+def _require_competition(caller, comp_id, need):
+    """`(entity, folder_path, None)` for a competition record the caller holds
+    `need` on, else `(None, None, response)`. A missing or soft-deleted record
+    answers exactly like one the caller may not see."""
     entity = sh.get_competition_entity(comp_id)
-    if not entity:
-        return None, None
-    return entity, entity.get("FolderPath", entity["RowKey"])
+    if not entity or entity.get("Visible") is False:
+        return None, None, _not_found()
+    _, refusal = _check_access(caller, entity.get("PlatformId"), need)
+    if refusal:
+        return None, None, refusal
+    return entity, entity.get("FolderPath", entity["RowKey"]), None
 
 
 def _truthy(value) -> bool:
@@ -149,16 +202,19 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="check_user_permission", auth_level=func.AuthLevel.ANONYMOUS)
 def check_user_permission(req: func.HttpRequest) -> func.HttpResponse:
-    email = _require_user(req)
-    if not email:
+    caller = _require_user(req)
+    if not caller:
         return sh.json_response({"allowed": False, "email": None}, 401)
-    return sh.json_response({"allowed": True, "email": email})
+    return sh.json_response({"allowed": True, "email": caller.email})
 
 
 @app.route(route="list_competitions", auth_level=func.AuthLevel.ANONYMOUS)
 def list_competitions(req: func.HttpRequest) -> func.HttpResponse:
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    """The visible records the caller may read on the platform (an admin: all,
+    legacy unbound records included). 503 when access cannot be checked."""
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     try:
         comp_table = sh.get_table_client("competitions")
         if not comp_table:
@@ -172,6 +228,12 @@ def list_competitions(req: func.HttpRequest) -> func.HttpResponse:
         for entity in list(comp_table.query_entities("PartitionKey eq 'GLOBAL'")):
             if entity.get("Visible") is False:
                 continue
+            try:
+                if _role_for(caller, entity.get("PlatformId")) is None:
+                    continue
+            except pa.PlatformAccessUnavailable:
+                return _platform_error("platform_unavailable",
+                                       "Could not check access to the competitions", 503)
             sh.ensure_deletion_date(comp_table, entity)
             competitions.append({
                 "id": entity["RowKey"],
@@ -268,7 +330,7 @@ def _read_clock(platform_id, table_client, table_error=None):
 
 
 def _refuse_new_binding(clock, unavailable, configured):
-    """The error response that blocks a *new* binding (adoption or create), or
+    """The error response that blocks a *new* binding (a created record), or
     None. A record bound to a platform competition that does not exist would
     never be deleted, so the platform must confirm it: 404 `platform_not_found`
     when it has no such competition, 503 `platform_unavailable` when it cannot
@@ -292,15 +354,6 @@ def _cached_date_passed(entity, now) -> bool:
 
 
 # ── platform binding (the site's shared competition selector) ──────────────────
-
-def _normalized_name(value) -> str:
-    """Casefolded, diacritic-folded, alnum-only form of a competition name,
-    mirroring the site's `normalizeCompetitionCode` (NFD + mark stripping), used
-    to adopt pre-binding records — "Kevät Cup" and "Kevat Cup" must collapse."""
-    decomposed = unicodedata.normalize("NFKD", str(value or ""))
-    return "".join(c for c in decomposed
-                   if c.isalnum() and not unicodedata.combining(c)).casefold()
-
 
 _ISO_DATE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
 
@@ -371,26 +424,6 @@ def _find_bound_competition(comp_table, platform_id):
     return _newest(rows) if rows else None
 
 
-def _adopt_competition_by_name(comp_table, platform_id, name):
-    """Bind a competition created before platform binding existed: a visible,
-    unbound entity whose normalized name matches the platform one gets stamped
-    with PlatformId (merge) and returned. Newest wins; None when nothing fits."""
-    target = _normalized_name(name)
-    if not target:
-        return None
-    candidates = [e for e in comp_table.query_entities("PartitionKey eq 'GLOBAL'")
-                  if e.get("Visible") is not False and not e.get("PlatformId")
-                  and _normalized_name(e.get("Name")) == target]
-    if not candidates:
-        return None
-    entity = _newest(candidates)
-    comp_table.update_entity({
-        "PartitionKey": "GLOBAL", "RowKey": entity["RowKey"], "PlatformId": platform_id,
-    }, mode=UpdateMode.MERGE)
-    entity["PlatformId"] = platform_id
-    return entity
-
-
 def _sync_competition_name(comp_table, entity, safe_name) -> str:
     """Table half of a platform rename: MERGE `Name` when the sanitized platform
     name differs from the stored one. Authoritative — the new name is reported
@@ -434,23 +467,31 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     creating it on first use:
     {platformId, name, dates?, venue?} -> {id, name, created, deletionDate}.
 
+    Needs read access to the platform competition (`_check_access`: 404
+    `platform_not_found` / 503 `platform_unavailable`); a new record is an
+    empty shell, so read is enough to create it. Only a record already bound to
+    that PlatformId is ever returned — an unbound record is never adopted by
+    name (that would let anyone claim another user's record). The rename sync
+    and the event backfill below write client-supplied values into an existing
+    record, so they run only for a caller with write access.
+
     The platform owns the deletion date: it is cached on the record and
     returned (null until the platform reports one). A platform competition that
     has been deleted is a 410 `platform_deleted` (no record is created for it).
-    A *new* binding (adoption or create) needs the platform to confirm the
-    competition: 404 `platform_not_found` / 503 `platform_unavailable`
-    otherwise (`_refuse_new_binding`). An existing bound record resolves on its
-    cached date when the platform cannot be read or does not know it.
+    A *new* record needs the platform to confirm the competition: 404
+    `platform_not_found` / 503 `platform_unavailable` otherwise
+    (`_refuse_new_binding`). An existing bound record resolves on its cached
+    date when the platform clock cannot be read or does not know it.
 
     The platform's date (ISO) and venue seed `event.dates` (as Finnish dd.MM.yyyy,
     flagged `datesAuto` so the schedule's full span may later replace it) and
-    `event.rink`. On a hit or an adoption the same values only *backfill* empty
-    fields, and a hit also follows a rename of the platform competition (the
-    stored `Name`, the structure `name` and — while still untouched — the printed
-    protocol title; never the folder path)."""
-    email = _require_user(req)
-    if not email:
-        return func.HttpResponse("Unauthorized", status_code=401)
+    `event.rink`. On a writer's hit the same values only *backfill* empty
+    fields, and the hit also follows a rename of the platform competition (the
+    stored `Name`, the structure `name` and — while still untouched — the
+    printed protocol title; never the folder path)."""
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     try:
         body = req.get_json()
     except ValueError:
@@ -474,6 +515,14 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     safe_name = sh.sanitize_name(name)
     if not safe_name:
         return func.HttpResponse("Invalid name", status_code=400)
+    # Read access to the platform competition is enough: an existing record is
+    # only opened, and a new one is an empty shell bound to that competition.
+    role, refusal = _check_access(caller, platform_id, "read")
+    if refusal:
+        return refusal
+    # The name, dates and venue come from the client: only a writer's resolve
+    # may push them into an existing record (rename sync and backfill).
+    can_write = pa.role_satisfies(role, "write")
 
     try:
         comp_table = _competitions_table()
@@ -488,19 +537,12 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
                  "message": "This competition has been deleted"}, 410)
 
         entity = _find_bound_competition(comp_table, platform_id)
-        bound = entity is not None
-        if not bound:
-            refusal = _refuse_new_binding(clock, unavailable,
-                                          configured=platform_table is not None or bool(table_error))
-            if refusal:
-                return refusal
-            entity = _adopt_competition_by_name(comp_table, platform_id, name)
         if entity:
             folder_path = entity.get("FolderPath", entity["RowKey"])
             old_name = entity.get("Name", entity["RowKey"])
-            # Only a PlatformId hit follows a platform rename; adoption matched *by* name.
-            new_name = _sync_competition_name(comp_table, entity, safe_name) if bound else old_name
-            if new_name != old_name or dates or venue:
+            new_name = (_sync_competition_name(comp_table, entity, safe_name)
+                        if can_write else old_name)
+            if can_write and (new_name != old_name or dates or venue):
                 try:
                     structure = sh.read_structure(folder_path)
                     if isinstance(structure, dict):
@@ -519,10 +561,14 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
                 "deletionDate": deletion_date,
             })
 
+        refusal = _refuse_new_binding(clock, unavailable,
+                                      configured=platform_table is not None or bool(table_error))
+        if refusal:
+            return refusal
         platform_date = (clock or {}).get("deletionDate")
         deletion_date = pc.to_iso_z(platform_date) if platform_date else None
         new_id = _create_competition_record(
-            comp_table, email, safe_name, _fi_date(dates), platform_id,
+            comp_table, caller.email, safe_name, _fi_date(dates), platform_id,
             rink=venue, dates_auto=bool(dates), deletion_date=deletion_date)
         return sh.json_response({
             "id": new_id, "name": safe_name, "created": True,
@@ -593,16 +639,16 @@ def _scrub_hidden_rows(comp_table) -> int:
 
 @app.route(route="delete_competition", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET", "POST"])
 def delete_competition(req: func.HttpRequest) -> func.HttpResponse:
-    email = _require_user(req)
-    if not email:
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     comp_id = req.params.get('id')
     if not comp_id:
         return func.HttpResponse("Missing id parameter", status_code=400)
     try:
-        entity = sh.get_competition_entity(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, _, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         count = _delete_competition_data(entity, sh.USER_DELETE_ACTOR)
         return sh.json_response({"deleted": count})
     except Exception as e:
@@ -676,15 +722,16 @@ def _run_auto_delete(now):
 
 @app.route(route="get_competition_details", auth_level=func.AuthLevel.ANONYMOUS)
 def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     comp_id = req.params.get('id')
     if not comp_id:
         return func.HttpResponse("Missing id parameter", status_code=400)
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "read")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
         if structure is None:
             return func.HttpResponse("Competition data missing", status_code=404)
@@ -731,8 +778,9 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="save_event_settings", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def save_event_settings(req: func.HttpRequest) -> func.HttpResponse:
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     try:
         body = req.get_json()
         comp_id = body.get('id')
@@ -742,9 +790,9 @@ def save_event_settings(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id:
         return func.HttpResponse("Missing id", status_code=400)
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
         allowed = ("title", "organization", "authorization", "city", "rink", "dates")
         for key in allowed:
@@ -840,8 +888,9 @@ def _register_upload(structure, folder_path, filename, body, params):
 
 @app.route(route="upload_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def upload_file(req: func.HttpRequest) -> func.HttpResponse:
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     comp_id = req.params.get('competition')
     filename = req.params.get('filename')
     if not comp_id or not filename:
@@ -859,9 +908,9 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(f"File too large (max {sh.MAX_UPLOAD_SIZE // (1024*1024)} MB).", status_code=413)
 
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
         file_id, meta = _register_upload(structure, folder_path, filename, body, dict(req.params))
         sh.write_structure(folder_path, structure)
@@ -942,8 +991,9 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     listener pushed); anything else is a 400 `invalid_source`. Errors
     carry a machine-readable code so the frontend can fall back to a direct
     upload when the feature is off or the competition is unbound."""
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     comp_id = req.params.get('competition')
     name = req.params.get('name')
     if not comp_id or not name:
@@ -961,10 +1011,9 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
             {"error": "invalid_source", "message": "source must be 'upload' or 'fsm'"}, 400)
 
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return sh.json_response(
-                {"error": "competition_not_found", "message": "Competition not found"}, 404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         body, err = _read_pool_file(entity, filename, source)
         if err:
             return err
@@ -986,16 +1035,17 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="get_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def get_file(req: func.HttpRequest) -> func.HttpResponse:
     """Stream an uploaded file's bytes (for hover previews and downloads)."""
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     comp_id = req.params.get('competition')
     file_id = req.params.get('fileId')
     if not comp_id or not file_id:
         return func.HttpResponse("Missing competition or fileId", status_code=400)
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "read")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
         meta = structure.get("files", {}).get(file_id)
         if not meta or not meta.get("blob"):
@@ -1028,8 +1078,9 @@ def get_file(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="assign_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def assign_file(req: func.HttpRequest) -> func.HttpResponse:
     """Move a file into a slot (drag-and-drop). fileId may be null to clear."""
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     try:
         body = req.get_json()
         comp_id = body.get('id')
@@ -1040,9 +1091,9 @@ def assign_file(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id or not target:
         return func.HttpResponse("Missing id or target", status_code=400)
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
         if file_id and file_id not in structure.get("files", {}):
             return func.HttpResponse("Unknown fileId", status_code=400)
@@ -1081,16 +1132,17 @@ def assign_file(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="delete_file", auth_level=func.AuthLevel.ANONYMOUS, methods=["DELETE", "POST"])
 def delete_file(req: func.HttpRequest) -> func.HttpResponse:
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     comp_id = req.params.get('competition')
     file_id = req.params.get('fileId')
     if not comp_id or not file_id:
         return func.HttpResponse("Missing competition or fileId", status_code=400)
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
         meta = structure.get("files", {}).get(file_id)
         if not meta:
@@ -1146,8 +1198,9 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
     (409 otherwise), the source file is kept as `schedule.xml|pdf`, and the
     parsed rink/dates auto-fill the event. A pool parse echoes back which pool
     file it used in `source`."""
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     comp_id = req.params.get('competition')
     force = req.params.get('force') in ('1', 'true', 'yes')
     if not comp_id:
@@ -1164,9 +1217,9 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("invalid_source: source must be 'upload' or 'fsm'",
                                  status_code=400)
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
 
         if structure.get("categories") and not force:
@@ -1446,8 +1499,9 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
     reported (unmatched with an actionable reason, or withdrawn) instead of guessed,
     and assigning the missing Total Results PDFs re-runs the match automatically.
     """
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     try:
         body = req.get_json()
         comp_id = body.get('id')
@@ -1469,9 +1523,9 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
             return sh.json_response(
                 {"error": "invalid_source", "message": "source must be 'upload' or 'fsm'"}, 400)
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
 
         pool = {}
         for kind, ref in refs.items():
@@ -1547,8 +1601,9 @@ def upload_fallback_photos(req: func.HttpRequest) -> func.HttpResponse:
     and deleting — any previous fallback so no orphans accumulate), the rest stay
     unassigned in the Uploads tray and are reported back.
     """
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     comp_id = req.params.get('competition')
     if not comp_id:
         return func.HttpResponse("Missing competition", status_code=400)
@@ -1563,9 +1618,9 @@ def upload_fallback_photos(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Missing ZIP body", status_code=400)
 
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
 
         try:
@@ -1645,8 +1700,9 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
       set_footer_enabled {enabled}
       set_team_pages {enabled?, nameMode?}
     """
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     try:
         body = req.get_json()
     except ValueError:
@@ -1656,9 +1712,9 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id or not op:
         return func.HttpResponse("Missing id or op", status_code=400)
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
         cats = structure.setdefault("categories", [])
 
@@ -1763,9 +1819,9 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="generate_protocol", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
-    email = _require_user(req)
-    if not email:
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     try:
         body = req.get_json()
         comp_id = body.get('id')
@@ -1774,9 +1830,9 @@ def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
     if not comp_id:
         return func.HttpResponse("Missing id", status_code=400)
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
         structure = sh.read_structure(folder_path)
 
         get_bytes = _file_bytes_getter(folder_path, structure)
@@ -1812,17 +1868,18 @@ def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
 def delete_protocol(req: func.HttpRequest) -> func.HttpResponse:
     """Delete a generated protocol PDF: its blob and its generatedprotocols row.
     Identified by competition id + fileName (the download-link list's fileName)."""
-    if not _require_user(req):
-        return func.HttpResponse("Unauthorized", status_code=401)
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
     comp_id = req.params.get('competition')
     file_name = req.params.get('fileName')
     if not comp_id or not file_name:
         return func.HttpResponse("Missing competition or fileName", status_code=400)
     file_name = os.path.basename(file_name)  # guard against path traversal
     try:
-        entity, folder_path = _resolve(comp_id)
-        if not entity:
-            return func.HttpResponse("Competition not found", status_code=404)
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
 
         blob_name = f"{folder_path}/protocols/{file_name}"
         container = sh.get_container_client()

@@ -35,7 +35,10 @@ This repo holds the **backend only**. The user interface lives in
 [`figureskatingtools-site`](https://github.com/figureskatingtools) and is served at
 `https://figureskatingtools.com/protocolgenerator/`; that site's router does the Entra
 login and proxies `/protocolgenerator/api/*` to this Function App, adding
-`x-proxy-secret` and `x-forwarded-user-email` (see [PROXY-CONTRACT.md](PROXY-CONTRACT.md)).
+`x-proxy-secret` and the signed-in user's `x-forwarded-user-tid`/`-oid` (plus e-mail,
+name and an admin flag). The secret check fails closed, and every competition route
+checks the caller's role (read/write) in the platform's access tables — see
+[PROXY-CONTRACT.md](PROXY-CONTRACT.md).
 
 - **Backend** — Python Azure Functions (`infra/functions/`) using `pypdf` (merge),
   `reportlab` (generated pages) and `pillow` (photo embedding).
@@ -47,10 +50,16 @@ login and proxies `/protocolgenerator/api/*` to this Function App, adding
 ## Local development
 
 ```bash
-cd infra/functions && func start
+cd infra/functions && func start    # local.settings.json: "PROXY_SHARED_SECRET": "devsecret"
 curl -s http://localhost:7071/api/list_competitions \
-  -H 'x-proxy-secret: devsecret' -H 'x-forwarded-user-email: tester@example.com'
+  -H 'x-proxy-secret: devsecret' \
+  -H 'x-forwarded-user-tid: 11111111-2222-4333-8444-555555555555' \
+  -H 'x-forwarded-user-oid: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' \
+  -H 'x-forwarded-user-admin: 1'
 ```
+
+The secret is required (an empty one rejects everything), and without
+`PLATFORM_STORAGE_ACCOUNT` only an admin passes the competition access check.
 
 Requires Azure Functions Core Tools and an Azurite storage emulator. For a UI, run the
 router + Vite dev server from `figureskatingtools-site` against this backend.

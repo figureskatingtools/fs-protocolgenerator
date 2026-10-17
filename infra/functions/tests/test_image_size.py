@@ -22,6 +22,7 @@ import function_app as fa
 import generate_pages
 import image_sanitize
 import structure as st
+from conftest import auth_headers
 
 EMAIL = "organizer@example.com"
 
@@ -161,7 +162,7 @@ def heic(size=(400, 300)):
 def upload(filename, body):
     req = func.HttpRequest(
         "POST", "/api/upload_file",
-        headers={"x-forwarded-user-email": EMAIL},
+        headers=auth_headers(EMAIL),
         params={"competition": "abc12345", "filename": filename}, body=body)
     return fa.upload_file._function.get_user_function()(req)
 

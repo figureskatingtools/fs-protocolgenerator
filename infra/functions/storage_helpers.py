@@ -2,17 +2,21 @@
 Shared storage + auth helpers for the Protocol Generator backend.
 
 Mirrors the patterns proven in fs-judgepapers: a public Function App that trusts
-the Web App proxy (verified by a shared secret), Managed-Identity access to Blob
-and Table storage, a permanent `competitions` registry table with soft-deletes,
-and per-competition blob folders holding a `metadata.json` structure document.
+the site router (verified by a fail-closed shared secret) for the caller's
+identity, Managed-Identity access to Blob and Table storage, a permanent
+`competitions` registry table with soft-deletes, and per-competition blob
+folders holding a `metadata.json` structure document.
 """
 import azure.functions as func
 import logging
 import os
-import base64
+import hmac
 import json
+import re
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
+from urllib.parse import unquote
 
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from azure.identity import DefaultAzureCredential
@@ -50,70 +54,61 @@ NON_PERSONAL_ACTORS = ("", "-", USER_DELETE_ACTOR, AUTO_CLEANUP_ACTOR)
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────
+#
+# Every request reaches this app through the figureskatingtools-site router
+# (PROXY-CONTRACT.md). The router proves itself with the shared secret and
+# forwards the signed-in principal as x-forwarded-user-* headers; it drops any
+# copy a browser sent. Those headers are the ONLY identity source — trusted
+# solely because the secret matched, which is why the secret check fails closed.
+
+_GUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+class Caller(NamedTuple):
+    """The signed-in user as the router forwarded them. `tid`/`oid` (lowercase
+    Entra GUIDs) are the identity every access decision uses; `email` and
+    `name` are for display and audit fields only, never for authorisation."""
+    tid: str
+    oid: str
+    email: str
+    name: str
+    is_admin: bool
+
+
+def _guid(value):
+    text = str(value or "").strip().lower()
+    return text if _GUID_RE.match(text) else None
+
 
 def _proxy_secret_ok(req: func.HttpRequest) -> bool:
-    """Verify the request came from the Web App proxy via the shared secret.
-    Enforced only when PROXY_SHARED_SECRET is set (local dev fails open)."""
-    expected = os.environ.get("PROXY_SHARED_SECRET")
+    """The request came from the site router: x-proxy-secret equals
+    PROXY_SHARED_SECRET (constant-time). Fails CLOSED — with the setting empty
+    or unset nothing is accepted."""
+    expected = os.environ.get("PROXY_SHARED_SECRET") or ""
     if not expected:
-        return True
-    provided = req.headers.get("X-Proxy-Secret") or req.headers.get("x-proxy-secret")
-    return provided == expected
+        return False
+    provided = req.headers.get("x-proxy-secret") or ""
+    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
 
-def _decode_jwt_payload(token: str):
-    """Decode a JWT payload without verification (base64url only)."""
-    try:
-        parts = token.split('.')
-        if len(parts) != 3:
-            return None
-        payload_b64 = parts[1] + '=' * (4 - len(parts[1]) % 4)
-        return json.loads(base64.urlsafe_b64decode(payload_b64))
-    except Exception as e:
-        logging.error(f"Error decoding JWT payload: {e}")
-        return None
-
-
-def get_user_email_from_header(req: func.HttpRequest):
-    """Extract the authenticated user's email from Easy Auth headers, the
-    Web App proxy's forwarded header, or a bearer token. Returns None if the
-    request did not come through the trusted proxy or carries no identity."""
+def get_caller(req: func.HttpRequest):
+    """The router-forwarded caller, or None (→ 401) when the proxy secret does
+    not match or the tenant/object id is missing or not a GUID."""
     if not _proxy_secret_ok(req):
         logging.warning("Proxy shared secret missing or mismatched; rejecting request")
         return None
-
-    val = req.headers.get("X-MS-CLIENT-PRINCIPAL-NAME") or req.headers.get("x-ms-client-principal-name")
-    if val:
-        return val
-
-    forwarded = req.headers.get("X-Forwarded-User-Email") or req.headers.get("x-forwarded-user-email")
-    if forwarded:
-        return forwarded
-
-    header = req.headers.get("x-ms-client-principal") or req.headers.get("X-MS-CLIENT-PRINCIPAL")
-    if header:
-        try:
-            principal = json.loads(base64.b64decode(header).decode("utf-8"))
-            return principal.get("userDetails")
-        except Exception as e:
-            logging.error(f"Error parsing auth header: {e}")
-
-    auth_header = req.headers.get("Authorization") or req.headers.get("authorization")
-    if auth_header and auth_header.lower().startswith("bearer "):
-        claims = _decode_jwt_payload(auth_header[7:])
-        if claims:
-            email = (claims.get("preferred_username") or claims.get("email")
-                     or claims.get("upn") or claims.get("unique_name"))
-            if not email:
-                emails = claims.get("emails")
-                if isinstance(emails, list) and emails:
-                    email = emails[0]
-            if not email:
-                email = claims.get("name") or claims.get("oid")
-            if email:
-                return email
-
-    return None
+    tid = _guid(req.headers.get("x-forwarded-user-tid"))
+    oid = _guid(req.headers.get("x-forwarded-user-oid"))
+    if tid is None or oid is None:
+        logging.warning("Forwarded identity missing or invalid; rejecting request")
+        return None
+    email = (req.headers.get("x-forwarded-user-email") or "").strip().lower()
+    # encodeURIComponent-encoded by the router (headers are Latin-1 only).
+    name = unquote(req.headers.get("x-forwarded-user-name") or "").strip()
+    return Caller(tid=tid, oid=oid, email=email, name=name,
+                  is_admin=req.headers.get("x-forwarded-user-admin") == "1")
 
 
 # ── Storage clients ───────────────────────────────────────────────────────────
