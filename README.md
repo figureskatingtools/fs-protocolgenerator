@@ -37,7 +37,7 @@ This repo holds the **backend only**. The user interface lives in
 login and proxies `/protocolgenerator/api/*` to this Function App, adding
 `x-proxy-secret` and the signed-in user's `x-forwarded-user-tid`/`-oid` (plus e-mail,
 name and an admin flag). The secret check fails closed, and every competition route
-checks the caller's role (read/write) in the platform's access tables — see
+checks the caller's role (read/write/owner) in the platform's access tables — see
 [PROXY-CONTRACT.md](PROXY-CONTRACT.md).
 
 - **Backend** — Python Azure Functions (`infra/functions/`) using `pypdf` (merge),

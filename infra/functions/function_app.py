@@ -49,10 +49,12 @@ def _unauthorized():
 #
 # The platform registry decides who may see or change a competition. Every
 # route that names a competition — by this tool's record id or by a platform
-# GUID — asks for "read" or "write" and gets one of three refusals:
+# GUID — asks for "read", "write" or "owner" and gets one of these refusals:
 # 404 platform_not_found (no access, unknown, or deleted here: existence is
 # never revealed), 403 platform_read_only (a read grant on a write route),
-# 503 platform_unavailable (the access tables could not be read — fail closed).
+# 403 platform_owner_required (a read or write grant on an owner route — an
+# admin counts as owner), 503 platform_unavailable (the access tables could
+# not be read — fail closed).
 
 def _platform_error(code, message, status):
     return sh.json_response({"error": code, "message": message}, status)
@@ -73,8 +75,8 @@ def _role_for(caller, platform_id):
 
 
 def _check_access(caller, platform_id, need):
-    """`(role, None)` when the caller holds `need` ("read"|"write") on that
-    platform competition, else `(None, error response)`."""
+    """`(role, None)` when the caller holds `need` ("read"|"write"|"owner")
+    on that platform competition, else `(None, error response)`."""
     try:
         role = _role_for(caller, platform_id)
     except pa.PlatformAccessUnavailable:
@@ -83,6 +85,9 @@ def _check_access(caller, platform_id, need):
     if role is None:
         return None, _not_found()
     if not pa.role_satisfies(role, need):
+        if need == "owner":
+            return None, _platform_error("platform_owner_required",
+                                         "Only the competition's owner can do this", 403)
         return None, _platform_error("platform_read_only",
                                      "You have view-only access to this competition", 403)
     return role, None
@@ -200,7 +205,7 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(json.dumps({"status": "ok", "service": "fs-protocolgenerator"}), mimetype="application/json")
 
 
-@app.route(route="check_user_permission", auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="check_user_permission", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def check_user_permission(req: func.HttpRequest) -> func.HttpResponse:
     caller = _require_user(req)
     if not caller:
@@ -208,7 +213,7 @@ def check_user_permission(req: func.HttpRequest) -> func.HttpResponse:
     return sh.json_response({"allowed": True, "email": caller.email})
 
 
-@app.route(route="list_competitions", auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="list_competitions", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def list_competitions(req: func.HttpRequest) -> func.HttpResponse:
     """The visible records the caller may read on the platform (an admin: all,
     legacy unbound records included). 503 when access cannot be checked."""
@@ -637,16 +642,29 @@ def _scrub_hidden_rows(comp_table) -> int:
     return scrubbed
 
 
-@app.route(route="delete_competition", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET", "POST"])
+@app.route(route="delete_competition", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def delete_competition(req: func.HttpRequest) -> func.HttpResponse:
+    """Delete this tool's record and data for a competition. POST only (a GET
+    link must never delete anything) and owner only (an admin counts as
+    owner). The id comes from the `id` query param or a JSON body `{"id"}`."""
+    if req.method.upper() != "POST":
+        return func.HttpResponse("Method not allowed", status_code=405,
+                                 headers={"Allow": "POST"})
     caller = _require_user(req)
     if not caller:
         return _unauthorized()
     comp_id = req.params.get('id')
     if not comp_id:
+        try:
+            body = req.get_json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and isinstance(body.get('id'), str):
+            comp_id = body['id']
+    if not comp_id:
         return func.HttpResponse("Missing id parameter", status_code=400)
     try:
-        entity, _, denied = _require_competition(caller, comp_id, "write")
+        entity, _, denied = _require_competition(caller, comp_id, "owner")
         if denied:
             return denied
         count = _delete_competition_data(entity, sh.USER_DELETE_ACTOR)
@@ -720,7 +738,41 @@ def _run_auto_delete(now):
 
 # ── details / event settings ──────────────────────────────────────────────────
 
-@app.route(route="get_competition_details", auth_level=func.AuthLevel.ANONYMOUS)
+def _generated_protocols(comp_id, folder_path):
+    """The competition's generated protocols, each with a download link minted
+    now — the caller has just passed the access check — valid for
+    `sh.DOWNLOAD_LINK_TTL` (`expiration`). The blob is derived from the
+    record's folder and the row's file name; a link stored on a legacy row is
+    ignored and scrubbed. `url` is null when no link could be signed."""
+    try:
+        table_client = sh.get_table_client()
+        if not table_client:
+            return []
+        safe_pk = comp_id.replace("'", "''")
+        rows = list(table_client.query_entities(f"PartitionKey eq '{safe_pk}'"))
+    except Exception as e:
+        logging.warning(f"Could not list generated protocols: {type(e).__name__}")
+        return []
+    rows = [r for r in rows if r.get("FileName")]
+    for row in rows:
+        sh.scrub_stored_link(table_client, row)
+    blobs = {r["RowKey"]: sh.protocol_blob_name(folder_path, r["FileName"]) for r in rows}
+    try:
+        urls, expiry = sh.mint_read_urls(sh.get_blob_service_client(), blobs.values())
+    except Exception as e:
+        logging.error(f"Could not sign protocol download links: {type(e).__name__}")
+        urls, expiry = {}, None
+    expiration = expiry.isoformat().replace("+00:00", "Z") if expiry else None
+    return [{
+        "fileName": os.path.basename(r["FileName"]),
+        "url": urls.get(blobs[r["RowKey"]]),
+        "description": r.get("Description"),
+        "expiration": expiration if urls.get(blobs[r["RowKey"]]) else None,
+        "size": r.get("FileSize"),
+    } for r in rows]
+
+
+@app.route(route="get_competition_details", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
     caller = _require_user(req)
     if not caller:
@@ -739,22 +791,7 @@ def get_competition_details(req: func.HttpRequest) -> func.HttpResponse:
         assigned = st.assigned_file_ids(structure)
         unassigned = [fid for fid in structure.get("files", {}) if fid not in assigned]
 
-        # Generated protocol download links
-        generated = []
-        try:
-            table_client = sh.get_table_client()
-            if table_client:
-                safe_pk = comp_id.replace("'", "''")
-                for ent in table_client.query_entities(f"PartitionKey eq '{safe_pk}'"):
-                    generated.append({
-                        "fileName": ent.get("FileName"),
-                        "url": ent.get("Url"),
-                        "description": ent.get("Description"),
-                        "expiration": ent.get("ExpirationDate"),
-                        "size": ent.get("FileSize"),
-                    })
-        except Exception as e:
-            logging.warning(f"Could not fetch generated links: {e}")
+        generated = _generated_protocols(entity["RowKey"], folder_path)
 
         comp_table = sh.get_table_client("competitions")
         clock, _ = (_read_clock(entity["PlatformId"], *_platform_table())
@@ -1847,7 +1884,7 @@ def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
         container = blob_service_client.get_container_client(sh.CONTAINER_NAME)
         container.upload_blob(blob_name, pdf_bytes, overwrite=True)
 
-        sh.create_and_store_sas_link(blob_service_client, blob_name, comp_id, out_name, len(pdf_bytes))
+        sh.record_generated_protocol(comp_id, out_name, len(pdf_bytes))
         return sh.json_response({"fileName": out_name, "size": len(pdf_bytes)})
     except SanitizeError as e:
         # Fail closed: an uploaded PDF holds content that could not be proven

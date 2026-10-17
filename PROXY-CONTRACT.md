@@ -83,9 +83,40 @@ Every route that names a competition, by this tool's record id or by a
 | Need | Routes |
 | --- | --- |
 | **read** | `list_competitions` (filtered to the records the caller can read; admin: all), `get_competition_details` (incl. the generated protocols' download links), `get_file`, `resolve_competition` |
-| **write** | `delete_competition`, `save_event_settings`, `upload_file`, `import_platform_file`, `assign_file`, `delete_file`, `parse_schedule`, `import_rosters`, `upload_fallback_photos`, `edit_structure`, `generate_protocol`, `delete_protocol` |
+| **write** | `save_event_settings`, `upload_file`, `import_platform_file`, `assign_file`, `delete_file`, `parse_schedule`, `import_rosters`, `upload_fallback_photos`, `edit_structure`, `generate_protocol`, `delete_protocol` |
+| **owner** (an admin counts as owner) | `delete_competition` |
 
 `check_user_permission` and `health` name no competition.
+
+### Methods
+
+No state-changing route answers `GET` (a link or an `<img>` must never change
+anything): `GET` reaches only `health`, `check_user_permission`,
+`list_competitions`, `get_competition_details` and `get_file`. Every route
+declares its methods (`tests/test_competition_access.py` fails otherwise).
+
+- `delete_competition` is **`POST` only** (the handler also answers any other
+  method 405 `Allow: POST`). The record id comes from the `id` query param
+  (`POST /api/delete_competition?id=<record id>`) or, when that is absent, a
+  JSON body `{"id": "<record id>"}`. 200 `{"deleted": <blob count>}`.
+- `delete_file` and `delete_protocol` take `DELETE` or `POST`; every other
+  write route takes `POST` only.
+
+### Download links
+
+`get_competition_details` returns each generated protocol (`generatedFiles[]`:
+`fileName`, `url`, `description`, `expiration`, `size`) with a download link
+**minted for that request, after the access check**: a read-only (`sp=r`)
+user-delegation SAS on that one blob, valid **15 minutes** (`expiration`, ISO
+UTC; the SAS starts 5 minutes back for clock skew). No link is stored — the
+`generatedprotocols` row holds only the file name, size and description, and the
+blob is derived from the record's folder plus that file name — so a user whose
+access is revoked keeps at most a 15-minute link. Rows from before this carried a
+5-day `Url`/`ExpirationDate`; those are ignored and scrubbed on the next read.
+`url` and `expiration` are `null` when no link could be signed. A page held open
+longer than 15 minutes needs to re-fetch the details for working links.
+Uploaded files are never linked: `get_file` streams their bytes through the
+router.
 
 - `resolve_competition` with read access may create a **new, empty** bound
   record. Only a writer's call renames an existing record or backfills its event
@@ -103,6 +134,7 @@ JSON bodies `{"error": "<code>", "message": "…"}`:
 | 401 | (plain text `Unauthorized`) | The gate failed (secret or identity, see above). |
 | 404 | `platform_not_found` | No grant, unknown identity, unknown or deleted record, or a legacy unbound record and the caller is not an admin. Existence is never revealed. |
 | 403 | `platform_read_only` | A read grant on a write route. |
+| 403 | `platform_owner_required` | A read or write grant on an owner route (`delete_competition`). |
 | 503 | `platform_unavailable` | The access tables could not be read (network, RBAC, missing table, `PLATFORM_STORAGE_ACCOUNT` unset). Fails closed; access is never granted. |
 
 `resolve_competition` keeps its retention-clock answers too: 410

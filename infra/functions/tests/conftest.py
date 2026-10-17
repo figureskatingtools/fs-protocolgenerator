@@ -37,18 +37,35 @@ def auth_headers(email="organizer@example.com", admin=True, tid=TID, oid=OID, **
 
 
 _HTTP_ROUTES = None
+_HTTP_METHODS = None
+
+
+def _load_http_functions():
+    """Built once: the SDK's `get_functions()` refuses a second call
+    (duplicate names)."""
+    global _HTTP_ROUTES, _HTTP_METHODS
+    if _HTTP_ROUTES is None:
+        import function_app as fa
+        http = [fn for fn in fa.app.get_functions()
+                if type(fn.get_trigger()).__name__ == "HttpTrigger"]
+        _HTTP_ROUTES = {fn.get_function_name(): fn.get_user_function() for fn in http}
+        _HTTP_METHODS = {fn.get_function_name():
+                         {str(getattr(m, "value", m)).upper()
+                          for m in (fn.get_trigger().methods or [])}
+                         for fn in http}
 
 
 def http_routes():
-    """{function name: handler} for every HTTP-triggered function. Built once:
-    the SDK's `get_functions()` refuses a second call (duplicate names)."""
-    global _HTTP_ROUTES
-    if _HTTP_ROUTES is None:
-        import function_app as fa
-        _HTTP_ROUTES = {fn.get_function_name(): fn.get_user_function()
-                        for fn in fa.app.get_functions()
-                        if type(fn.get_trigger()).__name__ == "HttpTrigger"}
+    """{function name: handler} for every HTTP-triggered function."""
+    _load_http_functions()
     return _HTTP_ROUTES
+
+
+def http_route_methods():
+    """{function name: set of HTTP methods the host routes to it} (an empty
+    set means the route declares none, i.e. the host accepts every method)."""
+    _load_http_functions()
+    return _HTTP_METHODS
 
 
 @pytest.fixture(autouse=True)

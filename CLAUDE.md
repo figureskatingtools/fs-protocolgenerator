@@ -18,7 +18,8 @@ Function App with `x-proxy-secret` + `x-forwarded-user-tid`/`-oid`/`-email`/`-na
   pages, `pillow` embeds photos.
 - **Storage** — Azure Blob (container `fs-protocolgenerator`) holds each
   competition folder; Tables `competitions` (permanent registry, soft-delete) and
-  `generatedprotocols` (SAS download links).
+  `generatedprotocols` (one row per generated PDF: file name, size,
+  description — no link; links are minted per request, see **Competition access**).
 - **Hosting** — Flex-Consumption Function App only (no Web App, no Easy Auth
   provider, no DNS/custom domain in this repo). IaC in `infra/`
   (subscription-scoped Bicep: `modules/storage.bicep`, `modules/function.bicep`,
@@ -139,7 +140,8 @@ remain as plain fallbacks only if fonts/assets are missing.
 
 ## Backend routes (`function_app.py`)
 
-`list_competitions`, `delete_competition`, `resolve_competition` — the only
+`list_competitions`, `delete_competition` (POST only, owner only; record id in
+the `id` query param or a JSON body `{"id"}`), `resolve_competition` — the only
 route that creates a competition, always bound to a platform one (platform
 competition GUID → tool record: `PlatformId` lookup → create; an unbound record
 is **never adopted by name** any more — that let anyone claim another user's
@@ -193,14 +195,32 @@ Every route that names a competition goes through one helper,
 `platformId` directly and `list_competitions` filters with `_role_for`. **read**:
 `list_competitions`, `get_competition_details` (incl. the protocol download
 links), `get_file`, `resolve_competition` (creating an empty bound record is
-allowed; renaming/backfilling an existing one needs write). **write**: everything
-else. Refusals are JSON: **404 `platform_not_found`** (no grant, unknown or
+allowed; renaming/backfilling an existing one needs write). **owner** (an admin
+counts as owner): `delete_competition`. **write**: everything else. Refusals are
+JSON: **404 `platform_not_found`** (no grant, unknown or
 soft-deleted record, or a legacy record without `PlatformId` for a non-admin —
-legacy records are admin-only), **403 `platform_read_only`**, **503
+legacy records are admin-only), **403 `platform_read_only`** (read grant on a
+write route), **403 `platform_owner_required`** (read/write grant on an owner
+route), **503
 `platform_unavailable`** (tables unreadable or `PLATFORM_STORAGE_ACCOUNT` unset —
 fail closed). A refused call writes nothing. `tests/test_competition_access.py`
-holds the route × role matrix and fails when a new HTTP route is not classified;
-`tests/test_proxy_gate.py` the gate (fail-closed secret, header-only identity).
+holds the route × role matrix and fails when a new HTTP route is not classified,
+declares no methods, or lets a state-changing route answer `GET` (only `health`,
+`check_user_permission`, `list_competitions`, `get_competition_details`,
+`get_file` take GET); `tests/test_proxy_gate.py` the gate (fail-closed secret,
+header-only identity).
+
+**Download links are short-lived and never stored.** `get_competition_details`
+mints each generated protocol's link after the access check
+(`_generated_protocols` → `sh.mint_read_urls`): one user delegation key per
+request, a read-only SAS per blob, valid `sh.DOWNLOAD_LINK_TTL` (15 min; start
+backdated `SAS_CLOCK_SKEW` 5 min), `expiration` in the response. The blob name is
+derived (`sh.protocol_blob_name(folder, basename(FileName))`), never taken from a
+row; `generate_protocol` records only `FileName`/`FileSize`/`Description`
+(`sh.record_generated_protocol`, REPLACE), and legacy rows' 5-day
+`Url`/`ExpirationDate` are ignored and scrubbed on read (`sh.scrub_stored_link`).
+Never add a stored or long-lived link back: a revoked user must lose access within
+minutes. `get_file` streams bytes, no URL. `tests/test_download_links.py`.
 
 ### Retention: one platform clock
 

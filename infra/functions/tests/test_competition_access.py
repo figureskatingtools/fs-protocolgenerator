@@ -4,11 +4,12 @@ a competition, and every route that names one enforces it.
 The two platform tables `platform_access.py` reads are faked
 (`useridentities`: tid_oid -> UserId; `competitionaccess`: platform guid /
 UserId -> Role). Each route is called as a caller with no grant, a read, write
-or owner grant, and as an admin:
+or owner grant, and as an admin (who counts as owner):
 
 - no grant (or an unknown identity, an unknown or deleted record, a legacy
   record without PlatformId for a non-admin) -> 404 platform_not_found;
 - a read grant on a write route -> 403 platform_read_only;
+- a read or write grant on an owner route -> 403 platform_owner_required;
 - access tables unreadable -> 503 platform_unavailable;
 
 and a refused call writes nothing. Competition names are invented.
@@ -24,7 +25,7 @@ import function_app as fa
 import platform_access as pa
 import platform_clock as pc
 import storage_helpers as sh
-from conftest import OID, TID, auth_headers, http_routes
+from conftest import OID, TID, auth_headers, http_route_methods, http_routes
 
 PID = "0b5c7e0e-6f3a-4d55-9c1e-2a7d8b9c0d11"
 OTHER_PID = "7d1f2e3a-4b5c-4d6e-8f90-a1b2c3d4e5f6"
@@ -186,7 +187,7 @@ def _calls(comp_id):
 NEEDS = {
     "get_competition_details": "read",
     "get_file": "read",
-    "delete_competition": "write",
+    "delete_competition": "owner",
     "save_event_settings": "write",
     "upload_file": "write",
     "import_platform_file": "write",
@@ -202,6 +203,12 @@ NEEDS = {
 
 # Routes that do not name a competition record, or are covered separately below.
 NOT_IN_MATRIX = {"health", "check_user_permission", "list_competitions", "resolve_competition"}
+
+
+# The only routes the host may route a GET to: none of them changes anything
+# the caller asked for (a link or an <img> must never delete or edit).
+GET_ROUTES = {"health", "check_user_permission", "list_competitions",
+              "get_competition_details", "get_file"}
 
 
 def call(name, headers, comp_id=COMP):
@@ -225,6 +232,7 @@ def assert_allowed(response):
     """Past the gate: whatever the route then answers, it is not a refusal."""
     assert response.status_code != 401, response.get_body()
     assert error_code(response) not in ("platform_not_found", "platform_read_only",
+                                        "platform_owner_required",
                                         "platform_unavailable"), response.get_body()
 
 
@@ -235,6 +243,25 @@ def user(**kw):
 def test_every_http_route_is_classified():
     """A new route must be added to the matrix (and given a role need)."""
     assert set(http_routes()) == set(NEEDS) | NOT_IN_MATRIX
+    assert set(NEEDS.values()) <= {"read", "write", "owner"}
+
+
+def test_every_route_declares_its_methods():
+    """No route leaves the method open (the host would then route GET too)."""
+    methods = http_route_methods()
+    assert set(methods) == set(http_routes())
+    assert [name for name, allowed in methods.items() if not allowed] == []
+
+
+def test_no_state_changing_route_answers_get():
+    """CSRF by link: only the read-only routes are reachable with GET, and
+    every write or owner route is reachable with neither GET nor HEAD."""
+    methods = http_route_methods()
+    assert {name for name, allowed in methods.items() if "GET" in allowed} == GET_ROUTES
+    for name, need in NEEDS.items():
+        if need != "read":
+            assert not methods[name] & {"GET", "HEAD"}, name
+    assert methods["delete_competition"] == {"POST"}
 
 
 # ── the role matrix ───────────────────────────────────────────────────────────
@@ -259,15 +286,29 @@ def test_read_grant(world, platform, name):
     response = call(name, user())
     if NEEDS[name] == "read":
         assert_allowed(response)
+    elif NEEDS[name] == "owner":
+        assert_refused(response, 403, "platform_owner_required")
+        assert snapshot(world) == before
     else:
         assert_refused(response, 403, "platform_read_only")
         assert snapshot(world) == before
 
 
-@pytest.mark.parametrize("role", ["write", "owner"])
 @pytest.mark.parametrize("name", sorted(NEEDS))
-def test_write_and_owner_grants_pass_everywhere(world, platform, name, role):
-    platform.grant(role)
+def test_write_grant(world, platform, name):
+    platform.grant("write")
+    before = snapshot(world)
+    response = call(name, user())
+    if NEEDS[name] == "owner":
+        assert_refused(response, 403, "platform_owner_required")
+        assert snapshot(world) == before
+    else:
+        assert_allowed(response)
+
+
+@pytest.mark.parametrize("name", sorted(NEEDS))
+def test_an_owner_grant_passes_everywhere(world, platform, name):
+    platform.grant("owner")
     assert_allowed(call(name, user()))
 
 
@@ -344,10 +385,49 @@ def test_a_write_grant_changes_the_structure(world, platform):
     assert [c["name"] for c in world.structures[folder]["categories"]] == ["Hacked"]
 
 
-def test_a_write_grant_deletes_the_record(world, platform):
+def test_only_the_owner_deletes_the_record(world, platform):
     platform.grant("write")
+    assert_refused(call("delete_competition", user()), 403, "platform_owner_required")
+    assert world.deleted == []
+    platform.grant("owner")
+    pa.clear_cache()   # stands in for the 30 s expiry
     assert call("delete_competition", user()).status_code == 200
     assert world.deleted == [COMP]
+
+
+def test_an_admin_deletes_the_record_as_owner(world, platform):
+    platform.fail(AssertionError("an admin needs no lookup"))
+    assert call("delete_competition", auth_headers(admin=True)).status_code == 200
+    assert world.deleted == [COMP]
+
+
+def delete_competition(method, headers, params=None, body=None):
+    return fa.delete_competition._function.get_user_function()(
+        _req(method, "delete_competition", headers, params, body))
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD", "PUT", "DELETE"])
+def test_delete_competition_is_post_only(world, platform, method):
+    """Belt and braces under the host's method routing: even an owner's GET
+    (a link, an <img>) deletes nothing."""
+    platform.grant("owner")
+    response = delete_competition(method, user(), {"id": COMP})
+    assert response.status_code == 405
+    assert response.headers.get("Allow") == "POST"
+    assert world.deleted == []
+
+
+def test_delete_competition_takes_the_id_from_a_json_body(world, platform):
+    platform.grant("owner")
+    assert delete_competition("POST", user(), body={"id": COMP}).status_code == 200
+    assert world.deleted == [COMP]
+
+
+def test_delete_competition_without_an_id_is_400(world, platform):
+    platform.grant("owner")
+    assert delete_competition("POST", user()).status_code == 400
+    assert delete_competition("POST", user(), body={"id": 7}).status_code == 400
+    assert world.deleted == []
 
 
 def test_a_revoked_grant_stops_working_once_the_cache_expires(world, platform):

@@ -16,7 +16,7 @@ import re
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from azure.identity import DefaultAzureCredential
@@ -284,11 +284,32 @@ def write_structure(folder_path: str, structure: dict):
     )
 
 
-# ── SAS links for generated protocol downloads ────────────────────────────────
+# ── generated protocol downloads ──────────────────────────────────────────────
+#
+# A generated protocol is listed in the `generatedprotocols` table (one row per
+# PDF: FileName, FileSize, Description) and its download link is minted on
+# every `get_competition_details`, after the access check: a read-only SAS on
+# that one blob, valid DOWNLOAD_LINK_TTL. No link is ever stored, so revoking
+# someone's access leaves them at most that long with a link they already had.
+# Rows written before this carried a 5-day `Url`/`ExpirationDate`; those columns
+# are ignored and scrubbed (`scrub_stored_link`).
 
-def create_and_store_sas_link(blob_service_client, blob_name, competition, filename, file_size=0):
-    """Create a 5-day read SAS for a generated protocol and store it in the
-    generatedprotocols table for retrieval by get_competition_details."""
+DOWNLOAD_LINK_TTL = timedelta(minutes=15)
+# The SAS (and its user delegation key) starts this far in the past so a
+# browser or storage clock running slightly behind still accepts it.
+SAS_CLOCK_SKEW = timedelta(minutes=5)
+STORED_LINK_FIELDS = ("Url", "ExpirationDate")
+
+
+def protocol_blob_name(folder_path: str, file_name: str) -> str:
+    """The blob a generated protocol lives in, derived from the competition's
+    folder and the row's file name — never from a stored URL."""
+    return f"{folder_path}/protocols/{os.path.basename(file_name or '')}"
+
+
+def record_generated_protocol(competition, filename, file_size=0):
+    """List a freshly generated protocol for `get_competition_details`. Stores
+    no link: those are minted per request (`mint_read_urls`)."""
     try:
         table_client = get_table_client()
         if not table_client:
@@ -297,43 +318,62 @@ def create_and_store_sas_link(blob_service_client, blob_name, competition, filen
             table_client.create_table()
         except Exception:
             pass
-
-        start_time = datetime.utcnow()
-        expiry = start_time + timedelta(days=5)
-        sas_token = ""
-        account_name = blob_service_client.account_name
-        blob_url_base = f"https://{account_name}.blob.core.windows.net/{CONTAINER_NAME}/{blob_name}"
-
-        if os.environ.get("AzureWebJobsStorage__accountName"):
-            ud_key = blob_service_client.get_user_delegation_key(start_time, expiry)
-            sas_token = generate_blob_sas(
-                account_name=account_name, container_name=CONTAINER_NAME, blob_name=blob_name,
-                user_delegation_key=ud_key, permission=BlobSasPermissions(read=True),
-                expiry=expiry, start=start_time)
-        else:
-            conn_str = os.environ.get("AzureWebJobsStorage")
-            if conn_str:
-                items = dict(item.split('=', 1) for item in conn_str.split(';') if '=' in item)
-                key = items.get('AccountKey')
-                if key:
-                    sas_token = generate_blob_sas(
-                        account_name=items.get('AccountName'), container_name=CONTAINER_NAME,
-                        blob_name=blob_name, account_key=key,
-                        permission=BlobSasPermissions(read=True), expiry=expiry, start=start_time)
-
-        if sas_token:
-            entity = {
-                "PartitionKey": competition,
-                "RowKey": filename.replace('/', '_').replace('\\', '_'),
-                "Url": f"{blob_url_base}?{sas_token}",
-                "ExpirationDate": expiry.isoformat(),
-                "Description": "Competition protocol (PDF)",
-                "FileName": filename,
-                "FileSize": int(file_size),
-            }
-            table_client.upsert_entity(entity)
+        table_client.upsert_entity({
+            "PartitionKey": competition,
+            "RowKey": filename.replace('/', '_').replace('\\', '_'),
+            "Description": "Competition protocol (PDF)",
+            "FileName": filename,
+            "FileSize": int(file_size),
+        }, mode=UpdateMode.REPLACE)
     except Exception as e:
-        logging.error(f"Error creating SAS: {e}")
+        logging.error(f"Error recording generated protocol: {type(e).__name__}")
+
+
+def scrub_stored_link(table_client, entity):
+    """Rewrite a legacy row without its stored long-lived link (best effort:
+    the link is ignored either way)."""
+    if not any(field in entity for field in STORED_LINK_FIELDS):
+        return
+    try:
+        clean = {k: v for k, v in entity.items() if k not in STORED_LINK_FIELDS}
+        table_client.upsert_entity(clean, mode=UpdateMode.REPLACE)
+    except Exception as e:
+        logging.warning(f"Could not scrub a stored protocol link: {type(e).__name__}")
+
+
+def mint_read_urls(blob_service_client, blob_names, now=None):
+    """`({blob name: url}, expiry)`: a read-only SAS URL per blob, valid until
+    `expiry` = now + DOWNLOAD_LINK_TTL (one user delegation key for the whole
+    batch, itself expiring then). `({}, None)` when nothing can be signed."""
+    blob_names = list(blob_names)
+    if not blob_names or blob_service_client is None:
+        return {}, None
+    now = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    start = now - SAS_CLOCK_SKEW
+    expiry = now + DOWNLOAD_LINK_TTL
+    account_name = blob_service_client.account_name
+    sign = None
+    if os.environ.get("AzureWebJobsStorage__accountName"):
+        ud_key = blob_service_client.get_user_delegation_key(start, expiry)
+        sign = lambda name: generate_blob_sas(
+            account_name=account_name, container_name=CONTAINER_NAME, blob_name=name,
+            user_delegation_key=ud_key, permission=BlobSasPermissions(read=True),
+            expiry=expiry, start=start)
+    else:
+        conn_str = os.environ.get("AzureWebJobsStorage")
+        items = dict(item.split('=', 1) for item in (conn_str or "").split(';') if '=' in item)
+        key = items.get('AccountKey')
+        if key:
+            account_name = items.get('AccountName') or account_name
+            sign = lambda name: generate_blob_sas(
+                account_name=account_name, container_name=CONTAINER_NAME, blob_name=name,
+                account_key=key, permission=BlobSasPermissions(read=True),
+                expiry=expiry, start=start)
+    if sign is None:
+        return {}, None
+    base = blob_service_client.url.rstrip("/")
+    return ({name: f"{base}/{CONTAINER_NAME}/{quote(name)}?{sign(name)}"
+             for name in blob_names}, expiry)
 
 
 def json_response(payload, status_code=200):
