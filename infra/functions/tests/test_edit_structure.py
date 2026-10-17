@@ -13,6 +13,7 @@ import pytest
 
 import function_app as fa
 import structure as st
+from conftest import auth_headers
 
 EMAIL = "organizer@example.com"
 
@@ -29,7 +30,7 @@ def edit(comp_id="abc12345", email=EMAIL, **body):
     body.setdefault("id", comp_id)
     req = func.HttpRequest(
         "POST", "/api/edit_structure",
-        headers={"x-forwarded-user-email": email} if email else {},
+        headers=auth_headers(email) if email else {},
         body=json.dumps(body).encode())
     return fa.edit_structure._function.get_user_function()(req)
 

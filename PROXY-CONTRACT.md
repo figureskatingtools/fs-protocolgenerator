@@ -12,25 +12,46 @@ Browser ── https://figureskatingtools.com/protocolgenerator/api/list_competi
              ▼
         site router (server.js)
              │  strips the /protocolgenerator prefix
+             │  drops any x-forwarded-user-* / x-proxy-secret the browser sent
              │  adds  x-proxy-secret: <PROXY_SHARED_SECRET>
-             │  adds  x-forwarded-user-email: <signed-in user's email>
+             │  adds  x-forwarded-user-tid / -oid / -email / -name [/ -admin]
              ▼
         https://func-fs-protocols-<hash>.azurewebsites.net/api/list_competitions
 ```
 
 ## Headers
 
-| Header | Set by | Meaning |
-| --- | --- | --- |
-| `x-proxy-secret` | router | Must equal the Function App's `PROXY_SHARED_SECRET` app setting. Wrong/missing → the request is treated as unauthenticated (401). Case-insensitive; `X-Proxy-Secret` is equivalent. |
-| `x-forwarded-user-email` | router | The signed-in user's email. Becomes the acting user for ownership/audit fields. |
+Set **only** by the router, which drops any client copy of them.
 
-Both are implemented in `infra/functions/storage_helpers.py`
-(`_proxy_secret_ok`, `get_user_email_from_header`); every route calls
-`function_app._require_user`, which returns `None` → HTTP 401 when no identity
-can be established. The one exception is `GET health`: it needs neither identity
-nor the secret and answers `{"status": "ok", "service": "fs-protocolgenerator"}`
-without touching storage, for the site's admin diagnostics.
+| Header | Meaning |
+| --- | --- |
+| `x-proxy-secret` | Must equal the Function App's `PROXY_SHARED_SECRET` app setting (compared with `hmac.compare_digest`). Wrong or missing → 401. |
+| `x-forwarded-user-tid` | The signed-in user's Entra tenant id (GUID). **Identity.** |
+| `x-forwarded-user-oid` | The signed-in user's Entra object id (GUID). **Identity.** |
+| `x-forwarded-user-email` | E-mail, lowercased. Display and audit only (`CreatedBy`), never used to authorise anything. Optional. |
+| `x-forwarded-user-name` | Display name, `encodeURIComponent`-encoded (decoded with `urllib.parse.unquote`). Optional. |
+| `x-forwarded-user-admin` | `1` when the router counts the user as a platform admin; absent otherwise. Any other value means "not admin". |
+
+Header names are case-insensitive.
+
+Implemented in `infra/functions/storage_helpers.py` (`_proxy_secret_ok`,
+`get_caller` → `Caller(tid, oid, email, name, is_admin)`). Every route calls
+`function_app._require_user`, which returns `None` → **401** when:
+
+- `PROXY_SHARED_SECRET` is **empty or unset**. The gate **fails closed**; there
+  is no "disabled" mode, locally included;
+- `x-proxy-secret` is missing or does not match;
+- `x-forwarded-user-tid` or `x-forwarded-user-oid` is missing or not a GUID.
+
+There are **no other identity sources**. `X-MS-CLIENT-PRINCIPAL-NAME`,
+`X-MS-CLIENT-PRINCIPAL` (base64 principal) and `Authorization: Bearer` tokens
+are ignored, and so is an e-mail without the tid/oid pair. The forwarded headers
+are trusted only because the secret matched, which is why the secret check must
+never fail open.
+
+The one exception is `GET health`. It needs neither identity nor the secret and
+answers `{"status": "ok", "service": "fs-protocolgenerator"}` without touching
+storage, for the site's admin diagnostics.
 
 ### Shared secret
 
@@ -38,33 +59,123 @@ without touching storage, for the site's admin diagnostics.
 from the `PROXY_SHARED_SECRET` GitHub environment secret. The same value must be
 configured in the site repo as `PROXY_SHARED_SECRET_PROTOCOLGENERATOR`.
 
-**If the setting is empty the gate is disabled** (`_proxy_secret_ok` returns
-`True`) — that is the local-dev mode; deployed environments always set it.
+## Competition access
 
-### Identity precedence in `get_user_email_from_header`
+The platform registry (site repo) decides who may see or change a competition.
+`infra/functions/platform_access.py` reads two platform tables on
+`PLATFORM_STORAGE_ACCOUNT` through Storage Table Data Reader grants (site repo's
+`shared-data-access.bicep`). The file is **byte-identical** in fs-judgepapers and
+fs-scoremodifier; change it in all three.
 
-The secret is checked **first** — if it fails, no identity is derived at all,
-regardless of the other headers. Then, in order:
+- `useridentities` (override: `PLATFORM_IDENTITIES_TABLE`): `IDENTITY` / `<tid>_<oid>` → `UserId`
+- `competitionaccess` (override: `PLATFORM_ACCESS_TABLE`): `<platform guid>` / `<UserId>` → `Role`
+  (`owner` > `write` > `read`)
 
-1. `x-ms-client-principal-name` — Easy Auth's own header (only present if
-   something in front ever enables Easy Auth on this app; today nothing does).
-2. `x-forwarded-user-email` — **the normal production path**, set by the router.
-3. `x-ms-client-principal` — base64 JSON principal; `userDetails` is used.
-4. `Authorization: Bearer <jwt>` — payload decoded (unverified) and the first of
-   `preferred_username`, `email`, `upn`, `unique_name`, `emails[0]`, `name`,
-   `oid` is used.
+`role_for(platform_id, tid, oid, is_admin)` returns the caller's role. Answers
+are cached in-process for 30 s, so a revoked share stops working within that
+time. An admin (`x-forwarded-user-admin: 1`) is `owner` everywhere, without a
+lookup.
 
-Anything else → `None` → 401.
+Every route that names a competition, by this tool's record id or by a
+`platformId`, loads the record, takes its `PlatformId` and needs one of these
+(`function_app._require_competition` / `_check_access`):
+
+| Need | Routes |
+| --- | --- |
+| **read** | `list_competitions` (filtered to the records the caller can read; admin: all), `get_competition_details` (incl. the generated protocols' download links), `get_file`, `resolve_competition` |
+| **write** | `save_event_settings`, `upload_file`, `import_platform_file`, `assign_file`, `delete_file`, `parse_schedule`, `import_rosters`, `upload_fallback_photos`, `edit_structure`, `generate_protocol`, `delete_protocol` |
+| **owner** (an admin counts as owner) | `delete_competition` |
+
+`check_user_permission` and `health` name no competition.
+
+### Methods
+
+No state-changing route answers `GET` (a link or an `<img>` must never change
+anything): `GET` reaches only `health`, `check_user_permission`,
+`list_competitions`, `get_competition_details` and `get_file`. Every route
+declares its methods (`tests/test_competition_access.py` fails otherwise).
+
+- `delete_competition` is **`POST` only** (the handler also answers any other
+  method 405 `Allow: POST`). The record id comes from the `id` query param
+  (`POST /api/delete_competition?id=<record id>`) or, when that is absent, a
+  JSON body `{"id": "<record id>"}`. 200 `{"deleted": <blob count>}`.
+- `delete_file` and `delete_protocol` take `DELETE` or `POST`; every other
+  write route takes `POST` only.
+
+### Download links
+
+`get_competition_details` returns each generated protocol (`generatedFiles[]`:
+`fileName`, `url`, `description`, `expiration`, `size`) with a download link
+**minted for that request, after the access check**: a read-only (`sp=r`)
+user-delegation SAS on that one blob, valid **15 minutes** (`expiration`, ISO
+UTC; the SAS starts 5 minutes back for clock skew). No link is stored — the
+`generatedprotocols` row holds only the file name, size and description, and the
+blob is derived from the record's folder plus that file name — so a user whose
+access is revoked keeps at most a 15-minute link. Rows from before this carried a
+5-day `Url`/`ExpirationDate`; those are ignored and scrubbed on the next read.
+`url` and `expiration` are `null` when no link could be signed. A page held open
+longer than 15 minutes needs to re-fetch the details for working links.
+Uploaded files are never linked: `get_file` streams their bytes through the
+router.
+
+- `resolve_competition` with read access may create a **new, empty** bound
+  record. Only a writer's call renames an existing record or backfills its event
+  fields from the request body. It never adopts an unbound record by name; it
+  only returns records already bound to that `platformId`.
+- A legacy record without `PlatformId` is **admin-only**.
+- A soft-deleted record answers like an unknown one.
+
+### Error codes
+
+JSON bodies `{"error": "<code>", "message": "…"}`:
+
+| Status | `error` | When |
+| --- | --- | --- |
+| 401 | (plain text `Unauthorized`) | The gate failed (secret or identity, see above). |
+| 404 | `platform_not_found` | No grant, unknown identity, unknown or deleted record, or a legacy unbound record and the caller is not an admin. Existence is never revealed. |
+| 403 | `platform_read_only` | A read grant on a write route. |
+| 403 | `platform_owner_required` | A read or write grant on an owner route (`delete_competition`). |
+| 503 | `platform_unavailable` | The access tables could not be read (network, RBAC, missing table, `PLATFORM_STORAGE_ACCOUNT` unset). Fails closed; access is never granted. |
+
+`resolve_competition` keeps its retention-clock answers too: 410
+`platform_deleted`, and 404 `platform_not_found` / 503 `platform_unavailable`
+when the clock cannot confirm a new binding.
+
+## Rollout: revoke the old 5-day links
+
+Before this change every download link was a 5-day user-delegation SAS (the
+deployed app has only `AzureWebJobsStorage__accountName`, so the account-key
+branch never ran in Azure). Dropping the stored URLs does not invalidate links
+already handed out, so **right after this change is deployed to an
+environment**, revoke the account's user delegation keys (needs Storage Account
+Contributor or Owner on the account):
+
+```bash
+# test
+az storage account revoke-delegation-keys -g rg-fs-protocols-test -n stfsprotzb6elc6hgw7jk
+# prod
+az storage account revoke-delegation-keys -g rg-fs-protocols-prod -n stfsprotwcpslt4m33wkk
+```
+
+The account is `stfsprot` + the same `uniqueString` suffix as the Function App
+(`func-fs-protocols-<suffix>`). Every user-delegation SAS on the account stops
+working at once, including the 15-minute links minted in the last minutes; the
+frontend fetches a fresh one on the next click. Run it after the deploy, never
+before: the old code would keep minting 5-day links.
 
 ## Testing it with curl
 
-Against a local `func start` (port 7071) with the gate enabled:
+Against a local `func start` (port 7071). The gate is always on, so set a secret:
 
 ```bash
 # infra/functions/local.settings.json → "PROXY_SHARED_SECRET": "devsecret"
+# Without PLATFORM_STORAGE_ACCOUNT only an admin passes the access check.
 curl -s http://localhost:7071/api/list_competitions \
   -H 'x-proxy-secret: devsecret' \
-  -H 'x-forwarded-user-email: tester@example.com'
+  -H 'x-forwarded-user-tid: 11111111-2222-4333-8444-555555555555' \
+  -H 'x-forwarded-user-oid: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' \
+  -H 'x-forwarded-user-email: tester@example.com' \
+  -H 'x-forwarded-user-admin: 1'
 ```
 
 Against the deployed Function App (needs the environment's real secret):
@@ -77,8 +188,10 @@ SECRET=$(az functionapp config appsettings list \
 
 curl -s "$FUNC/api/list_competitions" \
   -H "x-proxy-secret: $SECRET" \
-  -H 'x-forwarded-user-email: tester@example.com'
+  -H 'x-forwarded-user-tid: <your tenant id>' \
+  -H 'x-forwarded-user-oid: <your object id>'
 ```
 
-Omitting either header must return **401** — that is the regression check after
-any change to the auth helpers or to the router.
+Omitting the secret, the tid or the oid must return **401**, and a competition
+you hold no grant on must return **404 `platform_not_found`**. Those are the
+regression checks after any change to the auth helpers or to the router.

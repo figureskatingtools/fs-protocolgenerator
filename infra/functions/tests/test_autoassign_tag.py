@@ -15,6 +15,7 @@ import pytest
 
 import function_app as fa
 import structure as st
+from conftest import auth_headers
 
 EMAIL = "organizer@example.com"
 PDF = b"%PDF-1.4 fake"
@@ -44,7 +45,7 @@ def upload(filename="FSKWSINGLES_ISUPanelofJudgesandTechnicalPanel.pdf",
     query.update({k: v for k, v in params.items() if v is not None})
     req = func.HttpRequest(
         "POST", "/api/upload_file",
-        headers={"x-forwarded-user-email": email} if email else {},
+        headers=auth_headers(email) if email else {},
         params=query, body=body)
     return fa.upload_file._function.get_user_function()(req)
 
@@ -54,7 +55,7 @@ def assign(file_id, target, **extra):
     body.update(extra)
     req = func.HttpRequest(
         "POST", "/api/assign_file",
-        headers={"x-forwarded-user-email": EMAIL},
+        headers=auth_headers(EMAIL),
         body=json.dumps(body).encode("utf-8"))
     return fa.assign_file._function.get_user_function()(req)
 

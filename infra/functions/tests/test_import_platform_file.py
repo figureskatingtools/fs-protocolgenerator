@@ -24,7 +24,7 @@ import function_app as fa
 import storage_helpers as sh
 import structure as st
 
-from conftest import FakeContainerClient
+from conftest import FakeContainerClient, auth_headers
 
 EMAIL = "organizer@example.com"
 POOL_NAME = "FSKWSINGLES-----------QUAL000100--_SegmentResults.pdf"
@@ -57,7 +57,7 @@ def import_file(name=POOL_NAME, comp_id="abc12345", email=EMAIL, **params):
     query.update(params)
     req = func.HttpRequest(
         "POST", "/api/import_platform_file",
-        headers={"x-forwarded-user-email": email} if email else {},
+        headers=auth_headers(email) if email else {},
         params=query, body=b"")
     return fa.import_platform_file._function.get_user_function()(req)
 
@@ -212,7 +212,7 @@ def test_a_missing_parameter_is_a_bad_request(comp, pool):
 
 
 def test_an_unknown_competition_is_a_404(comp, pool):
-    error(import_file(comp_id="nosuch00"), 404, "competition_not_found")
+    error(import_file(comp_id="nosuch00"), 404, "platform_not_found")
 
 
 def test_an_unauthenticated_import_is_rejected(comp, pool):

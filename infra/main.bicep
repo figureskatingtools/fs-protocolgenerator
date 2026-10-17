@@ -12,14 +12,17 @@ targetScope = 'subscription'
 param location string = 'swedencentral'
 param resourceGroupName string = ''
 
-// Shared secret between the site router proxy and the Function App
+// Shared secret between the site router proxy and the Function App; required —
+// the gate fails closed when it is empty
 // (see function.bicep / storage_helpers._proxy_secret_ok and PROXY-CONTRACT.md).
 @secure()
 param proxySharedSecret string = ''
 
 // The platform's storage account name (`stfsplat*`, from the figureskatingtools-site
 // deployment) whose `competition-data` container holds the shared competition file
-// pool. Empty = this app's import_platform_file route stays off.
+// pool and whose tables hold the retention clock and competition access.
+// Required in practice: empty = import_platform_file stays off, bound records are
+// never auto-deleted and every non-admin competition request is a 503.
 param platformStorageAccountName string = ''
 param platformDataContainerName string = 'competition-data'
 
