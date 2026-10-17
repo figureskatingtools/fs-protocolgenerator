@@ -141,6 +141,28 @@ JSON bodies `{"error": "<code>", "message": "…"}`:
 `platform_deleted`, and 404 `platform_not_found` / 503 `platform_unavailable`
 when the clock cannot confirm a new binding.
 
+## Rollout: revoke the old 5-day links
+
+Before this change every download link was a 5-day user-delegation SAS (the
+deployed app has only `AzureWebJobsStorage__accountName`, so the account-key
+branch never ran in Azure). Dropping the stored URLs does not invalidate links
+already handed out, so **right after this change is deployed to an
+environment**, revoke the account's user delegation keys (needs Storage Account
+Contributor or Owner on the account):
+
+```bash
+# test
+az storage account revoke-delegation-keys -g rg-fs-protocols-test -n stfsprotzb6elc6hgw7jk
+# prod
+az storage account revoke-delegation-keys -g rg-fs-protocols-prod -n stfsprotwcpslt4m33wkk
+```
+
+The account is `stfsprot` + the same `uniqueString` suffix as the Function App
+(`func-fs-protocols-<suffix>`). Every user-delegation SAS on the account stops
+working at once, including the 15-minute links minted in the last minutes; the
+frontend fetches a fresh one on the next click. Run it after the deploy, never
+before: the old code would keep minting 5-day links.
+
 ## Testing it with curl
 
 Against a local `func start` (port 7071). The gate is always on, so set a secret:

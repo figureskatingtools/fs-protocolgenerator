@@ -9,7 +9,8 @@ from urllib.parse import parse_qs, urlsplit, unquote
 
 import azure.functions as func
 import pytest
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core import MatchConditions
+from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
 from azure.data.tables import UpdateMode
 from azure.storage.blob import UserDelegationKey
 
@@ -50,6 +51,19 @@ class FakeTable:
         self.upserts.append((dict(entity), mode))
         key = (entity["PartitionKey"], entity["RowKey"])
         if mode == UpdateMode.REPLACE or key not in self.rows:
+            self.rows[key] = dict(entity)
+        else:
+            self.rows[key].update(entity)
+
+    def update_entity(self, entity, mode=UpdateMode.MERGE, etag=None, match_condition=None):
+        """Like the SDK: never creates a row (If-Match "*" by default), and
+        IfNotModified needs the row's current etag (here: its stored "etag")."""
+        key = (entity["PartitionKey"], entity["RowKey"])
+        if key not in self.rows:
+            raise ResourceNotFoundError(entity["RowKey"])
+        if match_condition == MatchConditions.IfNotModified and self.rows[key].get("etag") != etag:
+            raise ResourceModifiedError("etag mismatch")
+        if mode == UpdateMode.REPLACE:
             self.rows[key] = dict(entity)
         else:
             self.rows[key].update(entity)
@@ -204,6 +218,42 @@ def test_a_stored_legacy_link_is_ignored_and_scrubbed(world):
     row = world.generated.rows[(COMP, "old.pdf")]
     assert "Url" not in row and "ExpirationDate" not in row
     assert row["FileName"] == "old.pdf" and row["FileSize"] == 10
+
+
+class _Read(dict):
+    """A table entity as the SDK returns it: a dict with `.metadata["etag"]`."""
+
+    def __init__(self, row, etag):
+        super().__init__(row)
+        self.metadata = {"etag": etag}
+
+
+def test_a_scrub_never_recreates_a_protocol_deleted_meanwhile():
+    """details read the legacy row, then delete_protocol removed it before the
+    scrub ran: the scrub must not bring the row back."""
+    table = FakeTable()
+    stale = _Read({"PartitionKey": COMP, "RowKey": "old.pdf", "FileName": "old.pdf",
+                   "Url": OLD_URL, "ExpirationDate": "2099-01-01T00:00:00"}, "W/1")
+    sh.scrub_stored_link(table, stale)
+    assert table.rows == {} and table.upserts == []
+
+
+def test_a_scrub_never_overwrites_a_row_rewritten_meanwhile():
+    table = FakeTable([{"PartitionKey": COMP, "RowKey": "p.pdf", "FileName": "p.pdf",
+                        "FileSize": 99, "etag": "W/2"}])
+    stale = _Read({"PartitionKey": COMP, "RowKey": "p.pdf", "FileName": "p.pdf",
+                   "FileSize": 10, "Url": OLD_URL}, "W/1")
+    sh.scrub_stored_link(table, stale)
+    assert table.rows[(COMP, "p.pdf")]["FileSize"] == 99
+
+
+def test_a_scrub_with_the_current_etag_drops_the_link():
+    row = {"PartitionKey": COMP, "RowKey": "p.pdf", "FileName": "p.pdf",
+           "Url": OLD_URL, "ExpirationDate": "2099-01-01T00:00:00", "etag": "W/1"}
+    table = FakeTable([row])
+    sh.scrub_stored_link(table, _Read(row, "W/1"))
+    stored = table.rows[(COMP, "p.pdf")]
+    assert "Url" not in stored and "ExpirationDate" not in stored
 
 
 def test_the_blob_is_derived_inside_the_competition_folder(world):

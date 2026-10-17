@@ -20,6 +20,7 @@ from urllib.parse import quote, unquote
 
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from azure.identity import DefaultAzureCredential
+from azure.core import MatchConditions
 from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import TableClient, UpdateMode
 
@@ -331,12 +332,21 @@ def record_generated_protocol(competition, filename, file_size=0):
 
 def scrub_stored_link(table_client, entity):
     """Rewrite a legacy row without its stored long-lived link (best effort:
-    the link is ignored either way)."""
+    the link is ignored either way). Update-only and conditional on the etag
+    the row was read with, so a protocol deleted (or rewritten) since is never
+    recreated or overwritten: the SDK then raises and the scrub is skipped."""
     if not any(field in entity for field in STORED_LINK_FIELDS):
         return
     try:
         clean = {k: v for k, v in entity.items() if k not in STORED_LINK_FIELDS}
-        table_client.upsert_entity(clean, mode=UpdateMode.REPLACE)
+        etag = (getattr(entity, "metadata", None) or {}).get("etag")
+        if etag:
+            table_client.update_entity(clean, mode=UpdateMode.REPLACE, etag=etag,
+                                       match_condition=MatchConditions.IfNotModified)
+        else:
+            # Without an etag the SDK's default If-Match "*" still refuses a
+            # missing row.
+            table_client.update_entity(clean, mode=UpdateMode.REPLACE)
     except Exception as e:
         logging.warning(f"Could not scrub a stored protocol link: {type(e).__name__}")
 
