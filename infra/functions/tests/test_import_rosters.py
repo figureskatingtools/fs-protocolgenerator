@@ -20,7 +20,7 @@ import function_app as fa
 import storage_helpers as sh
 import structure as st
 
-from conftest import FakeContainerClient
+from conftest import FakeContainerClient, auth_headers
 
 EMAIL = "organizer@example.com"
 COMP_ID = "abc12345"
@@ -74,7 +74,7 @@ def import_rosters(comp_id=COMP_ID, email=EMAIL, **body):
     body.setdefault("id", comp_id)
     req = func.HttpRequest(
         "POST", "/api/import_rosters",
-        headers={"x-forwarded-user-email": email} if email else {},
+        headers=auth_headers(email) if email else {},
         body=json.dumps(body).encode())
     return fa.import_rosters._function.get_user_function()(req)
 
@@ -173,7 +173,7 @@ def test_an_unauthenticated_call_is_a_401(comp):
 def test_a_body_without_an_id_is_a_400(comp):
     req = func.HttpRequest(
         "POST", "/api/import_rosters",
-        headers={"x-forwarded-user-email": EMAIL},
+        headers=auth_headers(EMAIL),
         body=json.dumps({"teamsXml": TEAMS_XML}).encode())
     assert fa.import_rosters._function.get_user_function()(req).status_code == 400
 

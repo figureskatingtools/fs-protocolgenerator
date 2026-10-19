@@ -5,15 +5,18 @@ param appInsightsName string
 param storageAccountName string
 param deploymentContainerUrl string
 
-// Shared secret the site router proxy sends as X-Proxy-Secret. Empty = the
-// function doesn't enforce it (local/dev). See storage_helpers._proxy_secret_ok
-// and PROXY-CONTRACT.md.
+// Shared secret the site router proxy sends as X-Proxy-Secret. The gate fails
+// closed: empty = every request but /api/health is a 401. See
+// storage_helpers._proxy_secret_ok and PROXY-CONTRACT.md.
 @secure()
 param proxySharedSecret string = ''
 
 // The platform's storage account (`stfsplat*`, owned by the figureskatingtools-site
-// repo) holding the shared per-competition file pool this app imports from with
-// its Blob Data Reader grant. Empty = the import feature is off.
+// repo): the shared per-competition file pool this app imports from (Blob Data
+// Reader), the retention clock and the competition access tables
+// (`useridentities`, `competitionaccess` — Table Data Reader, granted by the site
+// repo). Empty = the import feature is off and every non-admin request naming a
+// competition is a 503 (access cannot be checked).
 param platformStorageAccountName string = ''
 param platformDataContainerName string = 'competition-data'
 
@@ -109,11 +112,12 @@ resource authSettings 'Microsoft.Web/sites/config@2022-03-01' = {
   name: 'authsettingsV2'
   properties: {
     // The site router (figureskatingtools.com) handles the real Entra login and
-    // proxies requests here, forwarding the user's email plus the shared secret.
-    // The Function App must allow anonymous so those proxied requests reach the
-    // app, which authorizes via the forwarded header
-    // (storage_helpers.get_user_email_from_header). No identity provider is
-    // registered here — this app is never browsed to directly.
+    // proxies requests here, forwarding the user's tenant/object id plus the
+    // shared secret. The Function App must allow anonymous so those proxied
+    // requests reach the app, which authorizes via the forwarded headers
+    // (storage_helpers.get_caller) and the platform's access tables
+    // (platform_access.py). No identity provider is registered here — this app
+    // is never browsed to directly.
     globalValidation: {
       requireAuthentication: false
       unauthenticatedClientAction: 'AllowAnonymous'

@@ -8,8 +8,8 @@ and connecting files together*; missing graphics fall back to generated defaults
 **This repo is backend-only.** The UI lives in the `figureskatingtools-site` repo
 and is served at `https://figureskatingtools.com/protocolgenerator/`; that site's
 router handles the Entra login and proxies `/protocolgenerator/api/*` to this
-Function App with `x-proxy-secret` + `x-forwarded-user-email` (see
-**PROXY-CONTRACT.md**).
+Function App with `x-proxy-secret` + `x-forwarded-user-tid`/`-oid`/`-email`/`-name`
+(+ `-admin`) (see **PROXY-CONTRACT.md** and **Competition access** below).
 
 ## Stack
 
@@ -18,7 +18,8 @@ Function App with `x-proxy-secret` + `x-forwarded-user-email` (see
   pages, `pillow` embeds photos.
 - **Storage** — Azure Blob (container `fs-protocolgenerator`) holds each
   competition folder; Tables `competitions` (permanent registry, soft-delete) and
-  `generatedprotocols` (SAS download links).
+  `generatedprotocols` (one row per generated PDF: file name, size,
+  description — no link; links are minted per request, see **Competition access**).
 - **Hosting** — Flex-Consumption Function App only (no Web App, no Easy Auth
   provider, no DNS/custom domain in this repo). IaC in `infra/`
   (subscription-scoped Bicep: `modules/storage.bicep`, `modules/function.bicep`,
@@ -139,21 +140,24 @@ remain as plain fallbacks only if fonts/assets are missing.
 
 ## Backend routes (`function_app.py`)
 
-`list_competitions`, `delete_competition`, `resolve_competition` — the only
+`list_competitions`, `delete_competition` (POST only, owner only; record id in
+the `id` query param or a JSON body `{"id"}`), `resolve_competition` — the only
 route that creates a competition, always bound to a platform one (platform
-competition GUID → tool record: `PlatformId` lookup → normalized-name adoption
-of pre-existing records → create; soft-deleted rows are never resurrected;
+competition GUID → tool record: `PlatformId` lookup → create; an unbound record
+is **never adopted by name** any more — that let anyone claim another user's
+record; soft-deleted rows are never resurrected;
 optional `dates`/`venue` seed `event.dates` (dd.MM.yyyy, marked
 `event.datesAuto` so a schedule parse may refine it until the user saves the
-event form) and `event.rink` — create seeds, hit/adopt backfill empty fields; on a
+event form) and `event.rink` — create seeds, a writer's hit backfills empty
+fields; on a writer's
 `PlatformId` hit whose sanitized platform name differs from the stored `Name`,
 `_sync_competition_name` MERGE-writes `Name` first (authoritative — on failure the
 old name is reported) and `_rename_structure` mirrors it into `metadata.json`
 best-effort: `name` always, `event.title` (the printed "Protocol title") only while
 it still equals the old record name, so a customised title survives; the structure
 is read once and written once together with the dates/venue backfill; `FolderPath`
-never changes (blob paths and protocol filenames hang off it); adoption and create
-never rename),
+never changes (blob paths and protocol filenames hang off it); create never
+renames, and a read-only caller's resolve changes nothing),
 `get_competition_details`,
 `save_event_settings`, `upload_file`, `import_platform_file` (copies a file out
 of the platform's shared competition file pool — see below), `get_file`
@@ -169,6 +173,54 @@ the competition level — an explicit `null` clears back to *inherit* — and
 `textFields` is replaced wholesale like `members`), `generate_protocol`, plus the
 daily auto-deletion
 timer (see **Retention** below).
+
+### Competition access (platform grants)
+
+The platform registry owns who may see or change a competition; this tool only
+enforces it. `platform_access.py` — **byte-identical** in fs-judgepapers and
+fs-scoremodifier, change it in all three; keep the names `role_for`,
+`role_satisfies`, `PlatformAccessUnavailable`, `clear_cache` stable — maps the
+router's `x-forwarded-user-tid`/`-oid` through the platform's `useridentities`
+table to a user id and reads that user's `Role` (`owner` > `write` > `read`) from
+`competitionaccess` (both on `PLATFORM_STORAGE_ACCOUNT`, Table Data Reader
+grants from the site repo; names overridable with `PLATFORM_IDENTITIES_TABLE` /
+`PLATFORM_ACCESS_TABLE`; 30 s in-process cache). An admin
+(`x-forwarded-user-admin: 1`, trusted only behind the fail-closed secret) is
+`owner` everywhere without a lookup. E-mail is never an identity: it is kept only
+as the `CreatedBy` audit field.
+
+Every route that names a competition goes through one helper,
+`_require_competition(caller, comp_id, need)` (record → `PlatformId` →
+`_check_access` → `role_for`); `resolve_competition` calls `_check_access` on the
+`platformId` directly and `list_competitions` filters with `_role_for`. **read**:
+`list_competitions`, `get_competition_details` (incl. the protocol download
+links), `get_file`, `resolve_competition` (creating an empty bound record is
+allowed; renaming/backfilling an existing one needs write). **owner** (an admin
+counts as owner): `delete_competition`. **write**: everything else. Refusals are
+JSON: **404 `platform_not_found`** (no grant, unknown or
+soft-deleted record, or a legacy record without `PlatformId` for a non-admin —
+legacy records are admin-only), **403 `platform_read_only`** (read grant on a
+write route), **403 `platform_owner_required`** (read/write grant on an owner
+route), **503
+`platform_unavailable`** (tables unreadable or `PLATFORM_STORAGE_ACCOUNT` unset —
+fail closed). A refused call writes nothing. `tests/test_competition_access.py`
+holds the route × role matrix and fails when a new HTTP route is not classified,
+declares no methods, or lets a state-changing route answer `GET` (only `health`,
+`check_user_permission`, `list_competitions`, `get_competition_details`,
+`get_file` take GET); `tests/test_proxy_gate.py` the gate (fail-closed secret,
+header-only identity).
+
+**Download links are short-lived and never stored.** `get_competition_details`
+mints each generated protocol's link after the access check
+(`_generated_protocols` → `sh.mint_read_urls`): one user delegation key per
+request, a read-only SAS per blob, valid `sh.DOWNLOAD_LINK_TTL` (15 min; start
+backdated `SAS_CLOCK_SKEW` 5 min), `expiration` in the response. The blob name is
+derived (`sh.protocol_blob_name(folder, basename(FileName))`), never taken from a
+row; `generate_protocol` records only `FileName`/`FileSize`/`Description`
+(`sh.record_generated_protocol`, REPLACE), and legacy rows' 5-day
+`Url`/`ExpirationDate` are ignored and scrubbed on read (`sh.scrub_stored_link`).
+Never add a stored or long-lived link back: a revoked user must lose access within
+minutes. `get_file` streams bytes, no URL. `tests/test_download_links.py`.
 
 ### Retention: one platform clock
 
@@ -198,8 +250,8 @@ included. One table client per request or sweep (`_platform_table()`, passed as
   the platform reports one — for display only. `resolve_competition` and
   `get_competition_details` return it as `deletionDate` (null when there is none).
   `resolve_competition` answers **410 `platform_deleted`** — creating nothing —
-  when the platform competition is deleted or purged. A **new** binding (adoption
-  or create) must be confirmed by the platform: 404 `platform_not_found` when it
+  when the platform competition is deleted or purged. A **new** binding (a
+  create) must be confirmed by the platform: 404 `platform_not_found` when it
   has no such competition, 503 `platform_unavailable` when it cannot be read (a
   record bound to a nonexistent competition would never be deleted); with
   `PLATFORM_STORAGE_ACCOUNT` unset (local dev) it binds without a date. An existing
@@ -402,7 +454,10 @@ a hand-edited name — whole rather than blank.
 ## Local development
 
 Backend only: `cd infra/functions && func start`, then call it with the proxy
-headers (`x-proxy-secret`, `x-forwarded-user-email` — see **PROXY-CONTRACT.md**).
+headers (`x-proxy-secret`, `x-forwarded-user-tid`/`-oid`, and `x-forwarded-user-admin: 1`
+unless `PLATFORM_STORAGE_ACCOUNT` points at real access tables — see
+**PROXY-CONTRACT.md**). `PROXY_SHARED_SECRET` must be set in
+`local.settings.json`: the gate fails closed.
 To drive it from a UI, run the router + Vite dev server in `figureskatingtools-site`
 pointed at this `func start` instance.
 
@@ -458,8 +513,10 @@ Required GitHub environment config: secrets `AZURE_CLIENT_ID`,
 `PROXY_SHARED_SECRET`; vars `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
 `LOCATION`, `RESOURCE_GROUP_NAME`, plus optional `PLATFORM_STORAGE_ACCOUNT` (the
 site repo's `stfsplat*` account for this environment — unset leaves
-`import_platform_file` off and **stops auto-deletion of every bound competition**,
-logged as an error each night — so it is required in practice). (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and
+`import_platform_file` off, **stops auto-deletion of every bound competition**
+(logged as an error each night) and makes every non-admin competition request a
+503 `platform_unavailable` — so it is required in practice). `PROXY_SHARED_SECRET`
+is required too: empty, every request but `/api/health` is a 401. (`AUTH_CLIENT_ID`, `AUTH_APP_OBJECT_ID` and
 `CUSTOM_DOMAIN` are gone.)
 
 ## Cross-repo handoff (figureskatingtools-site)

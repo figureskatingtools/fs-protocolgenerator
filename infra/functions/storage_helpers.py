@@ -2,20 +2,25 @@
 Shared storage + auth helpers for the Protocol Generator backend.
 
 Mirrors the patterns proven in fs-judgepapers: a public Function App that trusts
-the Web App proxy (verified by a shared secret), Managed-Identity access to Blob
-and Table storage, a permanent `competitions` registry table with soft-deletes,
-and per-competition blob folders holding a `metadata.json` structure document.
+the site router (verified by a fail-closed shared secret) for the caller's
+identity, Managed-Identity access to Blob and Table storage, a permanent
+`competitions` registry table with soft-deletes, and per-competition blob
+folders holding a `metadata.json` structure document.
 """
 import azure.functions as func
 import logging
 import os
-import base64
+import hmac
 import json
+import re
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
+from urllib.parse import quote, unquote
 
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from azure.identity import DefaultAzureCredential
+from azure.core import MatchConditions
 from azure.core.exceptions import ResourceNotFoundError
 from azure.data.tables import TableClient, UpdateMode
 
@@ -50,70 +55,61 @@ NON_PERSONAL_ACTORS = ("", "-", USER_DELETE_ACTOR, AUTO_CLEANUP_ACTOR)
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────
+#
+# Every request reaches this app through the figureskatingtools-site router
+# (PROXY-CONTRACT.md). The router proves itself with the shared secret and
+# forwards the signed-in principal as x-forwarded-user-* headers; it drops any
+# copy a browser sent. Those headers are the ONLY identity source — trusted
+# solely because the secret matched, which is why the secret check fails closed.
+
+_GUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+class Caller(NamedTuple):
+    """The signed-in user as the router forwarded them. `tid`/`oid` (lowercase
+    Entra GUIDs) are the identity every access decision uses; `email` and
+    `name` are for display and audit fields only, never for authorisation."""
+    tid: str
+    oid: str
+    email: str
+    name: str
+    is_admin: bool
+
+
+def _guid(value):
+    text = str(value or "").strip().lower()
+    return text if _GUID_RE.match(text) else None
+
 
 def _proxy_secret_ok(req: func.HttpRequest) -> bool:
-    """Verify the request came from the Web App proxy via the shared secret.
-    Enforced only when PROXY_SHARED_SECRET is set (local dev fails open)."""
-    expected = os.environ.get("PROXY_SHARED_SECRET")
+    """The request came from the site router: x-proxy-secret equals
+    PROXY_SHARED_SECRET (constant-time). Fails CLOSED — with the setting empty
+    or unset nothing is accepted."""
+    expected = os.environ.get("PROXY_SHARED_SECRET") or ""
     if not expected:
-        return True
-    provided = req.headers.get("X-Proxy-Secret") or req.headers.get("x-proxy-secret")
-    return provided == expected
+        return False
+    provided = req.headers.get("x-proxy-secret") or ""
+    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
 
-def _decode_jwt_payload(token: str):
-    """Decode a JWT payload without verification (base64url only)."""
-    try:
-        parts = token.split('.')
-        if len(parts) != 3:
-            return None
-        payload_b64 = parts[1] + '=' * (4 - len(parts[1]) % 4)
-        return json.loads(base64.urlsafe_b64decode(payload_b64))
-    except Exception as e:
-        logging.error(f"Error decoding JWT payload: {e}")
-        return None
-
-
-def get_user_email_from_header(req: func.HttpRequest):
-    """Extract the authenticated user's email from Easy Auth headers, the
-    Web App proxy's forwarded header, or a bearer token. Returns None if the
-    request did not come through the trusted proxy or carries no identity."""
+def get_caller(req: func.HttpRequest):
+    """The router-forwarded caller, or None (→ 401) when the proxy secret does
+    not match or the tenant/object id is missing or not a GUID."""
     if not _proxy_secret_ok(req):
         logging.warning("Proxy shared secret missing or mismatched; rejecting request")
         return None
-
-    val = req.headers.get("X-MS-CLIENT-PRINCIPAL-NAME") or req.headers.get("x-ms-client-principal-name")
-    if val:
-        return val
-
-    forwarded = req.headers.get("X-Forwarded-User-Email") or req.headers.get("x-forwarded-user-email")
-    if forwarded:
-        return forwarded
-
-    header = req.headers.get("x-ms-client-principal") or req.headers.get("X-MS-CLIENT-PRINCIPAL")
-    if header:
-        try:
-            principal = json.loads(base64.b64decode(header).decode("utf-8"))
-            return principal.get("userDetails")
-        except Exception as e:
-            logging.error(f"Error parsing auth header: {e}")
-
-    auth_header = req.headers.get("Authorization") or req.headers.get("authorization")
-    if auth_header and auth_header.lower().startswith("bearer "):
-        claims = _decode_jwt_payload(auth_header[7:])
-        if claims:
-            email = (claims.get("preferred_username") or claims.get("email")
-                     or claims.get("upn") or claims.get("unique_name"))
-            if not email:
-                emails = claims.get("emails")
-                if isinstance(emails, list) and emails:
-                    email = emails[0]
-            if not email:
-                email = claims.get("name") or claims.get("oid")
-            if email:
-                return email
-
-    return None
+    tid = _guid(req.headers.get("x-forwarded-user-tid"))
+    oid = _guid(req.headers.get("x-forwarded-user-oid"))
+    if tid is None or oid is None:
+        logging.warning("Forwarded identity missing or invalid; rejecting request")
+        return None
+    email = (req.headers.get("x-forwarded-user-email") or "").strip().lower()
+    # encodeURIComponent-encoded by the router (headers are Latin-1 only).
+    name = unquote(req.headers.get("x-forwarded-user-name") or "").strip()
+    return Caller(tid=tid, oid=oid, email=email, name=name,
+                  is_admin=req.headers.get("x-forwarded-user-admin") == "1")
 
 
 # ── Storage clients ───────────────────────────────────────────────────────────
@@ -289,11 +285,32 @@ def write_structure(folder_path: str, structure: dict):
     )
 
 
-# ── SAS links for generated protocol downloads ────────────────────────────────
+# ── generated protocol downloads ──────────────────────────────────────────────
+#
+# A generated protocol is listed in the `generatedprotocols` table (one row per
+# PDF: FileName, FileSize, Description) and its download link is minted on
+# every `get_competition_details`, after the access check: a read-only SAS on
+# that one blob, valid DOWNLOAD_LINK_TTL. No link is ever stored, so revoking
+# someone's access leaves them at most that long with a link they already had.
+# Rows written before this carried a 5-day `Url`/`ExpirationDate`; those columns
+# are ignored and scrubbed (`scrub_stored_link`).
 
-def create_and_store_sas_link(blob_service_client, blob_name, competition, filename, file_size=0):
-    """Create a 5-day read SAS for a generated protocol and store it in the
-    generatedprotocols table for retrieval by get_competition_details."""
+DOWNLOAD_LINK_TTL = timedelta(minutes=15)
+# The SAS (and its user delegation key) starts this far in the past so a
+# browser or storage clock running slightly behind still accepts it.
+SAS_CLOCK_SKEW = timedelta(minutes=5)
+STORED_LINK_FIELDS = ("Url", "ExpirationDate")
+
+
+def protocol_blob_name(folder_path: str, file_name: str) -> str:
+    """The blob a generated protocol lives in, derived from the competition's
+    folder and the row's file name — never from a stored URL."""
+    return f"{folder_path}/protocols/{os.path.basename(file_name or '')}"
+
+
+def record_generated_protocol(competition, filename, file_size=0):
+    """List a freshly generated protocol for `get_competition_details`. Stores
+    no link: those are minted per request (`mint_read_urls`)."""
     try:
         table_client = get_table_client()
         if not table_client:
@@ -302,43 +319,71 @@ def create_and_store_sas_link(blob_service_client, blob_name, competition, filen
             table_client.create_table()
         except Exception:
             pass
-
-        start_time = datetime.utcnow()
-        expiry = start_time + timedelta(days=5)
-        sas_token = ""
-        account_name = blob_service_client.account_name
-        blob_url_base = f"https://{account_name}.blob.core.windows.net/{CONTAINER_NAME}/{blob_name}"
-
-        if os.environ.get("AzureWebJobsStorage__accountName"):
-            ud_key = blob_service_client.get_user_delegation_key(start_time, expiry)
-            sas_token = generate_blob_sas(
-                account_name=account_name, container_name=CONTAINER_NAME, blob_name=blob_name,
-                user_delegation_key=ud_key, permission=BlobSasPermissions(read=True),
-                expiry=expiry, start=start_time)
-        else:
-            conn_str = os.environ.get("AzureWebJobsStorage")
-            if conn_str:
-                items = dict(item.split('=', 1) for item in conn_str.split(';') if '=' in item)
-                key = items.get('AccountKey')
-                if key:
-                    sas_token = generate_blob_sas(
-                        account_name=items.get('AccountName'), container_name=CONTAINER_NAME,
-                        blob_name=blob_name, account_key=key,
-                        permission=BlobSasPermissions(read=True), expiry=expiry, start=start_time)
-
-        if sas_token:
-            entity = {
-                "PartitionKey": competition,
-                "RowKey": filename.replace('/', '_').replace('\\', '_'),
-                "Url": f"{blob_url_base}?{sas_token}",
-                "ExpirationDate": expiry.isoformat(),
-                "Description": "Competition protocol (PDF)",
-                "FileName": filename,
-                "FileSize": int(file_size),
-            }
-            table_client.upsert_entity(entity)
+        table_client.upsert_entity({
+            "PartitionKey": competition,
+            "RowKey": filename.replace('/', '_').replace('\\', '_'),
+            "Description": "Competition protocol (PDF)",
+            "FileName": filename,
+            "FileSize": int(file_size),
+        }, mode=UpdateMode.REPLACE)
     except Exception as e:
-        logging.error(f"Error creating SAS: {e}")
+        logging.error(f"Error recording generated protocol: {type(e).__name__}")
+
+
+def scrub_stored_link(table_client, entity):
+    """Rewrite a legacy row without its stored long-lived link (best effort:
+    the link is ignored either way). Update-only and conditional on the etag
+    the row was read with, so a protocol deleted (or rewritten) since is never
+    recreated or overwritten: the SDK then raises and the scrub is skipped."""
+    if not any(field in entity for field in STORED_LINK_FIELDS):
+        return
+    try:
+        clean = {k: v for k, v in entity.items() if k not in STORED_LINK_FIELDS}
+        etag = (getattr(entity, "metadata", None) or {}).get("etag")
+        if etag:
+            table_client.update_entity(clean, mode=UpdateMode.REPLACE, etag=etag,
+                                       match_condition=MatchConditions.IfNotModified)
+        else:
+            # Without an etag the SDK's default If-Match "*" still refuses a
+            # missing row.
+            table_client.update_entity(clean, mode=UpdateMode.REPLACE)
+    except Exception as e:
+        logging.warning(f"Could not scrub a stored protocol link: {type(e).__name__}")
+
+
+def mint_read_urls(blob_service_client, blob_names, now=None):
+    """`({blob name: url}, expiry)`: a read-only SAS URL per blob, valid until
+    `expiry` = now + DOWNLOAD_LINK_TTL (one user delegation key for the whole
+    batch, itself expiring then). `({}, None)` when nothing can be signed."""
+    blob_names = list(blob_names)
+    if not blob_names or blob_service_client is None:
+        return {}, None
+    now = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    start = now - SAS_CLOCK_SKEW
+    expiry = now + DOWNLOAD_LINK_TTL
+    account_name = blob_service_client.account_name
+    sign = None
+    if os.environ.get("AzureWebJobsStorage__accountName"):
+        ud_key = blob_service_client.get_user_delegation_key(start, expiry)
+        sign = lambda name: generate_blob_sas(
+            account_name=account_name, container_name=CONTAINER_NAME, blob_name=name,
+            user_delegation_key=ud_key, permission=BlobSasPermissions(read=True),
+            expiry=expiry, start=start)
+    else:
+        conn_str = os.environ.get("AzureWebJobsStorage")
+        items = dict(item.split('=', 1) for item in (conn_str or "").split(';') if '=' in item)
+        key = items.get('AccountKey')
+        if key:
+            account_name = items.get('AccountName') or account_name
+            sign = lambda name: generate_blob_sas(
+                account_name=account_name, container_name=CONTAINER_NAME, blob_name=name,
+                account_key=key, permission=BlobSasPermissions(read=True),
+                expiry=expiry, start=start)
+    if sign is None:
+        return {}, None
+    base = blob_service_client.url.rstrip("/")
+    return ({name: f"{base}/{CONTAINER_NAME}/{quote(name)}?{sign(name)}"
+             for name in blob_names}, expiry)
 
 
 def json_response(payload, status_code=200):
