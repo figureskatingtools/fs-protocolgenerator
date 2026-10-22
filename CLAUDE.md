@@ -23,7 +23,9 @@ Function App with `x-proxy-secret` + `x-forwarded-user-tid`/`-oid`/`-email`/`-na
 - **Hosting** — Flex-Consumption Function App only (no Web App, no Easy Auth
   provider, no DNS/custom domain in this repo). IaC in `infra/`
   (subscription-scoped Bicep: `modules/storage.bicep`, `modules/function.bicep`,
-  `modules/roleassignment.bicep`).
+  `modules/roleassignment.bicep`). App Insights writes to its own Log Analytics
+  workspace `log-fs-protocols-<env>`; both keep logs **90 days**
+  (`logRetentionDays`).
 - **Frontend (elsewhere)** — vanilla TypeScript + Vite, `site/src/protocolgenerator/`
   in `figureskatingtools-site`.
 
@@ -263,16 +265,31 @@ included. One table client per request or sweep (`_platform_table()`, passed as
 - The **04:00 UTC** timer (`_run_auto_delete`, after the platform's 03:00 sweep)
   deletes a bound record's data **only on the platform's verdict**
   (`platform_says_delete`: `Status == "deleted"` or `PurgedUtc`) — never on a date
-  alone (the platform may be in dry-run, or the competition just extended). No
-  clock row means keep + `logging.warning`; a platform that **cannot be read, or
-  `PLATFORM_STORAGE_ACCOUNT` unset, means skip + `logging.error`** — never delete.
-  Legacy rows with no `PlatformId` go on their stored date (`ensure_deletion_date`
-  backfills `LEGACY_DELETION_DATE` for those only).
+  alone (the platform may be in dry-run, or the competition just extended). A
+  platform that **cannot be read, or `PLATFORM_STORAGE_ACCOUNT` unset, means skip
+  + `logging.error`** — never delete. Legacy rows with no `PlatformId` go on their
+  stored date (`ensure_deletion_date` backfills `LEGACY_DELETION_DATE` for those
+  only).
+- **Orphans** (no platform competition can decide about them): a live record
+  with no `PlatformId` (or a non-GUID one, or no `FolderPath`), or whose clock
+  row a *successful* read did not find, is deleted by `_delete_competition_data`
+  (`auto-cleanup`, `CreatedBy` blanked, the row kept as history) once it is
+  **more than 60 days old** — `CreatedDate`, else the Table `Timestamp`
+  (`platform_clock.record_age_reference`); younger orphans are kept with a
+  warning, and a read error is never "not found" (skipped). Rails: one probe of
+  the clock table per run (`platform_clock.orphan_sweep_allowed`) — unreadable,
+  unconfigured, or **zero rows while records are bound** (wrong table/account)
+  aborts the orphan step for that run (`logging.error`); `ORPHAN_PURGE_ENABLED`
+  (Bicep param `orphanPurgeEnabled`, default on; GitHub var
+  `ORPHAN_PURGE_ENABLED=false` is the kill switch) off → it only logs "would
+  delete". `_run_auto_delete` logs and returns the run's counts (`deleted`,
+  `skipped`, `failed`, `orphaned`, `orphan_kept`, `orphan_dry_run`,
+  `orphan_skipped`).
 - No e-mail address outlives the data: `_delete_competition_data` merges
   `CreatedBy=""` and `DeletedBy="user"|"auto-cleanup"`, and every nightly run ends
   with `_scrub_hidden_rows`, which blanks `CreatedBy`/`DeletedBy` on soft-deleted rows
   deleted before that rule. Logs carry no addresses (nor fallback-photo or pool
-  filenames). Covered by `tests/test_platform_clock.py`.
+  filenames) and are kept 90 days. Covered by `tests/test_platform_clock.py`.
 
 ### Shared competition file pool + auto-assignment
 
@@ -537,7 +554,8 @@ deploys prod — dispatch its branch to `test` first when the update is risky.
 
 Required GitHub environment config: secrets `AZURE_CLIENT_ID`,
 `PROXY_SHARED_SECRET`; vars `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
-`LOCATION`, `RESOURCE_GROUP_NAME`, plus optional `PLATFORM_STORAGE_ACCOUNT` (the
+`LOCATION`, `RESOURCE_GROUP_NAME`, optional `ORPHAN_PURGE_ENABLED` (`false` =
+the nightly orphan step only logs; unset = on), plus optional `PLATFORM_STORAGE_ACCOUNT` (the
 site repo's `stfsplat*` account for this environment — unset leaves
 `import_platform_file` off, **stops auto-deletion of every bound competition**
 (logged as an error each night) and makes every non-admin competition request a

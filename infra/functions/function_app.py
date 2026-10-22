@@ -681,40 +681,107 @@ def auto_delete_expired_competitions(timer: func.TimerRequest) -> None:
     _run_auto_delete(datetime.now(timezone.utc))
 
 
-def _run_auto_delete(now):
+def _orphan_purge_enabled():
+    """ORPHAN_PURGE_ENABLED (Bicep-owned, on by default): false = the nightly
+    orphan step only logs what it would delete. Unset reads as off."""
+    return (os.environ.get("ORPHAN_PURGE_ENABLED") or "").strip().lower() in ("1", "true", "yes")
+
+
+def _orphan_reference(entity):
+    """When an orphaned row's 60 days count from: CreatedDate, else the newest
+    timestamp the row has (DeletionDate is a deadline, not a timestamp of the
+    record, so it is not one of them; the Table Timestamp is)."""
+    metadata = getattr(entity, "metadata", None) or {}
+    return pc.record_age_reference(entity.get("CreatedDate"), metadata.get("timestamp"))
+
+
+def _run_auto_delete(now, orphan_purge=None):
     """The nightly sweep. The platform decides: a bound record's data is
     deleted only on its verdict (`platform_says_delete`: the competition is
-    deleted or purged) — never on a date alone. A clock row that is not found
-    keeps the record (warning); a platform that cannot be read or is not
-    configured means skip (error) — never delete. Legacy rows with no
-    PlatformId go on their stored date. Finally, deleted rows still holding an
-    address are scrubbed."""
+    deleted or purged) — never on a date alone. A platform that cannot be
+    read or is not configured means skip (error) — never delete. Legacy rows
+    with no PlatformId go on their stored date.
+
+    Orphans: a live record with no PlatformId (or one that is not a GUID), or
+    whose clock row a successful read did not find, is deleted with the same
+    flow (data gone, CreatedBy blanked, the row kept as history) once it is
+    more than 60 days old (`_orphan_reference`); younger ones are kept. The
+    step runs only when one probe of the clock table read at least one row
+    (or nothing is bound) — unreadable, unconfigured or empty aborts it for
+    the run — and deletes only with ORPHAN_PURGE_ENABLED on (otherwise it
+    logs what it would). Finally, deleted rows still holding an address are
+    scrubbed. Returns the run's counts."""
+    purge = _orphan_purge_enabled() if orphan_purge is None else orphan_purge
+    stats = {"deleted": 0, "skipped": 0, "failed": 0, "orphaned": 0,
+             "orphan_kept": 0, "orphan_dry_run": 0, "orphan_skipped": 0}
     try:
         comp_table = sh.get_table_client("competitions")
         if not comp_table:
-            return
+            return stats
         platform_table, table_error = _platform_table()
         platform_error = table_error or (
             None if platform_table else "PLATFORM_STORAGE_ACCOUNT unset")
-        skipped = 0
-        for entity in list(comp_table.query_entities("PartitionKey eq 'GLOBAL'")):
-            if entity.get("Visible") is False or "FolderPath" not in entity:
+        live = [e for e in comp_table.query_entities("PartitionKey eq 'GLOBAL'")
+                if e.get("Visible") is not False]
+        bound_count = sum(1 for e in live if e.get("PlatformId"))
+        if table_error:
+            orphan_ok, orphan_reason = False, "unavailable"
+        else:
+            orphan_ok, orphan_reason = pc.orphan_sweep_allowed(platform_table, bound_count)
+        if not orphan_ok:
+            logging.error(f"Auto-deletion: orphan step aborted for this run (platform clock "
+                          f"{orphan_reason}; {bound_count} bound record(s))")
+
+        def handle_orphan(entity, why):
+            comp_id = entity["RowKey"]
+            if not orphan_ok:
+                stats["orphan_skipped"] += 1
+                return
+            if not pc.orphan_old_enough(_orphan_reference(entity), now):
+                stats["orphan_kept"] += 1
+                logging.warning(f"Auto-deletion: {comp_id} is orphaned ({why}) "
+                                "but not 60 days old; kept")
+                return
+            if not purge:
+                stats["orphan_dry_run"] += 1
+                logging.warning(f"Auto-deletion: dry run, would delete orphaned "
+                                f"competition {comp_id} ({why})")
+                return
+            try:
+                _delete_competition_data(entity, sh.AUTO_CLEANUP_ACTOR)
+                stats["orphaned"] += 1
+                logging.info(f"Auto-deleted orphaned competition {comp_id} ({why})")
+            except Exception as e:
+                stats["failed"] += 1
+                logging.error(f"Auto-deletion failed for orphaned competition {comp_id}: {e}")
+
+        for entity in live:
+            platform_id = entity.get("PlatformId")
+            if "FolderPath" not in entity:
+                # A row from before FolderPath; never bound to the platform.
+                handle_orphan(entity, "legacy row without FolderPath")
                 continue
-            if not entity.get("PlatformId"):
+            if not platform_id:
                 sh.ensure_deletion_date(comp_table, entity)
                 due = _cached_date_passed(entity, now)
+                if not due:
+                    handle_orphan(entity, "no PlatformId")
+                    continue
+            elif pc.normalize_platform_id(platform_id) is None:
+                handle_orphan(entity, "PlatformId is not a GUID")
+                continue
             elif platform_error:
-                skipped += 1
+                stats["skipped"] += 1
                 continue
             else:
-                clock, unavailable = _read_clock(entity["PlatformId"], platform_table)
+                clock, unavailable = _read_clock(platform_id, platform_table)
                 if unavailable:
+                    stats["skipped"] += 1
                     logging.error(f"Auto-deletion skipped for {entity['RowKey']}: "
                                   "platform clock unavailable")
                     continue
                 if clock is None:
-                    logging.warning(f"Auto-deletion kept {entity['RowKey']}: "
-                                    "no platform clock row for its competition")
+                    handle_orphan(entity, "no platform clock row")
                     continue
                 sh.sync_local_deletion_date(comp_table, entity, clock)
                 due = pc.platform_says_delete(clock)
@@ -722,11 +789,18 @@ def _run_auto_delete(now):
                 continue
             try:
                 _delete_competition_data(entity, sh.AUTO_CLEANUP_ACTOR)
+                stats["deleted"] += 1
             except Exception as e:
+                stats["failed"] += 1
                 logging.error(f"Auto-deletion failed for {entity['RowKey']}: {e}")
-        if skipped:
-            logging.error(f"Auto-deletion skipped {skipped} platform-bound competition(s): "
+        if platform_error and stats["skipped"]:
+            logging.error(f"Auto-deletion skipped {stats['skipped']} platform-bound competition(s): "
                           f"platform registry unavailable ({platform_error})")
+        logging.info(
+            f"Auto-deletion sweep complete. Deleted {stats['deleted']}, skipped {stats['skipped']} "
+            f"(platform clock unreadable), failed {stats['failed']}. Orphans: deleted "
+            f"{stats['orphaned']}, kept (under 60 days) {stats['orphan_kept']}, dry run "
+            f"{stats['orphan_dry_run']}, skipped (step aborted) {stats['orphan_skipped']}.")
     except Exception as e:
         logging.error(f"Auto-deletion sweep error: {e}")
     try:
@@ -735,6 +809,7 @@ def _run_auto_delete(now):
             _scrub_hidden_rows(comp_table)
     except Exception as e:
         logging.error(f"Deleted-row scrub error: {type(e).__name__}")
+    return stats
 
 
 # ── details / event settings ──────────────────────────────────────────────────

@@ -48,6 +48,11 @@ checks the caller's role (read/write/owner) in the platform's access tables — 
   and Table (`competitions`, `generatedprotocols`).
 - **Hosting** — Flex-Consumption Function App + its storage account. IaC in `infra/`
   (Bicep). No Web App, no custom domain, no app registration in this repo.
+- **Retention** — a competition's files and e-mail addresses are deleted when the
+  competition is deleted on figureskatingtools.com; only an anonymous history row stays.
+  A record no competition stands behind any more (or one from before the shared
+  competitions) is deleted the same way once it is more than 60 days old. Logs are kept
+  90 days.
 
 ## Local development
 
