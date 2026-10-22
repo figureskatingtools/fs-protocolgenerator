@@ -81,3 +81,15 @@ manual `workflow_dispatch`. The workflow has two jobs — infrastructure (Bicep)
 (zip deploy); the backend job runs the pytest suite before packaging, so a red suite blocks
 the deploy. Manual equivalents: `deploy_infra.sh`, `deploy_backend.sh`. Both the **test** and
 **prod** environments are live. See `CLAUDE.md` for the full architecture.
+
+## Licence
+
+The source code is licensed under the GNU Affero General Public License, version 3 only (SPDX:
+`AGPL-3.0-only`); see [LICENSE](LICENSE).
+
+The figureskatingtools name, logo and document templates (including the header, footer,
+wordmark, skate mark and last-page images and PDF in `infra/functions/assets/`) are not covered
+by this licence and remain the property of their owner; all rights reserved.
+
+The bundled Raleway fonts in `infra/functions/fonts/` keep their own licence, the SIL Open Font
+License 1.1.
