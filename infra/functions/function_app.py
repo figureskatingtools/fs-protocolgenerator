@@ -17,6 +17,7 @@ import storage_helpers as sh
 import structure as st
 from schedule_parser import parse_schedule_data
 import dt_partic
+import odf_birth_dates
 from dt_partic import parse_participants, parse_team_rosters
 import fallback_photos
 import image_sanitize
@@ -851,6 +852,16 @@ class UnreadableImage(ValueError):
     """An upload claiming to be an image that cannot be decoded."""
 
 
+def _birth_dates_not_removed():
+    """422 for a participant file whose dates of birth could not be removed
+    (odf_birth_dates.BirthDateError): nothing was stored. Same code and status
+    as the platform's file pool refusing the same file."""
+    return sh.json_response(
+        {"error": "birth_dates_not_removed",
+         "message": "The birth dates in this participant file could not be removed, "
+                    "so it was not stored."}, 422)
+
+
 def _heif_to_jpeg(filename, body):
     """(filename, body) unchanged for anything but HEIC/HEIF; those become a
     metadata-free JPEG named `<stem>.jpg` (raises UnreadableImage)."""
@@ -876,8 +887,12 @@ def _register_upload(structure, folder_path, filename, body, params):
     `slotKind` (+ `categoryId`/`segmentId`/`teamId`/`role`) and `autoAssigned`.
     A target the structure does not have (a stale category id) leaves the file
     in the tray rather than failing the upload. A HEIC/HEIF image is stored
-    converted to JPEG (UnreadableImage when it does not decode)."""
+    converted to JPEG (UnreadableImage when it does not decode). An FS Manager
+    participant file — recognised by its content, as the platform does — is
+    stored without its dates of birth (odf_birth_dates.BirthDateError when they
+    cannot be removed, before anything is written)."""
     filename, body = _heif_to_jpeg(filename, body)
+    body = odf_birth_dates.strip_upload(body)
     file_id = st.new_id("file")
     blob_path = f"{folder_path}/uploads/{file_id}_{filename}"
     container = sh.get_container_client()
@@ -954,6 +969,9 @@ def upload_file(req: func.HttpRequest) -> func.HttpResponse:
         return sh.json_response({"fileId": file_id, "file": meta})
     except UnreadableImage:
         return func.HttpResponse("Could not read the image file.", status_code=400)
+    except odf_birth_dates.BirthDateError as e:
+        logging.warning(f"Participant file upload refused: {e}")
+        return _birth_dates_not_removed()
     except Exception as e:
         logging.error(f"Error uploading file: {e}")
         return func.HttpResponse("Internal server error", status_code=500)
@@ -1064,6 +1082,9 @@ def import_platform_file(req: func.HttpRequest) -> func.HttpResponse:
     except UnreadableImage:
         return sh.json_response(
             {"error": "unreadable_image", "message": "Could not read the image file"}, 400)
+    except odf_birth_dates.BirthDateError as e:
+        logging.warning(f"Participant file import refused: {e}")
+        return _birth_dates_not_removed()
     except Exception as e:
         logging.error(f"Error importing platform file: {e}")
         return sh.json_response({"error": "internal_error", "message": "Internal server error"}, 500)
@@ -1232,9 +1253,10 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
       `invalid_source`.
 
     Either way an existing category list is only rebuilt with `force=true`
-    (409 otherwise), the source file is kept as `schedule.xml|pdf`, and the
-    parsed rink/dates auto-fill the event. A pool parse echoes back which pool
-    file it used in `source`."""
+    (409 otherwise), the source file is kept as `schedule.xml|pdf` (an FS Manager
+    participant file only without its dates of birth, else 422
+    `birth_dates_not_removed`), and the parsed rink/dates auto-fill the event.
+    A pool parse echoes back which pool file it used in `source`."""
     caller = _require_user(req)
     if not caller:
         return _unauthorized()
@@ -1272,6 +1294,14 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
             if err:
                 return err
             pool_ref = {"poolName": filename, "source": source}
+
+        # A participant file dropped here by mistake is still never kept with
+        # its dates of birth (a real schedule comes back untouched).
+        try:
+            body = odf_birth_dates.strip_upload(body)
+        except odf_birth_dates.BirthDateError as e:
+            logging.warning(f"Schedule upload refused: {e}")
+            return _birth_dates_not_removed()
 
         # Keep the source schedule (PDF or DT_SCHEDULE XML) for re-parsing.
         is_xml = body[:2000].lstrip()[:5] == b"<?xml" or b"OdfBody" in body[:2000]
@@ -1435,9 +1465,19 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
     newer files. A file this pass did not supply keeps its entry, so the automatic
     re-match after a results upload never makes an older pool file look imported.
     Returns the summary, or None when there is nothing to match (no archived
-    roster, or no teams in the XML)."""
+    roster, or no teams in the XML).
+
+    Whatever XML this call supplies loses its dates of birth first — inline or
+    from the pool (already clean there; stripped again all the same) — and is
+    parsed and archived only in that form. odf_birth_dates.BirthDateError, raised
+    before anything is written, when they cannot be removed (or the file is not
+    XML at all)."""
     auto = teams_xml is None
     fresh_partic = partic_xml is not None
+    if not auto:
+        teams_xml = odf_birth_dates.strip_birth_dates(_as_bytes(teams_xml))
+    if fresh_partic:
+        partic_xml = odf_birth_dates.strip_birth_dates(_as_bytes(partic_xml))
     if auto:
         blob = _roster_blob(container, folder_path, "teams.xml")
         if not blob.exists():
@@ -1590,9 +1630,13 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
                 "No team roster has been imported for this competition yet — select the "
                 "DT_PARTIC_TEAMS file as well, not just DT_PARTIC.", status_code=409)
 
-        summary = _run_roster_match(structure, container, folder_path,
-                                    teams_xml=teams_xml or None, partic_xml=partic_xml or None,
-                                    pool=pool)
+        try:
+            summary = _run_roster_match(structure, container, folder_path,
+                                        teams_xml=teams_xml or None,
+                                        partic_xml=partic_xml or None, pool=pool)
+        except odf_birth_dates.BirthDateError as e:
+            logging.warning(f"Roster import refused: {e}")
+            return _birth_dates_not_removed()
         if summary is None:
             return func.HttpResponse(
                 "No teams found in the DT_PARTIC_TEAMS file — check that it is the team "

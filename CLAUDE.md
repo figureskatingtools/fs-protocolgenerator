@@ -37,7 +37,10 @@ Each competition is a blob folder `"{name}-{id}"` containing:
   (`fileId -> {filename, kind, size, blob}`), and ordered `categories` with slots.
 - `uploads/{fileId}_{filename}` — every uploaded PDF/photo/XML.
 - `schedule.pdf` — the source schedule (kept for re-parsing).
+- `rosters/teams.xml`, `rosters/partic.xml` — the last imported synchro roster pair.
 - `protocols/protocol_*.pdf` — generated outputs.
+
+No XML is stored with a date of birth (see **Dates of birth** below).
 
 A file lives in **at most one slot**; files in no slot are "unassigned" (the UI
 tray). Drag-and-drop = `assign_file`, which clears the file from its old slot and
@@ -309,7 +312,8 @@ open, and the Schedule section offers a "Use it" / "Replace from it" button.
 `import_rosters` takes the synchro roster pair the same way: besides the inline
 `teamsXml`/`particXml` strings, the JSON body may carry `teamsPool`/`particPool`
 = `{name, source: upload|fsm}` (FSM pushes `DT_PARTIC_TEAMS_<code>.xml` and
-`DT_PARTIC_<code>.xml` over HOVTP). Each reference reads through
+`DT_PARTIC_<code>.xml` over HOVTP; both already without birth dates, stripped
+again all the same). Each reference reads through
 `_read_pool_file` with the same JSON errors; inline XML wins over a reference to
 the same file, a reference without a name is 400 `missing_parameter`, and a
 pooled file whose content is not the type it was referenced as
@@ -386,6 +390,28 @@ automatic with body `"autoAssigned": true`.
   and synchro sheets: the place is often glued to the name in layout extraction
   ("1Shadows ETK 69.29 1"), and the nation/club is the last non-numeric column
   (often mixed-case: "KaTa", "SeiTL").
+
+## Dates of birth (`odf_birth_dates.py`)
+
+FS Manager's participant files (`DT_PARTIC`, `DT_PARTIC_TEAMS`, their `_UPDATE`s)
+carry each skater's `BirthDate`; nothing here uses it and the site's privacy
+notice says it is never stored. `odf_birth_dates.py` holds a **byte-identical
+copy** of the site repo's two sections "birth dates out of participant files"
+and "participant files uploaded by users" (`infra/functions/function_app.py`
+there; the HOVTP listener has the first one too) — change the site first, copy
+the sections verbatim; `tests/test_birth_dates.py` pins them by SHA-256 (and
+compares with a site checkout when `FIGURESKATINGTOOLS_SITE` names one). Only
+`BirthDate` attributes/elements go, every other byte stays; a file with none
+comes back as the same bytes. Applied before every write:
+`_register_upload` (`upload_file`, `import_platform_file`) and `parse_schedule`
+via `strip_upload` (by content, like the platform: an `OdfBody` declaring a
+participant type or none; anything else untouched), and `_run_roster_match`
+via `strip_birth_dates` on every roster XML it is handed (inline or pool), which
+is then both parsed and archived under `rosters/` in that form. A file that
+cannot be cleaned (not XML, UTF-16, a strip that would change anything else) is
+**422 `birth_dates_not_removed`** (JSON `{error, message}`, the platform pool's
+code) and nothing is written. Files stored before this rule keep theirs until
+the competition is deleted or the roster re-imported.
 
 ## Output privacy (`image_sanitize.py`, `pdf_sanitize.py`)
 

@@ -18,7 +18,9 @@ page), the tool supplies sensible **defaults/backups** so a protocol can always 
    into slots: category title PDF, podium photo + names, total results PDF, and per segment
    the results / panel-of-judges / judges-details PDFs. Synchronized-skating categories also
    get team cards (org + name, team photo); rosters are imported by selecting both the
-   `DT_PARTIC_TEAMS` and `DT_PARTIC` XML files together (joined on athlete code).
+   `DT_PARTIC_TEAMS` and `DT_PARTIC` XML files together (joined on athlete code). Dates
+   of birth in these files are removed before anything is stored; a file where that
+   cannot be done safely is refused.
 4. **Drag and drop** any uploaded file from one slot to another to fix misplacements; hover a
    file for a preview (photo thumbnail or PDF first-page preview).
 5. **Generate** → one protocol PDF, assembled in canonical order, available via a download link.
