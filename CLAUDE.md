@@ -425,9 +425,11 @@ via `strip_upload` (by content, like the platform: an `OdfBody` declaring a
 participant type or none; anything else untouched), and `_run_roster_match`
 via `strip_birth_dates` on every roster XML it is handed (inline or pool), which
 is then both parsed and archived under `rosters/` in that form. A file that
-cannot be cleaned (not XML, UTF-16, a strip that would change anything else) is
-**422 `birth_dates_not_removed`** (JSON `{error, message}`, the platform pool's
-code) and nothing is written. Files stored before this rule keep theirs until
+cannot be cleaned (not XML, UTF-16, a DTD, a strip that would change anything
+else) is **422 `birth_dates_not_removed`**, and so is an XML-like upload (BOM/NUL/
+whitespace, then `<`) whose root tag does not parse and a file that is neither
+XML-like nor PDF yet names `birthdate` (JSON `{error, message}`, the platform
+pool's code); nothing is written. Files stored before this rule keep theirs until
 the competition is deleted or the roster re-imported.
 
 ## Output privacy (`image_sanitize.py`, `pdf_sanitize.py`)

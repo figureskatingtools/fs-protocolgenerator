@@ -19,7 +19,6 @@ content, like the platform's uploads) and the roster XML `import_rosters`
 archives under `rosters/` (every one of those, whatever it declares). Only the
 birth-date attributes and elements go; every other byte stays as it arrived.
 """
-import io
 import re
 import xml.etree.ElementTree as ET
 
@@ -56,6 +55,25 @@ _XML_ATTRIBUTE_RE = re.compile(rb"\s+(?P<name>[^\s=/>]+)\s*=\s*(?:\"[^\"]*\"|'[^
 
 class BirthDateError(ValueError):
     """A participant file whose birth dates could not be removed safely."""
+
+
+class _NoDtdTreeBuilder(ET.TreeBuilder):
+    """ET's tree builder, except that a DOCTYPE stops the parse. An entity
+    declared in a DTD keeps its value in the declaration — `BirthDate="&dob;"`
+    with `<!ENTITY dob "2012-03-04">` would leave the date there once the
+    attribute is gone — and FS Manager never sends one, so a participant file
+    with a DTD (internal subset or external) is refused outright. That also
+    keeps entity expansion out of the files we store."""
+
+    def doctype(self, name, pubid, system):
+        raise BirthDateError("the file declares a DTD")
+
+
+def _parse_xml(data: bytes):
+    """ET.fromstring, but BirthDateError for a document with a DTD."""
+    parser = ET.XMLParser(target=_NoDtdTreeBuilder())
+    parser.feed(data)
+    return parser.close()
 
 
 def _is_birth_date_name(name) -> bool:
@@ -126,11 +144,12 @@ def strip_birth_dates(data: bytes) -> bytes:
     """
     `data` without its birth dates. A file without any comes back as the very
     same bytes. Raises BirthDateError — and the caller must then store nothing —
-    when `data` is not XML, or when the result would not parse, would still hold
-    a birth date, or would differ from the original in anything else.
+    when `data` is not XML or declares a DTD, or when the result would not
+    parse, would still hold a birth date, or would differ from the original in
+    anything else.
     """
     try:
-        original = ET.fromstring(data)
+        original = _parse_xml(data)
     except ET.ParseError:
         raise BirthDateError("not valid XML")
     if not _has_birth_date(original):
@@ -138,7 +157,7 @@ def strip_birth_dates(data: bytes) -> bytes:
 
     stripped = _remove_birth_date_markup(data)
     try:
-        result = ET.fromstring(stripped)
+        result = _parse_xml(stripped)
     except ET.ParseError:
         raise BirthDateError("the stripped file is not valid XML")
     if _has_birth_date(result):
@@ -150,22 +169,68 @@ def strip_birth_dates(data: bytes) -> bytes:
 
 # ── participant files uploaded by users ───────────────────────────────────────
 
-def _odf_document_type(data: bytes):
-    """An ODF file's declared `DocumentType` (upper-cased, "" if it declares
-    none), or None when `data` does not open with an `OdfBody` root. Reads only
-    as far as the root's start tag, so a PDF or an image fails on its first byte.
-    """
-    try:
-        for _event, element in ET.iterparse(io.BytesIO(data), events=("start",)):
-            if not isinstance(element.tag, str) or element.tag.rsplit("}", 1)[-1] != "OdfBody":
-                return None
-            for key, value in element.attrib.items():
-                if key.rsplit("}", 1)[-1] == "DocumentType":
-                    return (value or "").strip().upper()
-            return ""
-    except (ET.ParseError, ValueError):
+# What may come before an XML document's first '<': the bytes of a byte-order
+# mark (UTF-8, UTF-16, UTF-32), the NULs UTF-16/32 pad ASCII with, and whitespace.
+_XML_LEADING_BYTES = b"\xef\xbb\xbf\xfe\xff\x00 \t\r\n"
+# `birthdate`, any case, as it would appear in a file in each encoding XML allows.
+_BIRTH_DATE_TOKENS = tuple("birthdate".encode(codec) for codec in
+                           ("ascii", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"))
+
+
+class _RootStartTag(Exception):
+    """Raised by _RootReader with the root's (tag, attrib): all we need to know."""
+
+
+class _RootReader:
+    """XMLParser target that stops the parse at the root's start tag."""
+
+    def start(self, tag, attrib):
+        raise _RootStartTag(tag, attrib)
+
+    def close(self):
         return None
-    return None
+
+
+def _looks_like_xml(data: bytes) -> bool:
+    """XML-like: after any byte-order mark, NUL padding and whitespace, the
+    first byte is '<'. Every file an XML parser (and so a tool) could read as
+    a document is XML-like; a PDF or an image never is."""
+    return data.lstrip(_XML_LEADING_BYTES)[:1] == b"<"
+
+
+def _looks_like_pdf(data: bytes) -> bool:
+    """A PDF header within the first 1024 bytes, where PDF readers look for it."""
+    return b"%PDF-" in data[:1024]
+
+
+def _mentions_birth_date(data: bytes) -> bool:
+    lowered = data.lower()
+    return any(token in lowered for token in _BIRTH_DATE_TOKENS)
+
+
+def _odf_document_type(data: bytes):
+    """An XML-like file's declared `DocumentType` (upper-cased, "" if it
+    declares none), or None when its root is not `OdfBody`. Reads only as far
+    as the root's start tag. Raises BirthDateError when that much does not
+    parse (a broken root tag, a newline before the XML declaration): such a
+    file could be a participant file, and nothing can tell.
+    """
+    parser = ET.XMLParser(target=_RootReader())
+    try:
+        parser.feed(data)
+        parser.close()
+    except _RootStartTag as found:
+        tag, attrib = found.args
+    except (ET.ParseError, ValueError, LookupError):
+        raise BirthDateError("an XML file whose root does not parse")
+    else:
+        raise BirthDateError("an XML file without a root element")
+    if not isinstance(tag, str) or tag.rsplit("}", 1)[-1] != "OdfBody":
+        return None
+    for key, value in attrib.items():
+        if key.rsplit("}", 1)[-1] == "DocumentType":
+            return (value or "").strip().upper()
+    return ""
 
 
 def _strip_upload_birth_dates(body: bytes) -> bytes:
@@ -174,9 +239,15 @@ def _strip_upload_birth_dates(body: bytes) -> bytes:
     loses its birth dates before it is stored. Recognised by its content, not
     its name — an ODF file declaring a participant DocumentType, or declaring
     none at all (the tools recognise a roster by its shape then). Anything else
-    is returned untouched. Raises BirthDateError (store nothing) when a
-    participant file cannot be cleaned.
+    that parses is returned untouched, and so is a file that is not XML-like
+    (a PDF, an image) unless it is no PDF and still names a birth date. Raises
+    BirthDateError (store nothing) when a participant file cannot be cleaned,
+    when an XML-like file cannot be classified, and for that last case.
     """
+    if not _looks_like_xml(body):
+        if not _looks_like_pdf(body) and _mentions_birth_date(body):
+            raise BirthDateError("a file that is neither XML nor PDF names a birth date")
+        return body
     document_type = _odf_document_type(body)
     if document_type is None:
         return body
@@ -190,5 +261,7 @@ def _strip_upload_birth_dates(body: bytes) -> bytes:
 def strip_upload(body: bytes) -> bytes:
     """An uploaded file as the platform would store it: a participant file
     (recognised by content) without its birth dates, anything else untouched.
-    Raises BirthDateError when a participant file cannot be cleaned."""
+    Raises BirthDateError when a participant file cannot be cleaned, when an
+    XML-like file cannot be classified, or when a file that is neither XML nor
+    PDF names a birth date."""
     return _strip_upload_birth_dates(body)

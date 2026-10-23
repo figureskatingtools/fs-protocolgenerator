@@ -169,6 +169,17 @@ DT_PARTIC_UTF16_BIRTHDATES_BODY = (
 # A participant file cut short: not XML, so its birth dates cannot be removed.
 BROKEN_PARTIC = DT_PARTIC_BIRTHDATES_BODY.replace(b"</Competition>", b"</Competitio>")
 PDF = b"%PDF-1.4\n% BirthDate=\"2012-03-04\"\n%%EOF"
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00"
+# An entity keeps the date in its declaration once the attribute is gone.
+DTD_PARTIC = DT_PARTIC_BIRTHDATES_BODY.replace(
+    b'?>\n', b'?>\n<!DOCTYPE OdfBody [<!ENTITY dob "2012-03-04">]>\n', 1
+).replace(b'BirthDate="2012-03-04"', b'BirthDate="&dob;"')
+# The root tag, where the type is read from, does not parse: could be anything.
+BROKEN_ROOT_AMPERSAND = DT_PARTIC_BIRTHDATES_BODY.replace(b"<OdfBody ", b'<OdfBody Note="a & b" ')
+BROKEN_ROOT_ATTRIBUTE = DT_PARTIC_BIRTHDATES_BODY.replace(b"<OdfBody ", b"<OdfBody BROKEN ")
+NEWLINE_FIRST = b"\n" + DT_PARTIC_BIRTHDATES_BODY
+UNREADABLE = [DTD_PARTIC, BROKEN_ROOT_AMPERSAND, BROKEN_ROOT_ATTRIBUTE, NEWLINE_FIRST,
+              BROKEN_PARTIC]
 
 
 def _payload(response):
@@ -197,6 +208,8 @@ def pool(monkeypatch):
         "p-1/uploads/DT_PARTIC.xml": DT_PARTIC_BIRTHDATES_BODY,
         "p-1/fsm/DT_PARTIC_TEAMS.xml": DT_PARTIC_TEAMS_BIRTHDATES_BODY,
         "p-1/uploads/utf16.xml": DT_PARTIC_UTF16_BIRTHDATES_BODY,
+        "p-1/uploads/dtd.xml": DTD_PARTIC,
+        "p-1/uploads/broken-root.xml": BROKEN_ROOT_ATTRIBUTE,
     })
     monkeypatch.setattr(sh, "get_platform_container_client", lambda: fake)
     return fake
@@ -242,10 +255,10 @@ def rosters(storage):
 # ── the copy is the site's ────────────────────────────────────────────────────
 
 # SHA-256 of the two sections as they stand in figureskatingtools-site
-# infra/functions/function_app.py (commit 0d3488c). After a change there, copy
+# infra/functions/function_app.py (commit 1097e39). After a change there, copy
 # them over verbatim, check with FIGURESKATINGTOOLS_SITE=<site checkout> (the
 # second test), and put the digest the first test then reports here.
-SITE_SECTIONS_SHA256 = "3918c36f413c38db2fdfaac7496879de5449cd0a627b35fcabd0372b5fb51a81"
+SITE_SECTIONS_SHA256 = "6c7633c4077b612cadefd857eaa0a352ce7b4592f9854c5941cd1b977ef7e3f6"
 
 
 def shared_sections(text: str) -> str:
@@ -315,10 +328,33 @@ def test_participant_uploads_are_recognised_by_content(declared, replacement):
     assert obd.strip_upload(body) == DT_PARTIC_BIRTHDATES_STRIPPED.replace(declared, replacement)
 
 
-@pytest.mark.parametrize("body", [DT_PARTIC_UTF16_BIRTHDATES_BODY, BROKEN_PARTIC])
+@pytest.mark.parametrize("body", [DT_PARTIC_UTF16_BIRTHDATES_BODY, *UNREADABLE])
 def test_a_participant_file_that_cannot_be_cleaned_raises(body):
     with pytest.raises(obd.BirthDateError):
         obd.strip_upload(body)
+
+
+def test_a_dtd_is_refused_by_the_roster_strip_too():
+    with pytest.raises(obd.BirthDateError, match="DTD"):
+        obd.strip_birth_dates(DTD_PARTIC)
+
+
+@pytest.mark.parametrize("body", [
+    b'x<OdfBody><P BIRTHDATE="2012-03-04"/></OdfBody>',
+    JPEG + "birthDate".encode("utf-16-le"),
+])
+def test_a_file_neither_xml_nor_pdf_that_names_a_birth_date_raises(body):
+    with pytest.raises(obd.BirthDateError):
+        obd.strip_upload(body)
+
+
+@pytest.mark.parametrize("body", [
+    b"\xef\xbb\xbf" + DT_SCHEDULE_WITH_BIRTHDATE_BODY,
+    b"\r\n <Root/>",
+    JPEG,
+])
+def test_a_bom_whitespace_or_an_image_is_still_untouched(body):
+    assert obd.strip_upload(body) is body
 
 
 def test_the_parsers_read_the_stripped_files_exactly_as_the_originals():
@@ -367,7 +403,7 @@ def test_uploads_without_birth_dates_or_not_participant_files_are_stored_as_sent
     assert stored == sent
 
 
-@pytest.mark.parametrize("body", [DT_PARTIC_UTF16_BIRTHDATES_BODY, BROKEN_PARTIC])
+@pytest.mark.parametrize("body", [DT_PARTIC_UTF16_BIRTHDATES_BODY, *UNREADABLE])
 def test_an_upload_that_cannot_be_cleaned_stores_nothing(comp, storage, body):
     response = upload("DT_PARTIC.xml", body)
 
@@ -385,8 +421,9 @@ def test_a_pool_import_is_stripped_too(comp, storage, pool):
     assert list(uploads(storage).values()) == [DT_PARTIC_BIRTHDATES_STRIPPED]
 
 
-def test_a_pool_file_that_cannot_be_cleaned_is_not_imported(comp, storage, pool):
-    _refused(import_platform_file("utf16.xml"))
+@pytest.mark.parametrize("name", ["utf16.xml", "dtd.xml", "broken-root.xml"])
+def test_a_pool_file_that_cannot_be_cleaned_is_not_imported(comp, storage, pool, name):
+    _refused(import_platform_file(name))
     assert storage.container.blobs == {}
     assert comp.get("files", {}) == {}
 
@@ -432,6 +469,14 @@ def test_a_roster_whose_birth_dates_cannot_be_removed_stores_nothing(comp, stora
     assert comp["categories"][0]["teams"] == []
 
 
+@pytest.mark.parametrize("partic", UNREADABLE)
+def test_a_roster_with_a_dtd_or_a_broken_header_stores_nothing(comp, storage, partic):
+    _refused(import_rosters(teamsXml=DT_PARTIC_TEAMS_BIRTHDATES_BODY.decode(),
+                            particXml=partic.decode()))
+    assert storage.container.blobs == {}
+    assert comp["categories"][0]["teams"] == []
+
+
 def test_a_strip_that_would_change_anything_else_stores_nothing(comp, storage, monkeypatch):
     """The re-parse check, through the route: a broken removal is refused."""
     real = obd._remove_birth_date_markup
@@ -451,10 +496,11 @@ def test_a_participant_file_dropped_as_the_schedule_is_kept_without_birth_dates(
     assert storage.container.blobs[f"{FOLDER}/schedule.xml"] == DT_PARTIC_BIRTHDATES_STRIPPED
 
 
-def test_a_schedule_upload_that_cannot_be_cleaned_keeps_nothing(storage):
+@pytest.mark.parametrize("body", UNREADABLE)
+def test_a_schedule_upload_that_cannot_be_cleaned_keeps_nothing(storage, body):
     storage.competition()
 
-    _refused(parse_schedule(BROKEN_PARTIC))
+    _refused(parse_schedule(body))
     assert storage.container.blobs == {}
 
 
