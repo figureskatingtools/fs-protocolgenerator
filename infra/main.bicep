@@ -26,6 +26,11 @@ param proxySharedSecret string = ''
 param platformStorageAccountName string = ''
 param platformDataContainerName string = 'competition-data'
 
+// Nightly orphan step: true = delete orphaned records older than 60 days,
+// false = dry run (logs only) — the kill switch (GitHub variable
+// ORPHAN_PURGE_ENABLED=false). See modules/function.bicep.
+param orphanPurgeEnabled bool = true
+
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
   name: resourceGroupName
   location: location
@@ -49,11 +54,14 @@ module function 'modules/function.bicep' = {
     functionAppName: 'func-fs-protocols-${uniqueString(rg.id)}'
     appServicePlanName: 'asp-fs-protocols'
     appInsightsName: 'ai-fs-protocols'
+    // rg-fs-protocols-<env> -> log-fs-protocols-<env>
+    logAnalyticsWorkspaceName: 'log-fs-protocols-${last(split(resourceGroupName, '-'))}'
     storageAccountName: storage.outputs.storageAccountName
     deploymentContainerUrl: 'https://${storage.outputs.storageAccountName}.blob.${environment().suffixes.storage}/app-package'
     proxySharedSecret: proxySharedSecret
     platformStorageAccountName: platformStorageAccountName
     platformDataContainerName: platformDataContainerName
+    orphanPurgeEnabled: orphanPurgeEnabled
   }
 }
 
@@ -68,6 +76,7 @@ module roleAssignment 'modules/roleassignment.bicep' = {
 
 output resourceGroupName string = rg.name
 output storageAccountName string = storage.outputs.storageAccountName
+output orphanPurgeEnabled bool = orphanPurgeEnabled
 output functionAppName string = function.outputs.functionAppName
 // Consumed by the site repo (TOOL_PRINCIPAL_ID_PROTOCOLGENERATOR) to grant this
 // Function App read access to the shared competition-data container.
