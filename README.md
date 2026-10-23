@@ -84,7 +84,9 @@ python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 Pushing to `main` deploys prod via `.github/workflows/deploy.yml`; `test` is deployed by
 manual `workflow_dispatch`. The workflow has two jobs — infrastructure (Bicep) and backend
 (zip deploy); the backend job runs the pytest suite before packaging, so a red suite blocks
-the deploy. Manual equivalents: `deploy_infra.sh`, `deploy_backend.sh`. Both the **test** and
+the deploy. Manual equivalents: `deploy_infra.sh -g <resource-group> [--proxy-secret <SECRET>]
+[--orphan-purge true|false]` (without `--orphan-purge` it keeps the Function App's current
+`ORPHAN_PURGE_ENABLED`, or deploys `false` (dry run) when it can't read it) and `deploy_backend.sh`. Both the **test** and
 **prod** environments are live. See `CLAUDE.md` for the full architecture.
 
 ## Licence

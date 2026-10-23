@@ -531,7 +531,11 @@ Push to `main` → prod via `.github/workflows/deploy.yml`; `test` via manual
 on `infra/main.bicep`, params `resourceGroupName` + `proxySharedSecret`) and
 **deploy-backend** (run the pytest suite, then zip +
 `az functionapp deployment source config-zip`). Manual equivalents:
-`deploy_infra.sh`, `deploy_backend.sh`. deploy-backend runs
+`deploy_infra.sh -g <resource-group> [--proxy-secret <SECRET>]
+[--orphan-purge true|false]` (without `--orphan-purge` it keeps the Function
+App's current `ORPHAN_PURGE_ENABLED`, or deploys `false` (dry run) when it
+can't read it — never the Bicep default `true`), `deploy_backend.sh`.
+deploy-backend runs
 `python -m pytest tests -q` *before* packaging, so a red suite blocks the zip
 deploy.
 
