@@ -23,7 +23,9 @@ Function App with `x-proxy-secret` + `x-forwarded-user-tid`/`-oid`/`-email`/`-na
 - **Hosting** — Flex-Consumption Function App only (no Web App, no Easy Auth
   provider, no DNS/custom domain in this repo). IaC in `infra/`
   (subscription-scoped Bicep: `modules/storage.bicep`, `modules/function.bicep`,
-  `modules/roleassignment.bicep`).
+  `modules/roleassignment.bicep`). App Insights writes to its own Log Analytics
+  workspace `log-fs-protocols-<env>`; both keep logs **90 days**
+  (`logRetentionDays`).
 - **Frontend (elsewhere)** — vanilla TypeScript + Vite, `site/src/protocolgenerator/`
   in `figureskatingtools-site`.
 
@@ -37,7 +39,10 @@ Each competition is a blob folder `"{name}-{id}"` containing:
   (`fileId -> {filename, kind, size, blob}`), and ordered `categories` with slots.
 - `uploads/{fileId}_{filename}` — every uploaded PDF/photo/XML.
 - `schedule.pdf` — the source schedule (kept for re-parsing).
+- `rosters/teams.xml`, `rosters/partic.xml` — the last imported synchro roster pair.
 - `protocols/protocol_*.pdf` — generated outputs.
+
+No XML is stored with a date of birth (see **Dates of birth** below).
 
 A file lives in **at most one slot**; files in no slot are "unassigned" (the UI
 tray). Drag-and-drop = `assign_file`, which clears the file from its old slot and
@@ -260,16 +265,31 @@ included. One table client per request or sweep (`_platform_table()`, passed as
 - The **04:00 UTC** timer (`_run_auto_delete`, after the platform's 03:00 sweep)
   deletes a bound record's data **only on the platform's verdict**
   (`platform_says_delete`: `Status == "deleted"` or `PurgedUtc`) — never on a date
-  alone (the platform may be in dry-run, or the competition just extended). No
-  clock row means keep + `logging.warning`; a platform that **cannot be read, or
-  `PLATFORM_STORAGE_ACCOUNT` unset, means skip + `logging.error`** — never delete.
-  Legacy rows with no `PlatformId` go on their stored date (`ensure_deletion_date`
-  backfills `LEGACY_DELETION_DATE` for those only).
+  alone (the platform may be in dry-run, or the competition just extended). A
+  platform that **cannot be read, or `PLATFORM_STORAGE_ACCOUNT` unset, means skip
+  + `logging.error`** — never delete. Legacy rows with no `PlatformId` go on their
+  stored date (`ensure_deletion_date` backfills `LEGACY_DELETION_DATE` for those
+  only).
+- **Orphans** (no platform competition can decide about them): a live record
+  with no `PlatformId` (or a non-GUID one, or no `FolderPath`), or whose clock
+  row a *successful* read did not find, is deleted by `_delete_competition_data`
+  (`auto-cleanup`, `CreatedBy` blanked, the row kept as history) once it is
+  **more than 60 days old** — `CreatedDate`, else the Table `Timestamp`
+  (`platform_clock.record_age_reference`); younger orphans are kept with a
+  warning, and a read error is never "not found" (skipped). Rails: one probe of
+  the clock table per run (`platform_clock.orphan_sweep_allowed`) — unreadable,
+  unconfigured, or **zero rows while records are bound** (wrong table/account)
+  aborts the orphan step for that run (`logging.error`); `ORPHAN_PURGE_ENABLED`
+  (Bicep param `orphanPurgeEnabled`, default on; GitHub var
+  `ORPHAN_PURGE_ENABLED=false` is the kill switch) off → it only logs "would
+  delete". `_run_auto_delete` logs and returns the run's counts (`deleted`,
+  `skipped`, `failed`, `orphaned`, `orphan_kept`, `orphan_dry_run`,
+  `orphan_skipped`).
 - No e-mail address outlives the data: `_delete_competition_data` merges
   `CreatedBy=""` and `DeletedBy="user"|"auto-cleanup"`, and every nightly run ends
   with `_scrub_hidden_rows`, which blanks `CreatedBy`/`DeletedBy` on soft-deleted rows
   deleted before that rule. Logs carry no addresses (nor fallback-photo or pool
-  filenames). Covered by `tests/test_platform_clock.py`.
+  filenames) and are kept 90 days. Covered by `tests/test_platform_clock.py`.
 
 ### Shared competition file pool + auto-assignment
 
@@ -309,7 +329,8 @@ open, and the Schedule section offers a "Use it" / "Replace from it" button.
 `import_rosters` takes the synchro roster pair the same way: besides the inline
 `teamsXml`/`particXml` strings, the JSON body may carry `teamsPool`/`particPool`
 = `{name, source: upload|fsm}` (FSM pushes `DT_PARTIC_TEAMS_<code>.xml` and
-`DT_PARTIC_<code>.xml` over HOVTP). Each reference reads through
+`DT_PARTIC_<code>.xml` over HOVTP; both already without birth dates, stripped
+again all the same). Each reference reads through
 `_read_pool_file` with the same JSON errors; inline XML wins over a reference to
 the same file, a reference without a name is 400 `missing_parameter`, and a
 pooled file whose content is not the type it was referenced as
@@ -386,6 +407,30 @@ automatic with body `"autoAssigned": true`.
   and synchro sheets: the place is often glued to the name in layout extraction
   ("1Shadows ETK 69.29 1"), and the nation/club is the last non-numeric column
   (often mixed-case: "KaTa", "SeiTL").
+
+## Dates of birth (`odf_birth_dates.py`)
+
+FS Manager's participant files (`DT_PARTIC`, `DT_PARTIC_TEAMS`, their `_UPDATE`s)
+carry each skater's `BirthDate`; nothing here uses it and the site's privacy
+notice says it is never stored. `odf_birth_dates.py` holds a **byte-identical
+copy** of the site repo's two sections "birth dates out of participant files"
+and "participant files uploaded by users" (`infra/functions/function_app.py`
+there; the HOVTP listener has the first one too) — change the site first, copy
+the sections verbatim; `tests/test_birth_dates.py` pins them by SHA-256 (and
+compares with a site checkout when `FIGURESKATINGTOOLS_SITE` names one). Only
+`BirthDate` attributes/elements go, every other byte stays; a file with none
+comes back as the same bytes. Applied before every write:
+`_register_upload` (`upload_file`, `import_platform_file`) and `parse_schedule`
+via `strip_upload` (by content, like the platform: an `OdfBody` declaring a
+participant type or none; anything else untouched), and `_run_roster_match`
+via `strip_birth_dates` on every roster XML it is handed (inline or pool), which
+is then both parsed and archived under `rosters/` in that form. A file that
+cannot be cleaned (not XML, UTF-16, a DTD, a strip that would change anything
+else) is **422 `birth_dates_not_removed`**, and so is an XML-like upload (BOM/NUL/
+whitespace, then `<`) whose root tag does not parse and a file that is neither
+XML-like nor PDF yet names `birthdate` (JSON `{error, message}`, the platform
+pool's code); nothing is written. Files stored before this rule keep theirs until
+the competition is deleted or the roster re-imported.
 
 ## Output privacy (`image_sanitize.py`, `pdf_sanitize.py`)
 
@@ -488,7 +533,11 @@ Push to `main` → prod via `.github/workflows/deploy.yml`; `test` via manual
 on `infra/main.bicep`, params `resourceGroupName` + `proxySharedSecret`) and
 **deploy-backend** (run the pytest suite, then zip +
 `az functionapp deployment source config-zip`). Manual equivalents:
-`deploy_infra.sh`, `deploy_backend.sh`. deploy-backend runs
+`deploy_infra.sh -g <resource-group> [--proxy-secret <SECRET>]
+[--orphan-purge true|false]` (without `--orphan-purge` it keeps the Function
+App's current `ORPHAN_PURGE_ENABLED`, or deploys `false` (dry run) when it
+can't read it — never the Bicep default `true`), `deploy_backend.sh`.
+deploy-backend runs
 `python -m pytest tests -q` *before* packaging, so a red suite blocks the zip
 deploy.
 
@@ -511,7 +560,8 @@ deploys prod — dispatch its branch to `test` first when the update is risky.
 
 Required GitHub environment config: secrets `AZURE_CLIENT_ID`,
 `PROXY_SHARED_SECRET`; vars `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`,
-`LOCATION`, `RESOURCE_GROUP_NAME`, plus optional `PLATFORM_STORAGE_ACCOUNT` (the
+`LOCATION`, `RESOURCE_GROUP_NAME`, optional `ORPHAN_PURGE_ENABLED` (`false` =
+the nightly orphan step only logs; unset = on), plus optional `PLATFORM_STORAGE_ACCOUNT` (the
 site repo's `stfsplat*` account for this environment — unset leaves
 `import_platform_file` off, **stops auto-deletion of every bound competition**
 (logged as an error each night) and makes every non-admin competition request a
