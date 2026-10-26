@@ -9,4 +9,4 @@
 pytest~=9.1
 # Independent PDF inspector (qpdf) for tests/test_pdf_privacy.py — test-only, so
 # the privacy checks do not trust the very library (pypdf) that wrote the file.
-pikepdf~=10.16
+pikepdf~=10.17
