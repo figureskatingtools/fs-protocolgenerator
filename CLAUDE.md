@@ -40,7 +40,15 @@ Each competition is a blob folder `"{name}-{id}"` containing:
 - `uploads/{fileId}_{filename}` — every uploaded PDF/photo/XML.
 - `schedule.pdf` — the source schedule (kept for re-parsing).
 - `rosters/teams.xml`, `rosters/partic.xml` — the last imported synchro roster pair.
-- `protocols/protocol_*.pdf` — generated outputs.
+- `protocols/<code>_protocol.pdf` — the generated protocol, named FS Manager
+  style after the platform's competition code (the record's `Code`, sent by the
+  site on `resolve_competition`; the cleaned competition name while there is
+  none — `sh.protocol_file_name`). No timestamp in the name: regenerating
+  replaces the file. The listing reads `size` and `generatedAt` (shown as a tag
+  in the UI) from the blob's own properties (`sh.protocol_blob_facts`), never
+  from the row: two overlapping generations race on the one blob, and only its
+  size and Last-Modified are guaranteed to match the bytes behind the link.
+  Older `protocol_<name>_<stamp>.pdf` outputs stay listed until deleted.
 
 No XML is stored with a date of birth (see **Dates of birth** below).
 
@@ -150,7 +158,9 @@ the `id` query param or a JSON body `{"id"}`), `resolve_competition` — the onl
 route that creates a competition, always bound to a platform one (platform
 competition GUID → tool record: `PlatformId` lookup → create; an unbound record
 is **never adopted by name** any more — that let anyone claim another user's
-record; soft-deleted rows are never resurrected;
+record; soft-deleted rows are never resurrected; optional `code` — the
+platform's competition code — is stored as `Code` on create and followed by a
+writer's hit (`_sync_competition_code`; an empty one never clears it);
 optional `dates`/`venue` seed `event.dates` (dd.MM.yyyy, marked
 `event.datesAuto` so a schedule parse may refine it until the user saves the
 event form) and `event.rink` — create seeds, a writer's hit backfills empty

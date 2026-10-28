@@ -446,9 +446,10 @@ def test_mixed_case_ids_still_match_the_grant(world, platform):
 
 # ── resolve_competition ───────────────────────────────────────────────────────
 
-def resolve(headers, platform_id=PID, name="Spring Trophy 2026", dates="", venue=""):
+def resolve(headers, platform_id=PID, name="Spring Trophy 2026", dates="", venue="", code=""):
     req = _req("POST", "resolve_competition", headers,
-               body={"platformId": platform_id, "name": name, "dates": dates, "venue": venue})
+               body={"platformId": platform_id, "name": name, "dates": dates, "venue": venue,
+                     "code": code})
     return fa.resolve_competition._function.get_user_function()(req)
 
 
@@ -483,7 +484,7 @@ def test_resolve_with_a_read_grant_never_renames_or_backfills(empty, platform):
     platform.grant("read")
     before = snapshot_resolve(empty)
     body = json.loads(resolve(user(), name="Renamed By Viewer", dates="2026-05-01",
-                              venue="Somewhere").get_body())
+                              venue="Somewhere", code="viewer-code").get_body())
     assert (body["id"], body["name"], body["created"]) == (COMP, "Spring Trophy 2026", False)
     assert snapshot_resolve(empty) == before
 

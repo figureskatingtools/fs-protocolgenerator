@@ -178,6 +178,17 @@ def sanitize_name(name: str) -> str:
     return "".join([c for c in name if c.isalnum() or c in (' ', '-', '_')]).strip()
 
 
+MAX_CODE_LENGTH = 64   # the platform's own cap on a competition code
+
+
+def sanitize_code(code) -> str:
+    """The platform's competition code (already a slug there, e.g.
+    'winter-cup-2026'), made safe for a file name; '' when none."""
+    if not isinstance(code, str):
+        return ""
+    return sanitize_name(code).replace(" ", "-")[:MAX_CODE_LENGTH].strip("-_")
+
+
 def generate_competition_id(comp_table) -> str:
     for _ in range(5):
         cid = uuid4().hex[:8]
@@ -308,9 +319,38 @@ def protocol_blob_name(folder_path: str, file_name: str) -> str:
     return f"{folder_path}/protocols/{os.path.basename(file_name or '')}"
 
 
+def protocol_file_name(code, name) -> str:
+    """`<competition code>_protocol.pdf`, the way FS Manager names its files —
+    the cleaned competition name while the record has no code. The same for
+    every generation of one competition, so regenerating replaces the PDF."""
+    stem = (sanitize_code(code)
+            or sanitize_name(name or "").replace(" ", "_")
+            or "competition")
+    return f"{stem}_protocol.pdf"
+
+
+def protocol_blob_facts(container, blob_names):
+    """`{blob name: (size, last-modified ISO UTC)}`, read from each protocol
+    blob itself. The name is fixed per competition, so two overlapping
+    generations race on one blob; the blob's size and Last-Modified change
+    atomically with its bytes, whereas a table row written afterwards could
+    describe the run that lost. A blob that cannot be read is left out."""
+    facts = {}
+    for name in blob_names:
+        try:
+            props = container.get_blob_client(name).get_blob_properties()
+            facts[name] = (props.size, props.last_modified.astimezone(timezone.utc)
+                           .strftime("%Y-%m-%dT%H:%M:%SZ"))
+        except Exception as e:
+            logging.warning(f"Could not read protocol blob properties: {type(e).__name__}")
+    return facts
+
+
 def record_generated_protocol(competition, filename, file_size=0):
-    """List a freshly generated protocol for `get_competition_details`. Stores
-    no link: those are minted per request (`mint_read_urls`)."""
+    """List a freshly generated protocol for `get_competition_details` — the
+    row is only its index: size and time come from the blob
+    (`protocol_blob_facts`). Stores no link: those are minted per request
+    (`mint_read_urls`)."""
     try:
         table_client = get_table_client()
         if not table_client:

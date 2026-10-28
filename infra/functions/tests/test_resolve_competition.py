@@ -115,10 +115,12 @@ def table(monkeypatch):
 
 
 def resolve(platform_id=P1, name="Spring Trophy 2026", dates="2026-05-01",
-            email="organizer@example.com", venue=None):
+            email="organizer@example.com", venue=None, code=None):
     body = {"platformId": platform_id, "name": name, "dates": dates}
     if venue is not None:
         body["venue"] = venue
+    if code is not None:
+        body["code"] = code
     req = func.HttpRequest(
         "POST", "/api/resolve_competition",
         headers=auth_headers(email) if email else {},
@@ -333,6 +335,28 @@ def test_a_competition_without_metadata_still_binds(table):
     table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1)
     assert payload(resolve(venue="Vierumäki Ice Hall"))["id"] == "abc12345"
     assert table.writes == []
+
+
+# ── the platform's competition code (names the protocol PDF) ─────────────────
+
+def test_a_new_record_stores_the_platform_code(table):
+    created = payload(resolve(code="spring-trophy-2026"))
+    assert table.rows[created["id"]]["Code"] == "spring-trophy-2026"
+
+
+def test_a_hit_follows_a_changed_code(table):
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1,
+                                    Code="old-code")
+    resolve(code="spring-trophy-2026")
+    assert table.rows["abc12345"]["Code"] == "spring-trophy-2026"
+
+
+def test_a_resolve_without_a_code_keeps_the_stored_one(table):
+    table.rows["abc12345"] = entity("abc12345", "Spring Trophy 2026", PlatformId=P1,
+                                    Code="spring-trophy-2026")
+    resolve()
+    assert table.rows["abc12345"]["Code"] == "spring-trophy-2026"
+    assert table.updates == []
 
 
 # ── platform rename follows through on a hit ─────────────────────────────────
