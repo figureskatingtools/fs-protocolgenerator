@@ -3,10 +3,13 @@ way the Functions host loads them, so the function app's directory has to be on
 sys.path for the tests to import them the same way."""
 import os
 import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+from azure.core.exceptions import ResourceNotFoundError
 
 import platform_access as pa
 import storage_helpers as sh
@@ -89,9 +92,10 @@ class FakeDownload:
 
 
 class FakeBlobClient:
-    def __init__(self, blobs, path):
+    def __init__(self, blobs, path, modified=None):
         self._blobs = blobs
         self._path = path
+        self._modified = modified if modified is not None else {}
 
     def exists(self):
         return self._path in self._blobs
@@ -99,20 +103,29 @@ class FakeBlobClient:
     def download_blob(self):
         return FakeDownload(self._blobs[self._path])
 
+    def get_blob_properties(self):
+        if self._path not in self._blobs:
+            raise ResourceNotFoundError(self._path)
+        return SimpleNamespace(size=len(self._blobs[self._path]),
+                               last_modified=self._modified[self._path])
+
 
 class FakeContainerClient:
     """Just the surface the backend uses: blob path -> bytes."""
 
     def __init__(self, blobs=None):
         self.blobs = dict(blobs or {})
+        # Last-Modified per blob; seeded blobs count as written at the epoch.
+        self.modified = {path: datetime(1970, 1, 1, tzinfo=timezone.utc) for path in self.blobs}
 
     def get_blob_client(self, path):
-        return FakeBlobClient(self.blobs, path)
+        return FakeBlobClient(self.blobs, path, self.modified)
 
     def upload_blob(self, path, data, overwrite=False):
         if path in self.blobs and not overwrite:
             raise RuntimeError(f"blob exists: {path}")
         self.blobs[path] = data if isinstance(data, (bytes, bytearray)) else str(data).encode()
+        self.modified[path] = datetime.now(timezone.utc)
 
     def delete_blob(self, path):
         self.blobs.pop(path, None)

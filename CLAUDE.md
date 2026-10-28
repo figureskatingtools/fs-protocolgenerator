@@ -19,8 +19,7 @@ Function App with `x-proxy-secret` + `x-forwarded-user-tid`/`-oid`/`-email`/`-na
 - **Storage** — Azure Blob (container `fs-protocolgenerator`) holds each
   competition folder; Tables `competitions` (permanent registry, soft-delete) and
   `generatedprotocols` (one row per generated PDF: file name, size,
-  description, `GeneratedAt` — no link; links are minted per request, see
-  **Competition access**).
+  description — no link; links are minted per request, see **Competition access**).
 - **Hosting** — Flex-Consumption Function App only (no Web App, no Easy Auth
   provider, no DNS/custom domain in this repo). IaC in `infra/`
   (subscription-scoped Bicep: `modules/storage.bicep`, `modules/function.bicep`,
@@ -45,9 +44,11 @@ Each competition is a blob folder `"{name}-{id}"` containing:
   style after the platform's competition code (the record's `Code`, sent by the
   site on `resolve_competition`; the cleaned competition name while there is
   none — `sh.protocol_file_name`). No timestamp in the name: regenerating
-  replaces the file, and the time is the row's `GeneratedAt`, returned as
-  `generatedAt` and shown as a tag in the UI. Older `protocol_<name>_<stamp>.pdf`
-  outputs stay listed (with `generatedAt` null) until deleted.
+  replaces the file. The listing reads `size` and `generatedAt` (shown as a tag
+  in the UI) from the blob's own properties (`sh.protocol_blob_facts`), never
+  from the row: two overlapping generations race on the one blob, and only its
+  size and Last-Modified are guaranteed to match the bytes behind the link.
+  Older `protocol_<name>_<stamp>.pdf` outputs stay listed until deleted.
 
 No XML is stored with a date of birth (see **Dates of birth** below).
 

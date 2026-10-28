@@ -174,11 +174,10 @@ def test_the_protocol_is_named_after_the_competition_code(world):
     world.grant("write")
     body = json.loads(generate(user()).get_body())
     assert body["fileName"] == "spring-trophy-2026_protocol.pdf"
-    [(row, _)] = world.generated.upserts
-    assert row["GeneratedAt"] == body["generatedAt"]
-    assert datetime.strptime(body["generatedAt"], "%Y-%m-%dT%H:%M:%SZ")
     [entry] = json.loads(details(user()).get_body())["generatedFiles"]
-    assert (entry["fileName"], entry["generatedAt"]) == (body["fileName"], body["generatedAt"])
+    assert entry["fileName"] == body["fileName"]
+    blob = f"{world.folder}/protocols/{body['fileName']}"
+    assert entry["generatedAt"] == world.container.modified[blob].strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_regenerating_replaces_the_protocol(world):
@@ -191,6 +190,22 @@ def test_regenerating_replaces_the_protocol(world):
     assert len(world.generated.rows) == 1
 
 
+def test_overlapping_generations_never_list_the_losers_size_or_time(world, monkeypatch):
+    """A uploads, B overwrites the shared blob and records itself, then A's row
+    write lands last. The listing must still describe the bytes behind the
+    link — B's — because size and time are read from the blob."""
+    world.rows[COMP]["Code"] = "spring-trophy-2026"
+    world.grant("write")
+    generate(user())                                         # A: 8 bytes
+    monkeypatch.setattr(fa, "assemble_protocol", lambda structure, get_bytes: b"%PDF-1.7 B" * 10)
+    generate(user())                                         # B: 100 bytes
+    sh.record_generated_protocol(COMP, "spring-trophy-2026_protocol.pdf", 8)   # A, late
+    blob = f"{world.folder}/protocols/spring-trophy-2026_protocol.pdf"
+    [entry] = json.loads(details(user()).get_body())["generatedFiles"]
+    assert entry["size"] == 100
+    assert entry["generatedAt"] == world.container.modified[blob].strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def test_without_a_code_the_cleaned_name_names_the_protocol(world):
     world.structures[world.folder]["name"] = "Spring Trophy: 2026!"
     world.grant("write")
@@ -198,12 +213,12 @@ def test_without_a_code_the_cleaned_name_names_the_protocol(world):
     assert body["fileName"] == "Spring_Trophy_2026_protocol.pdf"
 
 
-def test_a_legacy_row_has_no_generation_time(world):
+def test_a_protocol_whose_blob_cannot_be_read_falls_back_to_its_row(world):
     world.grant("read")
     world.generated.rows[(COMP, "p.pdf")] = {
-        "PartitionKey": COMP, "RowKey": "p.pdf", "FileName": "p.pdf"}
+        "PartitionKey": COMP, "RowKey": "p.pdf", "FileName": "p.pdf", "FileSize": 2048}
     [entry] = json.loads(details(user()).get_body())["generatedFiles"]
-    assert entry["generatedAt"] is None
+    assert (entry["size"], entry["generatedAt"]) == (2048, None)
 
 
 @pytest.mark.parametrize("code, name, expected", [

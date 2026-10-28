@@ -329,10 +329,28 @@ def protocol_file_name(code, name) -> str:
     return f"{stem}_protocol.pdf"
 
 
-def record_generated_protocol(competition, filename, file_size=0, generated_at=None):
-    """List a freshly generated protocol for `get_competition_details`, with
-    when it was generated (`GeneratedAt`, ISO UTC). Stores no link: those are
-    minted per request (`mint_read_urls`)."""
+def protocol_blob_facts(container, blob_names):
+    """`{blob name: (size, last-modified ISO UTC)}`, read from each protocol
+    blob itself. The name is fixed per competition, so two overlapping
+    generations race on one blob; the blob's size and Last-Modified change
+    atomically with its bytes, whereas a table row written afterwards could
+    describe the run that lost. A blob that cannot be read is left out."""
+    facts = {}
+    for name in blob_names:
+        try:
+            props = container.get_blob_client(name).get_blob_properties()
+            facts[name] = (props.size, props.last_modified.astimezone(timezone.utc)
+                           .strftime("%Y-%m-%dT%H:%M:%SZ"))
+        except Exception as e:
+            logging.warning(f"Could not read protocol blob properties: {type(e).__name__}")
+    return facts
+
+
+def record_generated_protocol(competition, filename, file_size=0):
+    """List a freshly generated protocol for `get_competition_details` — the
+    row is only its index: size and time come from the blob
+    (`protocol_blob_facts`). Stores no link: those are minted per request
+    (`mint_read_urls`)."""
     try:
         table_client = get_table_client()
         if not table_client:
@@ -347,7 +365,6 @@ def record_generated_protocol(competition, filename, file_size=0, generated_at=N
             "Description": "Competition protocol (PDF)",
             "FileName": filename,
             "FileSize": int(file_size),
-            "GeneratedAt": generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }, mode=UpdateMode.REPLACE)
     except Exception as e:
         logging.error(f"Error recording generated protocol: {type(e).__name__}")

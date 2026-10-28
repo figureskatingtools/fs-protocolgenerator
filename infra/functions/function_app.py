@@ -843,7 +843,9 @@ def _generated_protocols(comp_id, folder_path):
     now — the caller has just passed the access check — valid for
     `sh.DOWNLOAD_LINK_TTL` (`expiration`). The blob is derived from the
     record's folder and the row's file name; a link stored on a legacy row is
-    ignored and scrubbed. `url` is null when no link could be signed."""
+    ignored and scrubbed. `url` is null when no link could be signed. `size`
+    and `generatedAt` come from the blob itself (`sh.protocol_blob_facts`),
+    so they always describe the bytes behind the link."""
     try:
         table_client = sh.get_table_client()
         if not table_client:
@@ -863,13 +865,18 @@ def _generated_protocols(comp_id, folder_path):
         logging.error(f"Could not sign protocol download links: {type(e).__name__}")
         urls, expiry = {}, None
     expiration = expiry.isoformat().replace("+00:00", "Z") if expiry else None
+    try:
+        facts = sh.protocol_blob_facts(sh.get_container_client(), blobs.values())
+    except Exception as e:
+        logging.warning(f"Could not read protocol blobs: {type(e).__name__}")
+        facts = {}
     return [{
         "fileName": os.path.basename(r["FileName"]),
         "url": urls.get(blobs[r["RowKey"]]),
         "description": r.get("Description"),
         "expiration": expiration if urls.get(blobs[r["RowKey"]]) else None,
-        "size": r.get("FileSize"),
-        "generatedAt": r.get("GeneratedAt") or None,
+        "size": facts.get(blobs[r["RowKey"]], (r.get("FileSize"), None))[0],
+        "generatedAt": facts.get(blobs[r["RowKey"]], (None, None))[1],
     } for r in rows]
 
 
@@ -2020,18 +2027,16 @@ def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
         pdf_bytes = assemble_protocol(structure, get_bytes)
 
         # One fixed name per competition, FS Manager style: regenerating
-        # replaces the previous PDF, and when it was made is a separate field.
+        # replaces the previous PDF; when it was made is the blob's own time.
         out_name = sh.protocol_file_name(entity.get("Code"), structure.get("name"))
-        generated_at = pc.to_iso_z(datetime.now(timezone.utc))
         blob_name = sh.protocol_blob_name(folder_path, out_name)
 
         blob_service_client = sh.get_blob_service_client()
         container = blob_service_client.get_container_client(sh.CONTAINER_NAME)
         container.upload_blob(blob_name, pdf_bytes, overwrite=True)
 
-        sh.record_generated_protocol(comp_id, out_name, len(pdf_bytes), generated_at)
-        return sh.json_response({"fileName": out_name, "size": len(pdf_bytes),
-                                 "generatedAt": generated_at})
+        sh.record_generated_protocol(comp_id, out_name, len(pdf_bytes))
+        return sh.json_response({"fileName": out_name, "size": len(pdf_bytes)})
     except SanitizeError as e:
         # Fail closed: an uploaded PDF holds content that could not be proven
         # free of hidden metadata, so nothing is published.
