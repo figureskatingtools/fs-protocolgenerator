@@ -268,7 +268,7 @@ def _competitions_table():
 
 
 def _create_competition_record(comp_table, email, safe_name, dates, platform_id,
-                               rink="", dates_auto=False, deletion_date=None):
+                               rink="", dates_auto=False, deletion_date=None, code=""):
     """Seed a new competition bound to a platform competition — unique id,
     metadata.json structure document and registry entity — and return its id.
     The only creation path is `resolve_competition`. The record has no
@@ -299,6 +299,8 @@ def _create_competition_record(comp_table, email, safe_name, dates, platform_id,
         "CreatedDate": created_date,
         "PlatformId": platform_id,
     }
+    if code:
+        entity["Code"] = code
     if deletion_date:
         entity["DeletionDate"] = deletion_date
     comp_table.create_entity(entity)
@@ -453,6 +455,24 @@ def _sync_competition_name(comp_table, entity, safe_name) -> str:
     return safe_name
 
 
+def _sync_competition_code(comp_table, entity, code) -> None:
+    """MERGE the platform's competition code (`Code`, what the protocol PDF is
+    named after) when it differs from the stored one. An empty code — a client
+    that sends none — never clears a stored one. Best effort: the old code
+    stays on failure."""
+    if not code or code == entity.get("Code"):
+        return
+    try:
+        comp_table.update_entity({
+            "PartitionKey": "GLOBAL", "RowKey": entity["RowKey"], "Code": code,
+        }, mode=UpdateMode.MERGE)
+    except Exception as e:
+        logging.warning(f"Could not store the code of competition {entity['RowKey']}: "
+                        f"{type(e).__name__}")
+        return
+    entity["Code"] = code
+
+
 def _rename_structure(structure, old_name, new_name) -> bool:
     """Blob half of a rename: the record `name` (page heading, protocol filename)
     always follows, while `event.title` — the user-editable "Protocol title"
@@ -471,7 +491,7 @@ def _rename_structure(structure, old_name, new_name) -> bool:
 def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     """Map the site's active platform competition to this tool's competition,
     creating it on first use:
-    {platformId, name, dates?, venue?} -> {id, name, created, deletionDate}.
+    {platformId, name, code?, dates?, venue?} -> {id, name, created, deletionDate}.
 
     Needs read access to the platform competition (`_check_access`: 404
     `platform_not_found` / 503 `platform_unavailable`); a new record is an
@@ -494,7 +514,8 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     `event.rink`. On a writer's hit the same values only *backfill* empty
     fields, and the hit also follows a rename of the platform competition (the
     stored `Name`, the structure `name` and — while still untouched — the
-    printed protocol title; never the folder path)."""
+    printed protocol title; never the folder path) and of its code (`Code`,
+    which names the generated protocol PDF)."""
     caller = _require_user(req)
     if not caller:
         return _unauthorized()
@@ -509,6 +530,7 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     name = (body.get('name') or '').strip()
     dates = body.get('dates') or ''
     venue = (body.get('venue') or '').strip()
+    code = sh.sanitize_code(body.get('code'))
     if not raw_platform_id:
         return func.HttpResponse("Missing platformId", status_code=400)
     # One canonical form (lowercase GUID) for the platform read and every local
@@ -526,8 +548,8 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
     role, refusal = _check_access(caller, platform_id, "read")
     if refusal:
         return refusal
-    # The name, dates and venue come from the client: only a writer's resolve
-    # may push them into an existing record (rename sync and backfill).
+    # The name, code, dates and venue come from the client: only a writer's
+    # resolve may push them into an existing record (rename sync and backfill).
     can_write = pa.role_satisfies(role, "write")
 
     try:
@@ -548,6 +570,8 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
             old_name = entity.get("Name", entity["RowKey"])
             new_name = (_sync_competition_name(comp_table, entity, safe_name)
                         if can_write else old_name)
+            if can_write:
+                _sync_competition_code(comp_table, entity, code)
             if can_write and (new_name != old_name or dates or venue):
                 try:
                     structure = sh.read_structure(folder_path)
@@ -575,7 +599,7 @@ def resolve_competition(req: func.HttpRequest) -> func.HttpResponse:
         deletion_date = pc.to_iso_z(platform_date) if platform_date else None
         new_id = _create_competition_record(
             comp_table, caller.email, safe_name, _fi_date(dates), platform_id,
-            rink=venue, dates_auto=bool(dates), deletion_date=deletion_date)
+            rink=venue, dates_auto=bool(dates), deletion_date=deletion_date, code=code)
         return sh.json_response({
             "id": new_id, "name": safe_name, "created": True,
             "deletionDate": deletion_date,
@@ -845,6 +869,7 @@ def _generated_protocols(comp_id, folder_path):
         "description": r.get("Description"),
         "expiration": expiration if urls.get(blobs[r["RowKey"]]) else None,
         "size": r.get("FileSize"),
+        "generatedAt": r.get("GeneratedAt") or None,
     } for r in rows]
 
 
@@ -1994,17 +2019,19 @@ def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
         get_bytes = _file_bytes_getter(folder_path, structure)
         pdf_bytes = assemble_protocol(structure, get_bytes)
 
-        safe_name = sh.sanitize_name(structure.get("name", "protocol")).replace(" ", "_") or "protocol"
-        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        out_name = f"protocol_{safe_name}_{stamp}.pdf"
-        blob_name = f"{folder_path}/protocols/{out_name}"
+        # One fixed name per competition, FS Manager style: regenerating
+        # replaces the previous PDF, and when it was made is a separate field.
+        out_name = sh.protocol_file_name(entity.get("Code"), structure.get("name"))
+        generated_at = pc.to_iso_z(datetime.now(timezone.utc))
+        blob_name = sh.protocol_blob_name(folder_path, out_name)
 
         blob_service_client = sh.get_blob_service_client()
         container = blob_service_client.get_container_client(sh.CONTAINER_NAME)
         container.upload_blob(blob_name, pdf_bytes, overwrite=True)
 
-        sh.record_generated_protocol(comp_id, out_name, len(pdf_bytes))
-        return sh.json_response({"fileName": out_name, "size": len(pdf_bytes)})
+        sh.record_generated_protocol(comp_id, out_name, len(pdf_bytes), generated_at)
+        return sh.json_response({"fileName": out_name, "size": len(pdf_bytes),
+                                 "generatedAt": generated_at})
     except SanitizeError as e:
         # Fail closed: an uploaded PDF holds content that could not be proven
         # free of hidden metadata, so nothing is published.

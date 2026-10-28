@@ -19,7 +19,8 @@ Function App with `x-proxy-secret` + `x-forwarded-user-tid`/`-oid`/`-email`/`-na
 - **Storage** — Azure Blob (container `fs-protocolgenerator`) holds each
   competition folder; Tables `competitions` (permanent registry, soft-delete) and
   `generatedprotocols` (one row per generated PDF: file name, size,
-  description — no link; links are minted per request, see **Competition access**).
+  description, `GeneratedAt` — no link; links are minted per request, see
+  **Competition access**).
 - **Hosting** — Flex-Consumption Function App only (no Web App, no Easy Auth
   provider, no DNS/custom domain in this repo). IaC in `infra/`
   (subscription-scoped Bicep: `modules/storage.bicep`, `modules/function.bicep`,
@@ -40,7 +41,13 @@ Each competition is a blob folder `"{name}-{id}"` containing:
 - `uploads/{fileId}_{filename}` — every uploaded PDF/photo/XML.
 - `schedule.pdf` — the source schedule (kept for re-parsing).
 - `rosters/teams.xml`, `rosters/partic.xml` — the last imported synchro roster pair.
-- `protocols/protocol_*.pdf` — generated outputs.
+- `protocols/<code>_protocol.pdf` — the generated protocol, named FS Manager
+  style after the platform's competition code (the record's `Code`, sent by the
+  site on `resolve_competition`; the cleaned competition name while there is
+  none — `sh.protocol_file_name`). No timestamp in the name: regenerating
+  replaces the file, and the time is the row's `GeneratedAt`, returned as
+  `generatedAt` and shown as a tag in the UI. Older `protocol_<name>_<stamp>.pdf`
+  outputs stay listed (with `generatedAt` null) until deleted.
 
 No XML is stored with a date of birth (see **Dates of birth** below).
 
@@ -150,7 +157,9 @@ the `id` query param or a JSON body `{"id"}`), `resolve_competition` — the onl
 route that creates a competition, always bound to a platform one (platform
 competition GUID → tool record: `PlatformId` lookup → create; an unbound record
 is **never adopted by name** any more — that let anyone claim another user's
-record; soft-deleted rows are never resurrected;
+record; soft-deleted rows are never resurrected; optional `code` — the
+platform's competition code — is stored as `Code` on create and followed by a
+writer's hit (`_sync_competition_code`; an empty one never clears it);
 optional `dates`/`venue` seed `event.dates` (dd.MM.yyyy, marked
 `event.datesAuto` so a schedule parse may refine it until the user saves the
 event form) and `event.rink` — create seeds, a writer's hit backfills empty
