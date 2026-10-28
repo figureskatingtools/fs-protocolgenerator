@@ -18,7 +18,9 @@ page), the tool supplies sensible **defaults/backups** so a protocol can always 
    into slots: category title PDF, podium photo + names, total results PDF, and per segment
    the results / panel-of-judges / judges-details PDFs. Synchronized-skating categories also
    get team cards (org + name, team photo); rosters are imported by selecting both the
-   `DT_PARTIC_TEAMS` and `DT_PARTIC` XML files together (joined on athlete code).
+   `DT_PARTIC_TEAMS` and `DT_PARTIC` XML files together (joined on athlete code). Dates
+   of birth in these files are removed before anything is stored; a file where that
+   cannot be done safely is refused.
 4. **Drag and drop** any uploaded file from one slot to another to fix misplacements; hover a
    file for a preview (photo thumbnail or PDF first-page preview).
 5. **Generate** → one protocol PDF, assembled in canonical order, available via a download link.
@@ -46,6 +48,11 @@ checks the caller's role (read/write/owner) in the platform's access tables — 
   and Table (`competitions`, `generatedprotocols`).
 - **Hosting** — Flex-Consumption Function App + its storage account. IaC in `infra/`
   (Bicep). No Web App, no custom domain, no app registration in this repo.
+- **Retention** — a competition's files and e-mail addresses are deleted when the
+  competition is deleted on figureskatingtools.com; only an anonymous history row stays.
+  A record no competition stands behind any more (or one from before the shared
+  competitions) is deleted the same way once it is more than 60 days old. Logs are kept
+  90 days.
 
 ## Local development
 
@@ -77,5 +84,19 @@ python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 Pushing to `main` deploys prod via `.github/workflows/deploy.yml`; `test` is deployed by
 manual `workflow_dispatch`. The workflow has two jobs — infrastructure (Bicep) and backend
 (zip deploy); the backend job runs the pytest suite before packaging, so a red suite blocks
-the deploy. Manual equivalents: `deploy_infra.sh`, `deploy_backend.sh`. Both the **test** and
+the deploy. Manual equivalents: `deploy_infra.sh -g <resource-group> [--proxy-secret <SECRET>]
+[--orphan-purge true|false]` (without `--orphan-purge` it keeps the Function App's current
+`ORPHAN_PURGE_ENABLED`, or deploys `false` (dry run) when it can't read it) and `deploy_backend.sh`. Both the **test** and
 **prod** environments are live. See `CLAUDE.md` for the full architecture.
+
+## Licence
+
+The source code is licensed under the GNU Affero General Public License, version 3 only (SPDX:
+`AGPL-3.0-only`); see [LICENSE](LICENSE).
+
+The figureskatingtools name, logo and document templates (including the header, footer,
+wordmark, skate mark and last-page images and PDF in `infra/functions/assets/`) are not covered
+by this licence and remain the property of their owner; all rights reserved.
+
+The bundled Raleway fonts in `infra/functions/fonts/` keep their own licence, the SIL Open Font
+License 1.1.

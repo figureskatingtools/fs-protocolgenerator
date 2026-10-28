@@ -80,7 +80,9 @@ class FakePlatformTable:
     def __init__(self):
         self.rows = {}
         self.error = None
+        self.query_error = None
         self.reads = []
+        self.queries = []
 
     def get_entity(self, partition_key, row_key):
         self.reads.append((partition_key, row_key))
@@ -89,6 +91,13 @@ class FakePlatformTable:
         if row_key not in self.rows:
             raise ResourceNotFoundError(row_key)
         return dict(self.rows[row_key])
+
+    def query_entities(self, query, select=None, **kwargs):
+        self.queries.append(query)
+        if self.query_error or self.error:
+            raise self.query_error or self.error
+        return [dict(row) for row in self.rows.values()
+                if f"PartitionKey eq '{row['PartitionKey']}'" == query]
 
 
 class FakeBlob:
@@ -502,8 +511,11 @@ def test_an_unreadable_platform_never_deletes_early(world, caplog):
 
 
 def test_a_record_without_a_clock_row_is_kept(world, caplog):
-    """No clock row: no verdict, so no deletion — whatever the cached date."""
-    world.record("expired0", PlatformId=PID, DeletionDate=PAST)
+    """No clock row: no verdict, so no deletion — whatever the cached date —
+    while the record is under 60 days old (the orphan rule, below)."""
+    world.platform_row(pid="99999999-2222-4333-8444-555555555555")
+    world.record("expired0", PlatformId=PID, DeletionDate=PAST,
+                 CreatedDate="2026-09-01T10:00:00Z")
     sweep()
     assert world.row("expired0")["Visible"] is True
     assert any(r.levelname == "WARNING" and "expired0" in r.getMessage()
@@ -618,3 +630,170 @@ def test_the_scrub_is_idempotent(world):
     world.record("olddel01", Visible=False, DeletedBy="someone@example.com")
     assert fa._scrub_hidden_rows(world.comp) == 1
     assert fa._scrub_hidden_rows(world.comp) == 0
+
+
+# ── orphans: no platform competition behind the record ──────────────────────
+
+OTHER = "99999999-2222-4333-8444-555555555555"
+OLD = pc.to_iso_z(NOW - timedelta(days=61))
+YOUNG = pc.to_iso_z(NOW - timedelta(days=59))
+
+
+@pytest.fixture
+def purge(monkeypatch):
+    monkeypatch.setenv("ORPHAN_PURGE_ENABLED", "true")
+
+
+def _orphan(world, comp_id, created, **extra):
+    row = world.record(comp_id, name=f"Cup {comp_id}", CreatedDate=created, **extra)
+    world.container.blobs[f"{row['FolderPath']}/results.pdf"] = b"%PDF"
+    world.protocols.rows[(comp_id, "protocol.pdf")] = {
+        "PartitionKey": comp_id, "RowKey": "protocol.pdf", "FileName": "protocol.pdf"}
+    return row
+
+
+def _assert_scrubbed(world, comp_id):
+    row = world.row(comp_id)
+    assert row["Visible"] is False
+    assert (row["CreatedBy"], row["DeletedBy"]) == ("", "auto-cleanup")
+    assert ADDRESS not in json.dumps(row)
+    # The row stays as history (name, dates).
+    assert row["Name"] == f"Cup {comp_id}" and row["CreatedDate"]
+    assert not [b for b in world.container.blobs if b.startswith(f"Cup {comp_id}-")]
+    assert not [k for k in world.protocols.rows if k[0] == comp_id]
+
+
+def test_an_old_record_without_platform_id_is_deleted_and_scrubbed(world, purge):
+    world.platform_row(pid=OTHER)
+    _orphan(world, "orphan01", OLD)          # its stored date is still ahead
+    stats = fa._run_auto_delete(NOW)
+    assert stats["orphaned"] == 1 and stats["deleted"] == 0
+    _assert_scrubbed(world, "orphan01")
+
+
+def test_an_old_record_whose_clock_row_is_not_found_is_deleted(world, purge):
+    world.platform_row(pid=OTHER)            # the table is healthy
+    _orphan(world, "orphan02", OLD, PlatformId=PID)
+    assert fa._run_auto_delete(NOW)["orphaned"] == 1
+    _assert_scrubbed(world, "orphan02")
+
+
+def test_a_platform_id_that_is_not_a_guid_counts_as_orphaned(world, purge):
+    world.platform_row(pid=OTHER)
+    _orphan(world, "orphan03", OLD, PlatformId="not-a-guid")
+    assert fa._run_auto_delete(NOW)["orphaned"] == 1
+    _assert_scrubbed(world, "orphan03")
+    assert world.platform.reads == []
+
+
+@pytest.mark.parametrize("platform_id", [None, PID])
+def test_an_orphan_younger_than_60_days_is_untouched(world, purge, platform_id):
+    world.platform_row(pid=OTHER)
+    _orphan(world, "young001", YOUNG, PlatformId=platform_id)
+    stats = fa._run_auto_delete(NOW)
+    assert stats["orphaned"] == 0 and stats["orphan_kept"] == 1
+    assert world.row("young001")["Visible"] is True
+    assert world.row("young001")["CreatedBy"] == ADDRESS
+
+
+def test_without_a_created_date_the_table_timestamp_counts(world, purge, monkeypatch):
+    class Entity(dict):
+        def __init__(self, row, stamp):
+            super().__init__(row)
+            self.metadata = {"timestamp": stamp} if stamp else {}
+
+    world.platform_row(pid=OTHER)
+    _orphan(world, "nodate01", "-", PlatformId=PID)
+    _orphan(world, "nodate02", "-", PlatformId=PID)
+    _orphan(world, "nodate03", "-", PlatformId=PID)
+    stamps = {"nodate01": NOW - timedelta(days=61), "nodate02": NOW - timedelta(days=2),
+              "nodate03": None}
+    plain = world.comp.query_entities
+    monkeypatch.setattr(world.comp, "query_entities",
+                        lambda q: [Entity(r, stamps.get(r["RowKey"])) for r in plain(q)])
+    stats = fa._run_auto_delete(NOW)
+    assert stats["orphaned"] == 1 and stats["orphan_kept"] == 2
+    assert world.row("nodate01")["Visible"] is False
+    assert world.row("nodate02")["Visible"] is True
+    assert world.row("nodate03")["Visible"] is True
+
+
+def test_a_clock_read_error_is_never_not_found(world, purge, monkeypatch):
+    world.platform_row(pid=OTHER)
+    _orphan(world, "bound001", OLD, PlatformId=PID)
+    original = world.platform.get_entity
+
+    def throttled(partition_key, row_key):
+        raise HttpResponseError("throttled")
+
+    monkeypatch.setattr(world.platform, "get_entity", throttled)
+    stats = fa._run_auto_delete(NOW)
+    assert stats["orphaned"] == 0 and stats["skipped"] == 1
+    assert world.row("bound001")["Visible"] is True
+    assert world.row("bound001")["CreatedBy"] == ADDRESS
+    assert original  # the probe read the table fine
+
+
+def test_an_empty_clock_table_aborts_the_orphan_step(world, purge, caplog):
+    _orphan(world, "bound001", OLD, PlatformId=PID)
+    _orphan(world, "unbound1", OLD)
+    stats = fa._run_auto_delete(NOW)
+    assert stats["orphaned"] == 0 and stats["orphan_skipped"] == 2
+    assert world.row("bound001")["Visible"] is True
+    assert world.row("unbound1")["Visible"] is True
+    assert any("orphan step aborted" in r.getMessage() and "empty" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_an_empty_clock_table_is_fine_when_nothing_is_bound(world, purge):
+    _orphan(world, "unbound1", OLD)
+    assert fa._run_auto_delete(NOW)["orphaned"] == 1
+
+
+@pytest.mark.parametrize("error", [HttpResponseError("throttled"),
+                                   ResourceNotFoundError("ErrorCode:TableNotFound")])
+def test_an_unreadable_clock_table_aborts_the_orphan_step(world, purge, error):
+    world.platform_row(pid=OTHER)
+    world.platform.query_error = error
+    _orphan(world, "unbound1", OLD)
+    _orphan(world, "bound001", OLD, PlatformId=PID)
+    stats = fa._run_auto_delete(NOW)
+    assert stats["orphaned"] == 0 and stats["orphan_skipped"] == 2
+    assert world.row("unbound1")["Visible"] is True
+
+
+def test_without_a_platform_configured_the_orphan_step_is_aborted(world, purge, monkeypatch):
+    monkeypatch.setattr(pc, "get_platform_table_client", lambda: None)
+    _orphan(world, "unbound1", OLD)
+    stats = fa._run_auto_delete(NOW)
+    assert stats["orphaned"] == 0 and stats["orphan_skipped"] == 1
+
+
+def test_a_live_bound_record_is_untouched(world, purge):
+    world.platform_row(deletion=FUTURE)
+    _orphan(world, "bound001", OLD, PlatformId=PID)
+    stats = fa._run_auto_delete(NOW)
+    assert stats["orphaned"] == 0 and stats["deleted"] == 0
+    assert world.row("bound001")["Visible"] is True
+    assert world.row("bound001")["CreatedBy"] == ADDRESS
+    assert world.protocols.rows
+
+
+def test_the_orphan_kill_switch_only_logs(world, monkeypatch, caplog):
+    monkeypatch.setenv("ORPHAN_PURGE_ENABLED", "false")
+    world.platform_row(pid=OTHER)
+    _orphan(world, "orphan01", OLD, PlatformId=PID)
+    stats = fa._run_auto_delete(NOW)
+    assert stats["orphaned"] == 0 and stats["orphan_dry_run"] == 1
+    assert world.row("orphan01")["Visible"] is True
+    assert any("would delete" in r.getMessage() for r in caplog.records)
+
+
+def test_the_sweep_logs_the_orphan_counts(world, purge, caplog):
+    import logging
+    world.platform_row(pid=OTHER)
+    _orphan(world, "orphan01", OLD, PlatformId=PID)
+    with caplog.at_level(logging.INFO):
+        fa.auto_delete_expired_competitions._function.get_user_function()(None)
+    assert world.row("orphan01")["Visible"] is False
+    assert any("Orphans: deleted 1" in r.getMessage() for r in caplog.records)
