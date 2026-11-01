@@ -387,12 +387,12 @@ automatic with body `"autoAssigned": true`.
     linked per generation (in memory, `function_app._link_legacy_schedule` →
     `schedule_parser.link_legacy_schedule`) by re-parsing the kept
     `schedule.xml|pdf` — only when that reproduces the stored rows exactly;
-    categories pair by code, then name, then original position (segments by
-    name, then position). Position counts only while the stored list is provably
-    the parse's (`_positions_intact`: same count, orders 0..n-1, and for a
-    category the same segment count); anything uncertain stays unlinked and
-    prints as parsed. The tool never edits `order`, so only an
-    `edit_structure` swap of two orders could still mislead it.
+    categories pair by ISU code, then unrenamed name; segments by unrenamed
+    name. **Never by position**: a removal + an addition reuses `order`, so a
+    replacement would print at the deleted item's times. Anything not
+    identifiable stays unlinked and prints as parsed (a renamed category of an
+    older PDF parse, a renamed segment of any older parse) — re-parsing the
+    schedule PDF links everything.
   - **DT_SCHEDULE XML (legacy only)** — `parse_schedule_xml` stays solely so
     `link_legacy_schedule` can re-parse the `schedule.xml` of competitions
     parsed from it before; never call it for a new parse. It groups `<Unit>`s by

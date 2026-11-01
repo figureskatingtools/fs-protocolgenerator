@@ -367,40 +367,22 @@ def _match(fresh_items, stored_items, keys):
         for f in fresh_items:
             if f["id"] in found:
                 continue
-            fk = key(f, None)
+            fk = key(f)
             if fk is None:
                 continue
-            hits = [s for s in stored_items
-                    if s["id"] not in taken and key(s, f) == fk]
+            hits = [s for s in stored_items if s["id"] not in taken and key(s) == fk]
             if len(hits) == 1:
                 found[f["id"]] = hits[0]
                 taken.add(hits[0]["id"])
     return found
 
 
-def _code_key(c, _other):
+def _code_key(c):
     return c.get("code") or None
 
 
-def _name_key(c, _other):
+def _name_key(c):
     return (c.get("name") or "").strip().casefold() or None
-
-
-def _order_key(c, other):
-    # Position from the original parse (plus, for a category, how many segments
-    # it has); a stored category whose code says it is a different one never
-    # takes the slot.
-    if other is not None and other.get("code") and c.get("code") and other["code"] != c["code"]:
-        return None
-    return ("order", c.get("order"), len(c.get("segments") or []))
-
-
-def _positions_intact(fresh_items, stored_items) -> bool:
-    """Whether the stored items still sit exactly at the parse's positions: as
-    many of them, numbered 0..n-1. The tool never reorders, but `order` is
-    writable through `edit_structure` and a removal + an addition can reuse a
-    number; when anything like that shows, position is no evidence at all."""
-    return sorted(s.get("order") for s in stored_items) == list(range(len(fresh_items)))
 
 
 def link_legacy_schedule(structure: dict, source: bytes) -> bool:
@@ -410,28 +392,22 @@ def link_legacy_schedule(structure: dict, source: bytes) -> bool:
 
     The re-parse must reproduce the stored rows exactly (else this source is not
     the one they came from, or the parser has changed since) — then its fresh
-    categories are paired with the stored ones by code, then by name (left
-    unrenamed), then by their position from the original parse; segments by name,
-    then by position. Position counts only while the stored list provably still
-    has the parse's positions (`_positions_intact`); a match left uncertain stays
-    unlinked, and its rows print as parsed. Returns whether the rows were linked; mutates them in place."""
+    categories are paired with the stored ones by ISU code, then by name (left
+    unrenamed), and segments by name. Never by position: `order` is reused by a
+    removal + an addition, so a replacement would inherit the deleted item's
+    times. A row whose category or segment cannot be identified that way keeps
+    its parsed name. Returns whether the rows were linked; mutates them in place."""
     rows = structure.get("schedule") or []
     fresh_rows, fresh_cats, _meta = (parse_schedule_data(source) if is_pdf(source)
                                      else parse_schedule_xml(source))
     if [_row_signature(r) for r in fresh_rows] != [_row_signature(r) for r in rows]:
         return False
-    stored_cats = structure.get("categories") or []
-    cat_keys = (_code_key, _name_key) + (
-        (_order_key,) if _positions_intact(fresh_cats, stored_cats) else ())
-    cat_of = _match(fresh_cats, stored_cats, cat_keys)
+    cat_of = _match(fresh_cats, structure.get("categories") or [], (_code_key, _name_key))
     seg_of = {}
     for f in fresh_cats:
         stored = cat_of.get(f["id"])
         if stored:
-            stored_segs = stored.get("segments") or []
-            seg_keys = (_name_key,) + (
-                (_order_key,) if _positions_intact(f["segments"], stored_segs) else ())
-            seg_of.update(_match(f["segments"], stored_segs, seg_keys))
+            seg_of.update(_match(f["segments"], stored.get("segments") or [], (_name_key,)))
     for row, fresh in zip(rows, fresh_rows):
         stored = cat_of.get(fresh.get("categoryId"))
         segment = seg_of.get(fresh.get("segmentId"))

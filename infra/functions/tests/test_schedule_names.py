@@ -166,25 +166,34 @@ def legacy(structure):
     return structure
 
 
-def test_a_legacy_pdf_schedule_is_linked_by_position():
-    structure = legacy(parsed())
+# What an older parse can still identify: an ISU code (XML-parsed categories)
+# or a name left as parsed. Never a position — a removal + an addition reuses
+# it, and the replacement would print at the deleted item's times.
+LEGACY_XML_PRINTED = [
+    ("Juniorit", "Short Program"),
+    ("Senior Synchronized Skating", "Free Skating"),
+    ("Juniorit", "Free Skating"),        # the renamed segment has no identity left
+]
+
+
+def test_a_legacy_xml_schedule_links_renamed_categories_by_code():
+    structure = legacy(parsed(ENGLISH_XML))
     rename(structure)
     assert not sp.schedule_rows_linked(structure["schedule"])
 
-    assert sp.link_legacy_schedule(structure, ENGLISH)
-    assert sp.schedule_rows_linked(structure["schedule"])
-    assert printed(structure) == RENAMED_PRINTED
-
-
-def test_a_legacy_xml_schedule_is_linked_by_code():
-    structure = legacy(parsed(ENGLISH_XML))
-    rename(structure)
-    # Reordered too: the code, not the position, says which category is which.
-    for c in structure["categories"]:
-        c["order"] = 5 - c["order"]
-
     assert sp.link_legacy_schedule(structure, ENGLISH_XML)
-    assert printed(structure) == RENAMED_PRINTED
+    assert sp.schedule_rows_linked(structure["schedule"])
+    assert printed(structure) == LEGACY_XML_PRINTED
+
+
+def test_a_legacy_pdf_schedule_links_only_unrenamed_categories():
+    structure = legacy(parsed())
+    rename(structure)
+
+    assert sp.link_legacy_schedule(structure, ENGLISH)
+    assert printed(structure) == ENGLISH_PRINTED
+    senior = by_name(structure, "Senior Synchronized Skating")
+    assert [r["categoryId"] for r in structure["schedule"]] == [None, senior["id"], None]
 
 
 def test_a_source_that_does_not_reproduce_the_rows_links_nothing():
@@ -212,7 +221,8 @@ def test_generation_links_a_legacy_schedule_from_the_kept_file(storage, kept):
         if other == "pdf" else schedule_xml())
 
     fa._link_legacy_schedule(folder, structure)
-    assert printed(structure) == RENAMED_PRINTED
+    assert sp.schedule_rows_linked(structure["schedule"])
+    assert printed(structure) == (LEGACY_XML_PRINTED if kept == "xml" else ENGLISH_PRINTED)
 
 
 def test_generation_without_a_kept_file_prints_as_parsed(storage):
@@ -222,61 +232,29 @@ def test_generation_without_a_kept_file_prints_as_parsed(storage):
     assert printed(structure) == ENGLISH_PRINTED
 
 
-def test_a_category_added_in_a_removed_ones_place_is_not_linked():
-    """Remove the senior category, add a hand-made one: `add_category` gives it
-    the freed position, but it has none of the senior's segments — so it does
-    not inherit the senior's schedule rows."""
+def test_a_replaced_last_segment_does_not_inherit_its_times():
+    """Free skating removed, an exhibition added: `add_segment` gives it the
+    freed position, but not the free skating's schedule row."""
+    structure = legacy(parsed(ENGLISH_XML))
+    junior = by_name(structure, "Junior Synchronized Skating")
+    junior["segments"] = [s for s in junior["segments"] if s["name"] != "Free Skating"]
+    junior["segments"].append(st.new_segment("Exhibition", len(junior["segments"])))
+
+    assert sp.link_legacy_schedule(structure, ENGLISH_XML)
+    assert printed(structure) == ENGLISH_PRINTED
+    assert structure["schedule"][2]["segmentId"] is None
+
+
+def test_a_replaced_last_category_does_not_inherit_its_times():
+    """The senior category removed, a hand-made one with as many segments added
+    in its place: it does not take over the senior's schedule row."""
     structure = legacy(parsed())
-    rename(structure)
     senior = by_name(structure, "Senior Synchronized Skating")
     structure["categories"].remove(senior)
-    structure["categories"].append(st.new_category("Hand-made", "synchro", 1))
-
-    assert sp.link_legacy_schedule(structure, ENGLISH)
-    assert printed(structure) == [
-        ("Juniorit", "Short Program"),
-        ("Senior Synchronized Skating", "Free Skating"),
-        ("Juniorit", "Vapaaohjelma"),
-    ]
-
-
-def test_positions_are_no_evidence_once_the_list_has_changed():
-    """An extra category (or a removed one) means the positions are not the
-    parse's any more: a renamed category is then left unlinked, never guessed."""
-    structure = legacy(parsed())
-    rename(structure)
-    structure["categories"].append(st.new_category("Hand-made", "single", 2))
-
-    assert sp.link_legacy_schedule(structure, ENGLISH)
-    # The junior's rows print as parsed; the unrenamed senior still links by name.
-    assert printed(structure) == ENGLISH_PRINTED
-    senior = by_name(structure, "Senior Synchronized Skating")
-    assert structure["schedule"][1]["categoryId"] == senior["id"]
-    assert structure["schedule"][0]["categoryId"] is None
-
-
-def test_renamed_segments_link_by_position_only_while_intact():
-    structure = legacy(parsed())
-    rename(structure)
-    junior = by_name(structure, "Juniorit")
-    # A segment `order` written through `edit_structure` (the tool never does).
-    next(s for s in junior["segments"] if s["name"] == "Vapaaohjelma")["order"] = 5
-
-    assert sp.link_legacy_schedule(structure, ENGLISH)
-    # The category still links by position; "Short Program" by name. The renamed
-    # free skating is no longer provably the parse's second segment, so its row
-    # keeps the parsed segment name.
-    assert printed(structure) == [
-        ("Juniorit", "Short Program"),
-        ("Senior Synchronized Skating", "Free Skating"),
-        ("Juniorit", "Free Skating"),
-    ]
-
-
-def test_a_category_with_other_segments_is_not_linked_by_position():
-    structure = legacy(parsed())
-    rename(structure)
-    by_name(structure, "Juniorit")["segments"].append(st.new_segment("Exhibition", 2))
+    replacement = st.new_category("Hand-made", "synchro", senior["order"])
+    replacement["segments"].append(st.new_segment("Free Skating", 0))
+    structure["categories"].append(replacement)
 
     assert sp.link_legacy_schedule(structure, ENGLISH)
     assert printed(structure) == ENGLISH_PRINTED
+    assert structure["schedule"][1]["categoryId"] is None
