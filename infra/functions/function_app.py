@@ -15,6 +15,7 @@ import platform_access as pa
 import platform_clock as pc
 import storage_helpers as sh
 import structure as st
+import schedule_parser as sp
 from schedule_parser import parse_schedule_data
 import dt_partic
 import odf_birth_dates
@@ -2005,6 +2006,25 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
 
 # ── generate ───────────────────────────────────────────────────────────────────
 
+def _link_legacy_schedule(folder_path, structure) -> None:
+    """A schedule parsed before its rows carried category links would print the
+    parse-time names even after a rename; link its rows (in memory, for this
+    generation) by re-parsing the kept `schedule.xml|pdf`. Best effort: when no
+    kept source reproduces the rows, they print as parsed, as before."""
+    if sp.schedule_rows_linked(structure.get("schedule")):
+        return
+    container = sh.get_container_client()
+    for ext in ("xml", "pdf"):
+        try:
+            blob = container.get_blob_client(f"{folder_path}/schedule.{ext}")
+            if not blob.exists():
+                continue
+            if sp.link_legacy_schedule(structure, blob.download_blob().readall()):
+                return
+        except Exception as e:
+            logging.warning(f"Schedule not linked to categories: {type(e).__name__}")
+
+
 @app.route(route="generate_protocol", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
     caller = _require_user(req)
@@ -2022,6 +2042,7 @@ def generate_protocol(req: func.HttpRequest) -> func.HttpResponse:
         if denied:
             return denied
         structure = sh.read_structure(folder_path)
+        _link_legacy_schedule(folder_path, structure)
 
         get_bytes = _file_bytes_getter(folder_path, structure)
         pdf_bytes = assemble_protocol(structure, get_bytes)

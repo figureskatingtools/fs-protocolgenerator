@@ -379,6 +379,15 @@ automatic with body `"autoAssigned": true`.
     SCHEDULE" export: glued start/finish times, 2-space category|segment columns,
     multi-day segment merge, and synchro detected from the document title
     ("MUODOSTELMALUISTELUN…") via `structure.discipline_signal`.
+  - Every stored `schedule` row carries the `categoryId`/`segmentId` it was
+    grouped into (explicit `None` for meetings/practices). The schedule's names
+    are only the default: the time-schedule page prints the category's/segment's
+    *current* names through `structure.schedule_rows`, so a rename in the tool
+    reaches it like the podium page. Rows parsed before the links existed are
+    linked per generation (in memory, `function_app._link_legacy_schedule` →
+    `schedule_parser.link_legacy_schedule`) by re-parsing the kept
+    `schedule.xml|pdf` — only when that reproduces the stored rows exactly;
+    categories pair by code, then name, then original position.
 - `dt_partic.py` — calibrated against real ISU/TAIKKARI OdfBody files. Joins
   **DT_PARTIC_TEAMS** (`<Team>`/`<Composition>`/`<Athlete Code>`) with
   **DT_PARTIC** (`<Participant Code GivenName FamilyName>`) on athlete `Code`.
