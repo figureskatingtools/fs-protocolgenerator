@@ -1,10 +1,14 @@
 """DT_SCHEDULE → category codes.
 
-The ISU RSC a schedule unit carries is the *same* code FS Manager stamps on
-every PDF it exports for that unit, so the category code this parser stores is
-what the Protocol Generator frontend matches those filenames against
-(`rscCodeHits` in `@figureskatingtools/shared-ui`'s `protocol-auto-assign.ts`).
-These tests pin that contract with the codes seen in competition YL110926HTL.
+A schedule is no longer parsed from the DT_SCHEDULE XML (FSM writes its standard
+English names there; only the PDFs carry the organizer's), but competitions
+parsed from one keep its categories, and `link_legacy_schedule` re-parses their
+kept `schedule.xml` — so the grouping must stay what it was. The ISU RSC a
+schedule unit carries is the *same* code FS Manager stamps on every PDF it
+exports for that unit, so the category code those parses stored is what the
+Protocol Generator frontend matches filenames against (`rscCodeHits` in
+`@figureskatingtools/shared-ui`'s `protocol-auto-assign.ts`). These tests pin
+that with the codes seen in competition YL110926HTL.
 """
 import schedule_parser as sp
 

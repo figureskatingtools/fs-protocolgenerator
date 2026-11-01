@@ -1345,10 +1345,12 @@ def _apply_schedule_meta(event: dict, meta: dict) -> None:
 
 @app.route(route="parse_schedule", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
-    """Parse the competition schedule; build the category/segment structure.
+    """Parse the competition schedule PDF; build the category/segment structure.
 
-    Two ways in, both ending in `parse_schedule_data` (DT_SCHEDULE XML or a
-    schedule PDF, auto-detected):
+    Only the PDF: FS Manager's DT_SCHEDULE XML carries its standard English names
+    for international categories, which its custom name file rewrites in the
+    PDFs only. Anything but a PDF is a JSON 400 `schedule_not_pdf`, with nothing
+    stored. Two ways in, both ending in `parse_schedule_data`:
 
     * the file as the **request body** — the browser's drop box;
     * a **pool reference** — `poolName` (+ optional `source=upload|fsm`,
@@ -1361,10 +1363,9 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
       `invalid_source`.
 
     Either way an existing category list is only rebuilt with `force=true`
-    (409 otherwise), the source file is kept as `schedule.xml|pdf` (an FS Manager
-    participant file only without its dates of birth, else 422
-    `birth_dates_not_removed`), and the parsed rink/dates auto-fill the event.
-    A pool parse echoes back which pool file it used in `source`."""
+    (409 otherwise), the source file is kept as `schedule.pdf` (a `schedule.xml`
+    kept by an earlier XML parse is removed), and the parsed dates auto-fill the
+    event. A pool parse echoes back which pool file it used in `source`."""
     caller = _require_user(req)
     if not caller:
         return _unauthorized()
@@ -1377,8 +1378,8 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
     source = req.params.get('source') or 'upload'
     if not body and not pool_name:
         return func.HttpResponse(
-            "Missing schedule: send the file (PDF or DT_SCHEDULE XML) as the request "
-            "body, or name one in the competition file pool with poolName.",
+            "Missing schedule: send the schedule PDF as the request body, or name "
+            "one in the competition file pool with poolName.",
             status_code=400)
     if not body and source not in ('upload', 'fsm'):
         return func.HttpResponse("invalid_source: source must be 'upload' or 'fsm'",
@@ -1403,18 +1404,21 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
                 return err
             pool_ref = {"poolName": filename, "source": source}
 
-        # A participant file dropped here by mistake is still never kept with
-        # its dates of birth (a real schedule comes back untouched).
-        try:
-            body = odf_birth_dates.strip_upload(body)
-        except odf_birth_dates.BirthDateError as e:
-            logging.warning(f"Schedule upload refused: {e}")
-            return _birth_dates_not_removed()
+        # Only the PDF carries the organizer's category names. Refusing anything
+        # else up front also keeps a participant file dropped here by mistake.
+        if not sp.is_pdf(body):
+            return sh.json_response(
+                {"error": "schedule_not_pdf",
+                 "message": "The competition schedule must be the schedule PDF."}, 400)
 
-        # Keep the source schedule (PDF or DT_SCHEDULE XML) for re-parsing.
-        is_xml = body[:2000].lstrip()[:5] == b"<?xml" or b"OdfBody" in body[:2000]
-        sh.get_container_client().upload_blob(
-            f"{folder_path}/schedule.{'xml' if is_xml else 'pdf'}", body, overwrite=True)
+        # Keep the source schedule for re-parsing; an XML kept by an earlier
+        # parse is no longer its source.
+        container = sh.get_container_client()
+        container.upload_blob(f"{folder_path}/schedule.pdf", body, overwrite=True)
+        try:
+            container.delete_blob(f"{folder_path}/schedule.xml")
+        except ResourceNotFoundError:
+            pass
 
         rows, categories, meta = parse_schedule_data(body)
         structure["schedule"] = rows

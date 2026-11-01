@@ -5,7 +5,8 @@ strips it from what FS Manager pushes and users upload to the shared competition
 files; this app strips it from everything it stores itself: a direct upload
 (`upload_file`), a pool import (`import_platform_file`, already clean, stripped
 again), the roster XML `import_rosters` archives under `rosters/` (inline or from
-the pool) and a participant file dropped on the schedule box.
+the pool). A participant file dropped on the schedule box is refused outright:
+that box takes the schedule PDF only.
 
 `odf_birth_dates.py` is a byte-identical copy of the site's code; the stripping
 itself is tested in depth there (infra/hovtp/tests/test_birth_dates.py). The
@@ -488,24 +489,15 @@ def test_a_strip_that_would_change_anything_else_stores_nothing(comp, storage, m
 
 
 # ── parse_schedule ────────────────────────────────────────────────────────────
+# The schedule box takes the schedule PDF only, so a participant file dropped
+# there by mistake is refused before anything is stored.
 
-def test_a_participant_file_dropped_as_the_schedule_is_kept_without_birth_dates(storage):
-    storage.competition()
-    parse_schedule(DT_PARTIC_BIRTHDATES_BODY)
-
-    assert storage.container.blobs[f"{FOLDER}/schedule.xml"] == DT_PARTIC_BIRTHDATES_STRIPPED
-
-
-@pytest.mark.parametrize("body", UNREADABLE)
-def test_a_schedule_upload_that_cannot_be_cleaned_keeps_nothing(storage, body):
+@pytest.mark.parametrize("body", [DT_PARTIC_BIRTHDATES_BODY, DT_SCHEDULE_WITH_BIRTHDATE_BODY]
+                         + UNREADABLE)
+def test_an_xml_dropped_as_the_schedule_keeps_nothing(storage, body):
     storage.competition()
 
-    _refused(parse_schedule(body))
+    response = parse_schedule(body)
+    assert response.status_code == 400, response.get_body()
+    assert _payload(response)["error"] == "schedule_not_pdf"
     assert storage.container.blobs == {}
-
-
-def test_a_schedule_is_kept_as_sent(storage):
-    storage.competition()
-    parse_schedule(DT_SCHEDULE_WITH_BIRTHDATE_BODY)
-
-    assert storage.container.blobs[f"{FOLDER}/schedule.xml"] == DT_SCHEDULE_WITH_BIRTHDATE_BODY

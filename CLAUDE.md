@@ -324,13 +324,15 @@ the frontend can fall back to a direct upload: 409 `not_bound`, 503
 
 `POST parse_schedule?competition=&poolName=[&source=upload|fsm][&force=true]`
 with an **empty body** parses the schedule straight out of that same pool
-(`DT_SCHEDULE_FSK….xml` or `…_CompetitionSchedule.pdf`) instead of from an
-uploaded body — the bytes come from the shared `_read_pool_file(entity,
+(`…_CompetitionSchedule.pdf`; the schedule is **PDF only**, see **Parsers**)
+instead of from an uploaded body — the bytes come from the shared `_read_pool_file(entity,
 filename, source)` helper, so the binding check, folder resolution, size cap and
 error codes are literally `import_platform_file`'s (409 `not_bound`, 503, 502,
 404, plus a plain-text 400 `invalid_source`). Everything after that is the
-upload path unchanged (409 unless `force`, `schedule.xml|pdf` kept,
-`parse_schedule_data`, event auto-fill); the success JSON adds
+upload path unchanged (anything but a PDF is a JSON 400 `schedule_not_pdf`
+with nothing stored, 409 unless `force`, `schedule.pdf` kept and a
+`schedule.xml` left by an earlier XML parse deleted, `parse_schedule_data`,
+event dates auto-fill); the success JSON adds
 `"source": {"poolName": "<filename>", "source": "upload|fsm"}` (the query value
 `upload` reads the `uploads/` folder, `fsm` reads `fsm/`). The frontend uses this automatically: a
 bound competition with no categories and a schedule in the pool parses it on
@@ -366,16 +368,12 @@ automatic with body `"autoAssigned": true`.
 
 ## Parsers (calibration pending)
 
-- `schedule_parser.py` — `parse_schedule_data(bytes)` auto-detects the format:
-  - **DT_SCHEDULE OdfBody XML (preferred)** — structured `<Unit>` rows with ISO
-    times, explicit discipline/segment in `ItemName`, the ice rink in
-    `VenueName` (auto-fills `event.rink`/`event.dates`), and an ISU `Unit Code`
-    used to group units into categories (so Advanced Novice L1 `…ADVNOV----` and
-    L2 `…ADVNOV--01` stay distinct while a category's Short Program + Free Skating
-    merge). The category `code` (`unit_code[:22]`) is stored and is what the
-    frontend's filename auto-assignment matches FSM's exported PDFs against —
-    their names start with the very same RSC — so it must stay verbatim.
-  - **Schedule PDF (fallback)** — calibrated against the Finnish "COMPETITION
+- `schedule_parser.py` — `parse_schedule_data(bytes)` takes the **schedule PDF
+  only** (anything else raises `ScheduleNotPdf`). FS Manager writes its
+  standard English names for international categories into every XML it
+  exports, while its custom name file rewrites only the PDFs — so the
+  DT_SCHEDULE XML's names are the wrong ones, and it is not accepted.
+  - **Schedule PDF** — calibrated against the Finnish "COMPETITION
     SCHEDULE" export: glued start/finish times, 2-space category|segment columns,
     multi-day segment merge, and synchro detected from the document title
     ("MUODOSTELMALUISTELUN…") via `structure.discipline_signal`.
@@ -388,6 +386,15 @@ automatic with body `"autoAssigned": true`.
     `schedule_parser.link_legacy_schedule`) by re-parsing the kept
     `schedule.xml|pdf` — only when that reproduces the stored rows exactly;
     categories pair by code, then name, then original position.
+  - **DT_SCHEDULE XML (legacy only)** — `parse_schedule_xml` stays solely so
+    `link_legacy_schedule` can re-parse the `schedule.xml` of competitions
+    parsed from it before; never call it for a new parse. It groups `<Unit>`s by
+    their ISU `Unit Code` (`unit_code[:22]`, stored as the category `code`, so
+    Advanced Novice L1 `…ADVNOV----` and L2 `…ADVNOV--01` stay distinct);
+    `tests/test_schedule_xml_codes.py` pins that grouping. A PDF-parsed category
+    has no `code` until the frontend's filename auto-assignment learns one from
+    the FSM PDFs filed into it (`set_category code`); until then it matches by
+    name.
 - `dt_partic.py` — calibrated against real ISU/TAIKKARI OdfBody files. Joins
   **DT_PARTIC_TEAMS** (`<Team>`/`<Composition>`/`<Athlete Code>`) with
   **DT_PARTIC** (`<Participant Code GivenName FamilyName>`) on athlete `Code`.
@@ -439,16 +446,18 @@ the sections verbatim; `tests/test_birth_dates.py` pins them by SHA-256 (and
 compares with a site checkout when `FIGURESKATINGTOOLS_SITE` names one). Only
 `BirthDate` attributes/elements go, every other byte stays; a file with none
 comes back as the same bytes. Applied before every write:
-`_register_upload` (`upload_file`, `import_platform_file`) and `parse_schedule`
-via `strip_upload` (by content, like the platform: an `OdfBody` declaring a
-participant type or none; anything else untouched), and `_run_roster_match`
+`_register_upload` (`upload_file`, `import_platform_file`) via `strip_upload`
+(by content, like the platform: an `OdfBody` declaring a participant type or
+none; anything else untouched), and `_run_roster_match`
 via `strip_birth_dates` on every roster XML it is handed (inline or pool), which
 is then both parsed and archived under `rosters/` in that form. A file that
 cannot be cleaned (not XML, UTF-16, a DTD, a strip that would change anything
 else) is **422 `birth_dates_not_removed`**, and so is an XML-like upload (BOM/NUL/
 whitespace, then `<`) whose root tag does not parse and a file that is neither
 XML-like nor PDF yet names `birthdate` (JSON `{error, message}`, the platform
-pool's code); nothing is written. Files stored before this rule keep theirs until
+pool's code); nothing is written. `parse_schedule` takes the schedule PDF only,
+so a participant file dropped there is refused outright (400 `schedule_not_pdf`).
+Files stored before this rule keep theirs until
 the competition is deleted or the roster re-imported.
 
 ## Output privacy (`image_sanitize.py`, `pdf_sanitize.py`)

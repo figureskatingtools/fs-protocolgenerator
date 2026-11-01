@@ -1,20 +1,25 @@
 """The printed time schedule follows the names set in the tool.
 
-The schedule (DT_SCHEDULE XML or the schedule PDF) supplies each category's and
-segment's name — whatever language FS Manager exported it in — and that is only
+The schedule PDF supplies each category's and segment's name, and that is only
 the default: renaming a category or segment in the tool must reach the schedule
 page as it already reaches the podium page. So every parsed row carries the ids
 of the category/segment it was grouped into, and `structure.schedule_rows`
 prints their current names. Schedules parsed before the rows carried ids are
-linked at generation by re-parsing the kept `schedule.xml|pdf`.
+linked at generation by re-parsing the kept `schedule.pdf` — or the
+`schedule.xml` of a competition parsed while FSM's DT_SCHEDULE XML (with its
+standard English names) was still accepted.
 """
 import copy
+
+import pytest
 
 import assemble
 import function_app as fa
 import generate_pages
 import schedule_parser as sp
 import structure as st
+
+from conftest import schedule_pdf
 
 
 def schedule_xml(*units):
@@ -34,8 +39,16 @@ def schedule_xml(*units):
     ).encode("utf-8")
 
 
-# An English export: the names an organizer then translates in the tool.
-ENGLISH = schedule_xml(
+# English names: what an organizer then translates in the tool.
+ENGLISH = schedule_pdf(
+    "31.10.2026",
+    "10:00:0011:30:00  8  Junior Synchronized Skating   Short Program",
+    "12:00:0013:30:00  6  Senior Synchronized Skating   Free Skating",
+    "01.11.2026",
+    "10:00:0011:30:00  8  Junior Synchronized Skating   Free Skating",
+)
+# The DT_SCHEDULE XML of the same schedule, as an earlier parse kept it.
+ENGLISH_XML = schedule_xml(
     ("FSKXSYNCHRONJUNIOR----QUAL000100--", "2026-10-31T10:00:00",
      "Junior Synchronized Skating Short Program"),
     ("FSKXSYNCHRON----------FNL-000100--", "2026-10-31T12:00:00",
@@ -46,7 +59,8 @@ ENGLISH = schedule_xml(
 
 
 def parsed(source=ENGLISH):
-    rows, categories, _meta = sp.parse_schedule_data(source)
+    rows, categories, _meta = (sp.parse_schedule_data(source) if sp.is_pdf(source)
+                               else sp.parse_schedule_xml(source))
     return {"schedule": rows, "categories": categories}
 
 
@@ -80,8 +94,9 @@ RENAMED_PRINTED = [
 
 # ── parsing links every row ───────────────────────────────────────────────────
 
-def test_xml_rows_carry_their_category_and_segment():
-    structure = parsed()
+@pytest.mark.parametrize("source", [ENGLISH, ENGLISH_XML], ids=["pdf", "xml"])
+def test_rows_carry_their_category_and_segment(source):
+    structure = parsed(source)
     for row in structure["schedule"]:
         category = st.find_category(structure, row["categoryId"])
         segment = st.find_segment(category, row["segmentId"])
@@ -89,7 +104,7 @@ def test_xml_rows_carry_their_category_and_segment():
         assert segment["name"] == row["segment_name"]
 
 
-def test_pdf_rows_carry_their_category_and_segment():
+def test_rows_of_no_category_link_to_nothing():
     rows = [
         {"date": "20261031", "start_time": "09:00", "event_name": "Arvonta",
          "category_name": "Arvonta", "segment_name": "Results"},
@@ -151,12 +166,9 @@ def legacy(structure):
     return structure
 
 
-def test_a_legacy_schedule_is_linked_by_code_from_its_source():
+def test_a_legacy_pdf_schedule_is_linked_by_position():
     structure = legacy(parsed())
     rename(structure)
-    # Reordered too: the code, not the position, says which category is which.
-    for c in structure["categories"]:
-        c["order"] = 5 - c["order"]
     assert not sp.schedule_rows_linked(structure["schedule"])
 
     assert sp.link_legacy_schedule(structure, ENGLISH)
@@ -164,12 +176,14 @@ def test_a_legacy_schedule_is_linked_by_code_from_its_source():
     assert printed(structure) == RENAMED_PRINTED
 
 
-def test_a_legacy_schedule_without_codes_is_linked_by_position():
-    structure = legacy(parsed())
+def test_a_legacy_xml_schedule_is_linked_by_code():
+    structure = legacy(parsed(ENGLISH_XML))
     rename(structure)
+    # Reordered too: the code, not the position, says which category is which.
     for c in structure["categories"]:
-        c["code"] = ""
-    assert sp.link_legacy_schedule(structure, ENGLISH)
+        c["order"] = 5 - c["order"]
+
+    assert sp.link_legacy_schedule(structure, ENGLISH_XML)
     assert printed(structure) == RENAMED_PRINTED
 
 
@@ -184,13 +198,18 @@ def test_a_source_that_does_not_reproduce_the_rows_links_nothing():
     assert printed(structure) == ENGLISH_PRINTED
 
 
-def test_generation_links_a_legacy_schedule_from_the_kept_file(storage):
-    structure = legacy(parsed())
+@pytest.mark.parametrize("kept", ["xml", "pdf"])
+def test_generation_links_a_legacy_schedule_from_the_kept_file(storage, kept):
+    source = ENGLISH_XML if kept == "xml" else ENGLISH
+    structure = legacy(parsed(source))
     rename(structure)
     folder = "Spring Trophy 2026-abc12345"
-    # A stale PDF from an earlier parse beside the XML the rows came from.
-    storage.container.blobs[f"{folder}/schedule.pdf"] = b"%PDF-1.4 not this one"
-    storage.container.blobs[f"{folder}/schedule.xml"] = ENGLISH
+    storage.container.blobs[f"{folder}/schedule.{kept}"] = source
+    # A stale file from another parse beside the one the rows came from.
+    other = "pdf" if kept == "xml" else "xml"
+    storage.container.blobs[f"{folder}/schedule.{other}"] = (
+        schedule_pdf("31.10.2026", "09:00:0010:00:00  4  Naiset   Vapaaohjelma")
+        if other == "pdf" else schedule_xml())
 
     fa._link_legacy_schedule(folder, structure)
     assert printed(structure) == RENAMED_PRINTED

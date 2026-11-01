@@ -185,7 +185,12 @@ def parse_schedule(pdf_path_or_stream):
     return rows, build_categories_from_schedule(rows, default)
 
 
-# ── DT_SCHEDULE XML (ISU OdfBody) — the preferred, structured input ──────────────
+# ── DT_SCHEDULE XML (ISU OdfBody) — no longer accepted ───────────────────────────
+# FS Manager writes the XML with its standard English names for international
+# categories, while its custom name file only rewrites the PDFs, so the XML's
+# names are the wrong ones. A schedule is parsed from the PDF only; this parser
+# stays solely to link the rows of competitions parsed from a kept
+# `schedule.xml` before that (`link_legacy_schedule`).
 
 def _local(tag: str) -> str:
     return tag.split('}')[-1] if isinstance(tag, str) else ""
@@ -307,12 +312,20 @@ def parse_schedule_xml(xml_bytes):
     return rows, categories, meta
 
 
+class ScheduleNotPdf(ValueError):
+    """The schedule is not a PDF (a DT_SCHEDULE XML, say)."""
+
+
+def is_pdf(data: bytes) -> bool:
+    # The header may follow a little leading junk (the spec allows 1 KiB).
+    return b"%PDF-" in (data or b"")[:1024]
+
+
 def parse_schedule_data(data: bytes):
-    """Format-detecting entry point. Accepts DT_SCHEDULE XML (preferred) or a
-    schedule PDF. Returns (rows, categories, meta)."""
-    head = data[:2000].lstrip()
-    if head[:5] == b"<?xml" or b"DT_SCHEDULE" in head or b"OdfBody" in head:
-        return parse_schedule_xml(data)
+    """Parse the competition schedule PDF. Returns (rows, categories, meta);
+    anything but a PDF raises ScheduleNotPdf."""
+    if not is_pdf(data):
+        raise ScheduleNotPdf("the schedule must be a PDF")
     rows, categories = parse_schedule(io.BytesIO(data))
     return rows, categories, _meta_from_rows(rows)
 
@@ -376,7 +389,8 @@ def _order_key(c, other):
 
 def link_legacy_schedule(structure: dict, source: bytes) -> bool:
     """Give the rows of a schedule parsed before they carried category links the
-    ids of today's categories, by re-parsing the kept source (`schedule.xml|pdf`).
+    ids of today's categories, by re-parsing the kept source (`schedule.pdf`, or
+    the `schedule.xml` of a competition parsed while XML was still accepted).
 
     The re-parse must reproduce the stored rows exactly (else this source is not
     the one they came from, or the parser has changed since) — then its fresh
@@ -385,7 +399,8 @@ def link_legacy_schedule(structure: dict, source: bytes) -> bool:
     then by position. Rows whose category finds no partner stay unlinked and
     print as parsed. Returns whether the rows were linked; mutates them in place."""
     rows = structure.get("schedule") or []
-    fresh_rows, fresh_cats, _meta = parse_schedule_data(source)
+    fresh_rows, fresh_cats, _meta = (parse_schedule_data(source) if is_pdf(source)
+                                     else parse_schedule_xml(source))
     if [_row_signature(r) for r in fresh_rows] != [_row_signature(r) for r in rows]:
         return False
     stored_cats = structure.get("categories") or []

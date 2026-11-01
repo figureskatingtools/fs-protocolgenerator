@@ -72,7 +72,7 @@ def new_category(name: str, discipline: str, order: int) -> dict:
     return {
         "id": new_id("cat"),
         "name": name,
-        "code": "",          # ISU event code (from a DT_SCHEDULE import), if any
+        "code": "",          # ISU event code (an earlier DT_SCHEDULE import, or learned from FSM filenames), if any
         "discipline": discipline if discipline in DISCIPLINES else "single",
         "order": order,
         # Team-page defaults for this category's teams; None = inherit the
