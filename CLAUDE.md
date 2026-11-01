@@ -391,8 +391,8 @@ automatic with body `"autoAssigned": true`.
     name. **Never by position**: a removal + an addition reuses `order`, so a
     replacement would print at the deleted item's times. Anything not
     identifiable stays unlinked and prints as parsed (a renamed category of an
-    older PDF parse, a renamed segment of any older parse) — re-parsing the
-    schedule PDF links everything.
+    older PDF parse, a renamed segment of any older parse). A fresh parse links
+    every row, but rebuilds the categories (renames and slot files go).
   - **DT_SCHEDULE XML (legacy only)** — `parse_schedule_xml` stays solely so
     `link_legacy_schedule` can re-parse the `schedule.xml` of competitions
     parsed from it before; never call it for a new parse. It groups `<Unit>`s by
