@@ -373,6 +373,8 @@ automatic with body `"autoAssigned": true`.
   standard English names for international categories into every XML it
   exports, while its custom name file rewrites only the PDFs — so the
   DT_SCHEDULE XML's names are the wrong ones, and it is not accepted.
+  - `is_pdf` = starts with `%PDF-` *and* pypdf opens it with ≥1 page (a marker in
+    an XML comment must not get a participant file stored as `schedule.pdf`).
   - **Schedule PDF** — calibrated against the Finnish "COMPETITION
     SCHEDULE" export: glued start/finish times, 2-space category|segment columns,
     multi-day segment merge, and synchro detected from the document title
@@ -385,7 +387,12 @@ automatic with body `"autoAssigned": true`.
     linked per generation (in memory, `function_app._link_legacy_schedule` →
     `schedule_parser.link_legacy_schedule`) by re-parsing the kept
     `schedule.xml|pdf` — only when that reproduces the stored rows exactly;
-    categories pair by code, then name, then original position.
+    categories pair by code, then name, then original position (segments by
+    name, then position). Position counts only while the stored list is provably
+    the parse's (`_positions_intact`: same count, orders 0..n-1, and for a
+    category the same segment count); anything uncertain stays unlinked and
+    prints as parsed. The tool never edits `order`, so only an
+    `edit_structure` swap of two orders could still mislead it.
   - **DT_SCHEDULE XML (legacy only)** — `parse_schedule_xml` stays solely so
     `link_legacy_schedule` can re-parse the `schedule.xml` of competitions
     parsed from it before; never call it for a new parse. It groups `<Unit>`s by

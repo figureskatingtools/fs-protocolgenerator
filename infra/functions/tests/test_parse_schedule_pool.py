@@ -195,6 +195,17 @@ def test_a_dt_schedule_xml_upload_is_refused(comp, storage):
     assert storage.container.blobs == {}
 
 
+def test_an_xml_with_a_pdf_marker_is_refused(comp, storage):
+    """A `%PDF-` in an XML comment near the top does not make it a PDF: it
+    would otherwise be kept, birth dates and all, as `schedule.pdf`."""
+    disguised = (b'<?xml version="1.0"?><!-- %PDF-1.7 -->\n'
+                 b'<OdfBody DocumentType="DT_PARTIC"><Participant BirthDate="2010-01-01"/></OdfBody>')
+    not_pdf(parse(body=disguised))
+    not_pdf(parse(body=b"%PDF-1.7\n" + disguised))      # the header, but no PDF behind it
+    assert comp.get("categories") == []
+    assert storage.container.blobs == {}
+
+
 def test_a_dt_schedule_xml_in_the_pool_is_refused(comp, pool, storage):
     not_pdf(parse(poolName=XML_NAME, source="fsm"))
     assert comp.get("categories") == []

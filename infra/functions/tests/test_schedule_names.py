@@ -220,3 +220,63 @@ def test_generation_without_a_kept_file_prints_as_parsed(storage):
     rename(structure)
     fa._link_legacy_schedule("Spring Trophy 2026-abc12345", structure)
     assert printed(structure) == ENGLISH_PRINTED
+
+
+def test_a_category_added_in_a_removed_ones_place_is_not_linked():
+    """Remove the senior category, add a hand-made one: `add_category` gives it
+    the freed position, but it has none of the senior's segments — so it does
+    not inherit the senior's schedule rows."""
+    structure = legacy(parsed())
+    rename(structure)
+    senior = by_name(structure, "Senior Synchronized Skating")
+    structure["categories"].remove(senior)
+    structure["categories"].append(st.new_category("Hand-made", "synchro", 1))
+
+    assert sp.link_legacy_schedule(structure, ENGLISH)
+    assert printed(structure) == [
+        ("Juniorit", "Short Program"),
+        ("Senior Synchronized Skating", "Free Skating"),
+        ("Juniorit", "Vapaaohjelma"),
+    ]
+
+
+def test_positions_are_no_evidence_once_the_list_has_changed():
+    """An extra category (or a removed one) means the positions are not the
+    parse's any more: a renamed category is then left unlinked, never guessed."""
+    structure = legacy(parsed())
+    rename(structure)
+    structure["categories"].append(st.new_category("Hand-made", "single", 2))
+
+    assert sp.link_legacy_schedule(structure, ENGLISH)
+    # The junior's rows print as parsed; the unrenamed senior still links by name.
+    assert printed(structure) == ENGLISH_PRINTED
+    senior = by_name(structure, "Senior Synchronized Skating")
+    assert structure["schedule"][1]["categoryId"] == senior["id"]
+    assert structure["schedule"][0]["categoryId"] is None
+
+
+def test_renamed_segments_link_by_position_only_while_intact():
+    structure = legacy(parsed())
+    rename(structure)
+    junior = by_name(structure, "Juniorit")
+    # A segment `order` written through `edit_structure` (the tool never does).
+    next(s for s in junior["segments"] if s["name"] == "Vapaaohjelma")["order"] = 5
+
+    assert sp.link_legacy_schedule(structure, ENGLISH)
+    # The category still links by position; "Short Program" by name. The renamed
+    # free skating is no longer provably the parse's second segment, so its row
+    # keeps the parsed segment name.
+    assert printed(structure) == [
+        ("Juniorit", "Short Program"),
+        ("Senior Synchronized Skating", "Free Skating"),
+        ("Juniorit", "Free Skating"),
+    ]
+
+
+def test_a_category_with_other_segments_is_not_linked_by_position():
+    structure = legacy(parsed())
+    rename(structure)
+    by_name(structure, "Juniorit")["segments"].append(st.new_segment("Exhibition", 2))
+
+    assert sp.link_legacy_schedule(structure, ENGLISH)
+    assert printed(structure) == ENGLISH_PRINTED

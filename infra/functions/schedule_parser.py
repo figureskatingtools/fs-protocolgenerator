@@ -317,8 +317,15 @@ class ScheduleNotPdf(ValueError):
 
 
 def is_pdf(data: bytes) -> bool:
-    # The header may follow a little leading junk (the spec allows 1 KiB).
-    return b"%PDF-" in (data or b"")[:1024]
+    """A PDF from its first byte that pypdf can open with at least one page.
+    A `%PDF-` merely somewhere near the top is not enough: an XML carrying it
+    in a comment would otherwise be kept as `schedule.pdf`."""
+    if not (data or b"").startswith(b"%PDF-"):
+        return False
+    try:
+        return len(PdfReader(io.BytesIO(data)).pages) > 0
+    except Exception:
+        return False
 
 
 def parse_schedule_data(data: bytes):
@@ -380,11 +387,20 @@ def _name_key(c, _other):
 
 
 def _order_key(c, other):
-    # Position from the original parse; a stored category whose code says it is
-    # a different one never takes the slot.
+    # Position from the original parse (plus, for a category, how many segments
+    # it has); a stored category whose code says it is a different one never
+    # takes the slot.
     if other is not None and other.get("code") and c.get("code") and other["code"] != c["code"]:
         return None
-    return ("order", c.get("order"))
+    return ("order", c.get("order"), len(c.get("segments") or []))
+
+
+def _positions_intact(fresh_items, stored_items) -> bool:
+    """Whether the stored items still sit exactly at the parse's positions: as
+    many of them, numbered 0..n-1. The tool never reorders, but `order` is
+    writable through `edit_structure` and a removal + an addition can reuse a
+    number; when anything like that shows, position is no evidence at all."""
+    return sorted(s.get("order") for s in stored_items) == list(range(len(fresh_items)))
 
 
 def link_legacy_schedule(structure: dict, source: bytes) -> bool:
@@ -396,21 +412,26 @@ def link_legacy_schedule(structure: dict, source: bytes) -> bool:
     the one they came from, or the parser has changed since) — then its fresh
     categories are paired with the stored ones by code, then by name (left
     unrenamed), then by their position from the original parse; segments by name,
-    then by position. Rows whose category finds no partner stay unlinked and
-    print as parsed. Returns whether the rows were linked; mutates them in place."""
+    then by position. Position counts only while the stored list provably still
+    has the parse's positions (`_positions_intact`); a match left uncertain stays
+    unlinked, and its rows print as parsed. Returns whether the rows were linked; mutates them in place."""
     rows = structure.get("schedule") or []
     fresh_rows, fresh_cats, _meta = (parse_schedule_data(source) if is_pdf(source)
                                      else parse_schedule_xml(source))
     if [_row_signature(r) for r in fresh_rows] != [_row_signature(r) for r in rows]:
         return False
     stored_cats = structure.get("categories") or []
-    cat_of = _match(fresh_cats, stored_cats, (_code_key, _name_key, _order_key))
+    cat_keys = (_code_key, _name_key) + (
+        (_order_key,) if _positions_intact(fresh_cats, stored_cats) else ())
+    cat_of = _match(fresh_cats, stored_cats, cat_keys)
     seg_of = {}
     for f in fresh_cats:
         stored = cat_of.get(f["id"])
         if stored:
-            seg_of.update(_match(f["segments"], stored.get("segments") or [],
-                                 (_name_key, _order_key)))
+            stored_segs = stored.get("segments") or []
+            seg_keys = (_name_key,) + (
+                (_order_key,) if _positions_intact(f["segments"], stored_segs) else ())
+            seg_of.update(_match(f["segments"], stored_segs, seg_keys))
     for row, fresh in zip(rows, fresh_rows):
         stored = cat_of.get(fresh.get("categoryId"))
         segment = seg_of.get(fresh.get("segmentId"))
