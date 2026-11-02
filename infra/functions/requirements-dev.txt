@@ -6,7 +6,7 @@
 #   python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 #   .venv/bin/python -m pytest tests -q
 -r requirements.txt
-pytest~=9.1
+pytest~=9.2
 # Independent PDF inspector (qpdf) for tests/test_pdf_privacy.py — test-only, so
 # the privacy checks do not trust the very library (pypdf) that wrote the file.
 pikepdf~=10.17
