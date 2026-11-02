@@ -72,7 +72,7 @@ def new_category(name: str, discipline: str, order: int) -> dict:
     return {
         "id": new_id("cat"),
         "name": name,
-        "code": "",          # ISU event code (from a DT_SCHEDULE import), if any
+        "code": "",          # ISU event code (an earlier DT_SCHEDULE import, or learned from FSM filenames), if any
         "discipline": discipline if discipline in DISCIPLINES else "single",
         "order": order,
         # Team-page defaults for this category's teams; None = inherit the
@@ -196,6 +196,26 @@ def sorted_categories(structure: dict):
 
 def sorted_segments(category: dict):
     return sorted(category.get("segments", []), key=lambda s: (s.get("order", 0), s.get("name", "")))
+
+
+def schedule_rows(structure: dict):
+    """The time-schedule rows as printed. A row linked to a category (and segment)
+    carries their *current* names, so a category renamed in the tool reads the
+    same on the schedule page as everywhere else; the schedule's own wording is
+    only the default. A row with no link, or whose category is gone, prints as
+    parsed. Copies — the stored rows are left alone."""
+    out = []
+    for row in structure.get("schedule") or []:
+        row = dict(row)
+        category = find_category(structure, row.get("categoryId")) if row.get("categoryId") else None
+        if category and (category.get("name") or "").strip():
+            row["category_name"] = category["name"].strip()
+            segment = find_segment(category, row.get("segmentId")) if row.get("segmentId") else None
+            if segment and (segment.get("name") or "").strip():
+                row["segment_name"] = segment["name"].strip()
+            row["event_name"] = f"{row['category_name']} {row.get('segment_name') or ''}".strip()
+        out.append(row)
+    return out
 
 
 # ── team pages ────────────────────────────────────────────────────────────────

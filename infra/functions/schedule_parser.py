@@ -128,13 +128,16 @@ def build_categories_from_schedule(rows, default_discipline=None):
     Ambiguous categories fall back to `default_discipline` (e.g. a synchro
     competition), then to 'single'."""
     grouped = {}
+    placed = []          # (row, category name, segment name) of every competition row
     for row in rows:
+        _link_row(row, None, None)
         cat_name = (row.get("category_name") or "").strip()
         seg_name = (row.get("segment_name") or "").strip()
         if not cat_name:
             continue
         if any(word in row.get("event_name", "").lower() for word in _NON_COMPETITION):
             continue
+        placed.append((row, cat_name, seg_name))
         order_key = (row.get("date") or "", row.get("start_time") or "")
         bucket = grouped.setdefault(cat_name, {"order_key": order_key, "segments": {}})
         if order_key < bucket["order_key"]:
@@ -144,15 +147,29 @@ def build_categories_from_schedule(rows, default_discipline=None):
             segs[seg_name] = order_key
 
     categories = []
+    links = {}           # (category name, segment name) -> (categoryId, segmentId)
     for c_index, (cat_name, info) in enumerate(
             sorted(grouped.items(), key=lambda kv: kv[1]["order_key"])):
         discipline = discipline_signal(cat_name) or default_discipline or "single"
         category = new_category(cat_name, discipline, c_index)
         for s_index, (seg_name, _key) in enumerate(
                 sorted(info["segments"].items(), key=lambda kv: kv[1])):
-            category["segments"].append(new_segment(seg_name, s_index))
+            segment = new_segment(seg_name, s_index)
+            category["segments"].append(segment)
+            links[(cat_name, seg_name)] = (category["id"], segment["id"])
         categories.append(category)
+    for row, cat_name, seg_name in placed:
+        _link_row(row, *links[(cat_name, seg_name)])
     return categories
+
+
+def _link_row(row, category_id, segment_id):
+    """Tie a schedule row to the category/segment it was grouped into, so the
+    printed time schedule follows a later rename (`structure.schedule_rows`).
+    Rows that belong to no category (meetings, practices) keep explicit Nones:
+    the keys' presence is what tells a row parsed this way from an older one."""
+    row["categoryId"] = category_id
+    row["segmentId"] = segment_id
 
 
 def parse_schedule(pdf_path_or_stream):
@@ -168,7 +185,12 @@ def parse_schedule(pdf_path_or_stream):
     return rows, build_categories_from_schedule(rows, default)
 
 
-# ── DT_SCHEDULE XML (ISU OdfBody) — the preferred, structured input ──────────────
+# ── DT_SCHEDULE XML (ISU OdfBody) — no longer accepted ───────────────────────────
+# FS Manager writes the XML with its standard English names for international
+# categories, while its custom name file only rewrites the PDFs, so the XML's
+# names are the wrong ones. A schedule is parsed from the PDF only; this parser
+# stays solely to link the rows of competitions parsed from a kept
+# `schedule.xml` before that (`link_legacy_schedule`).
 
 def _local(tag: str) -> str:
     return tag.split('}')[-1] if isinstance(tag, str) else ""
@@ -211,6 +233,7 @@ def parse_schedule_xml(xml_bytes):
 
     rows = []
     groups = {}          # category-code -> bucket
+    placed = []          # (row, category key, segment name)
     date_set = set()
     rink = ""
 
@@ -238,11 +261,12 @@ def parse_schedule_xml(xml_bytes):
         if not cat_name:
             cat_name = item
 
-        rows.append({
+        row = {
             "date": ymd, "date_display": disp, "start_time": hhmm, "end_time": "",
             "entries": 0, "event_name": item or f"{cat_name} {seg_name}".strip(),
             "category_name": cat_name, "segment_name": seg_name or "Results",
-        })
+        }
+        rows.append(row)
         if disp:
             date_set.add((ymd, disp))
         if venue_name and not rink:
@@ -260,20 +284,26 @@ def parse_schedule_xml(xml_bytes):
         segs = bucket["segments"]
         if seg_name not in segs or order_key < segs[seg_name]:
             segs[seg_name] = order_key
+        placed.append((row, key, seg_name))
 
     rows.sort(key=lambda r: (r["date"], r["start_time"]))
 
     categories = []
     name_counts = {}
-    for i, (_key, bucket) in enumerate(sorted(groups.items(), key=lambda kv: kv[1]["order_key"])):
+    links = {}           # (category key, segment name) -> (categoryId, segmentId)
+    for i, (key, bucket) in enumerate(sorted(groups.items(), key=lambda kv: kv[1]["order_key"])):
         name = bucket["name"] or "Category"
         name_counts[name] = name_counts.get(name, 0) + 1
         disp_name = name if name_counts[name] == 1 else f"{name} ({_roman(name_counts[name])})"
         category = new_category(disp_name, bucket["discipline"], i)
         category["code"] = bucket["code"]
         for j, (seg, _k) in enumerate(sorted(bucket["segments"].items(), key=lambda kv: kv[1])):
-            category["segments"].append(new_segment(seg, j))
+            segment = new_segment(seg, j)
+            category["segments"].append(segment)
+            links[(key, seg)] = (category["id"], segment["id"])
         categories.append(category)
+    for row, key, seg_name in placed:
+        _link_row(row, *links[(key, seg_name)])
 
     meta = {"rink": rink}
     if date_set:
@@ -282,12 +312,27 @@ def parse_schedule_xml(xml_bytes):
     return rows, categories, meta
 
 
+class ScheduleNotPdf(ValueError):
+    """The schedule is not a PDF (a DT_SCHEDULE XML, say)."""
+
+
+def is_pdf(data: bytes) -> bool:
+    """A PDF from its first byte that pypdf can open with at least one page.
+    A `%PDF-` merely somewhere near the top is not enough: an XML carrying it
+    in a comment would otherwise be kept as `schedule.pdf`."""
+    if not (data or b"").startswith(b"%PDF-"):
+        return False
+    try:
+        return len(PdfReader(io.BytesIO(data)).pages) > 0
+    except Exception:
+        return False
+
+
 def parse_schedule_data(data: bytes):
-    """Format-detecting entry point. Accepts DT_SCHEDULE XML (preferred) or a
-    schedule PDF. Returns (rows, categories, meta)."""
-    head = data[:2000].lstrip()
-    if head[:5] == b"<?xml" or b"DT_SCHEDULE" in head or b"OdfBody" in head:
-        return parse_schedule_xml(data)
+    """Parse the competition schedule PDF. Returns (rows, categories, meta);
+    anything but a PDF raises ScheduleNotPdf."""
+    if not is_pdf(data):
+        raise ScheduleNotPdf("the schedule must be a PDF")
     rows, categories = parse_schedule(io.BytesIO(data))
     return rows, categories, _meta_from_rows(rows)
 
@@ -300,3 +345,72 @@ def _meta_from_rows(rows):
         return {}
     span = dates[0][1] if dates[0][1] == dates[-1][1] else f"{dates[0][1]} – {dates[-1][1]}"
     return {"dates": span}
+
+
+# ── linking a schedule parsed before rows carried their category ────────────────
+
+def schedule_rows_linked(rows) -> bool:
+    """Whether these rows were parsed with category links (see `_link_row`)."""
+    return all("categoryId" in r for r in rows or [])
+
+
+def _row_signature(row):
+    return (row.get("date"), row.get("start_time"),
+            row.get("category_name"), row.get("segment_name"))
+
+
+def _match(fresh_items, stored_items, keys):
+    """fresh id -> stored item, trying each key function in turn on what is still
+    unmatched; a key only links a pair when it singles out one stored item."""
+    found, taken = {}, set()
+    for key in keys:
+        for f in fresh_items:
+            if f["id"] in found:
+                continue
+            fk = key(f)
+            if fk is None:
+                continue
+            hits = [s for s in stored_items if s["id"] not in taken and key(s) == fk]
+            if len(hits) == 1:
+                found[f["id"]] = hits[0]
+                taken.add(hits[0]["id"])
+    return found
+
+
+def _code_key(c):
+    return c.get("code") or None
+
+
+def _name_key(c):
+    return (c.get("name") or "").strip().casefold() or None
+
+
+def link_legacy_schedule(structure: dict, source: bytes) -> bool:
+    """Give the rows of a schedule parsed before they carried category links the
+    ids of today's categories, by re-parsing the kept source (`schedule.pdf`, or
+    the `schedule.xml` of a competition parsed while XML was still accepted).
+
+    The re-parse must reproduce the stored rows exactly (else this source is not
+    the one they came from, or the parser has changed since) — then its fresh
+    categories are paired with the stored ones by ISU code, then by name (left
+    unrenamed), and segments by name. Never by position: `order` is reused by a
+    removal + an addition, so a replacement would inherit the deleted item's
+    times. A row whose category or segment cannot be identified that way keeps
+    its parsed name. Returns whether the rows were linked; mutates them in place."""
+    rows = structure.get("schedule") or []
+    fresh_rows, fresh_cats, _meta = (parse_schedule_data(source) if is_pdf(source)
+                                     else parse_schedule_xml(source))
+    if [_row_signature(r) for r in fresh_rows] != [_row_signature(r) for r in rows]:
+        return False
+    cat_of = _match(fresh_cats, structure.get("categories") or [], (_code_key, _name_key))
+    seg_of = {}
+    for f in fresh_cats:
+        stored = cat_of.get(f["id"])
+        if stored:
+            seg_of.update(_match(f["segments"], stored.get("segments") or [], (_name_key,)))
+    for row, fresh in zip(rows, fresh_rows):
+        stored = cat_of.get(fresh.get("categoryId"))
+        segment = seg_of.get(fresh.get("segmentId"))
+        _link_row(row, stored["id"] if stored else None,
+                  segment["id"] if stored and segment else None)
+    return True

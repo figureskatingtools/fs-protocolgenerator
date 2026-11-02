@@ -30,7 +30,7 @@ import branding
 import generate_pages
 import pdf_sanitize
 import results_parser
-from structure import (sorted_categories, sorted_segments,
+from structure import (schedule_rows, sorted_categories, sorted_segments,
                        team_name_mode, team_page_enabled, team_text_rows)
 
 # Per-page furniture of an FSM/ISU export: the "printed:" timestamp line and the
@@ -264,8 +264,8 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
     stats = _competition_stats(structure, get_file_bytes)
     _append_pdf_bytes(writer, generate_pages.event_info_page(event, chrome, stats))
 
-    # 3. Time schedule page
-    _append_pdf_bytes(writer, generate_pages.time_schedule_page(structure.get("schedule") or [], chrome))
+    # 3. Time schedule page (category/segment names as currently set in the tool)
+    _append_pdf_bytes(writer, generate_pages.time_schedule_page(schedule_rows(structure), chrome))
 
     # 4. Categories (schedule order)
     for category in sorted_categories(structure):

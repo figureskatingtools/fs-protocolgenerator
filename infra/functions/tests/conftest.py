@@ -81,6 +81,27 @@ def proxy_gate(monkeypatch):
     pa.clear_cache()
 
 
+# ── a competition schedule PDF ────────────────────────────────────────────────
+
+def schedule_pdf(*lines):
+    """A schedule PDF whose text is these lines, top to bottom — the shape of
+    FS Manager's "COMPETITION SCHEDULE" print the parser reads: a dd.mm.yyyy
+    line opens each day, then rows like
+    "15:00:0016:21:00  12  Naiset   Lyhytohjelma" (category and segment in
+    2-space separated columns)."""
+    import io
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    y = 800
+    for line in ("COMPETITION SCHEDULE",) + lines:
+        c.drawString(40, y, line)
+        y -= 14
+    c.save()
+    return buf.getvalue()
+
+
 # ── dict-backed stand-ins for blob storage ────────────────────────────────────
 
 class FakeDownload:
