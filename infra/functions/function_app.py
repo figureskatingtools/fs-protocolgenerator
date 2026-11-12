@@ -23,6 +23,7 @@ from dt_partic import parse_participants, parse_team_rosters
 import fallback_photos
 import image_sanitize
 import roster_matching
+import pool_codes
 from results_parser import parse_top_three, count_result_rows, parse_result_rows
 from assemble import assemble_protocol
 from pdf_sanitize import SanitizeError
@@ -985,6 +986,20 @@ def _heif_to_jpeg(filename, body):
     return f"{stem}.jpg", cleaned[0]
 
 
+def _learn_from_assignment(structure, target, filename):
+    """What a file placed into a category teaches it: an FS Manager export's
+    filename carries the category's ISU code (`structure.code_from_filename`),
+    which also settles the discipline; a hand-named head page may still carry
+    the discipline prefix alone. Any slot of a category counts — results, panel,
+    judges' details, head page — not only the head page."""
+    cat = st.find_category(structure, (target or {}).get("categoryId"))
+    if not cat:
+        return
+    if not st.apply_code(cat, st.code_from_filename(filename)) \
+            and (target or {}).get("kind") == "categoryTitle":
+        st.apply_title_discipline(cat, filename)
+
+
 def _register_upload(structure, folder_path, filename, body, params):
     """Store an uploaded file's bytes, register it in the structure and — when
     the caller named a slot — assign it there straight away. Returns
@@ -1033,9 +1048,7 @@ def _register_upload(structure, folder_path, filename, body, params):
                 cat = st.find_category(structure, target.get("categoryId"))
                 seg = st.find_segment(cat, target.get("segmentId")) if cat else None
                 _fill_segment_count_from_results(structure, seg)
-            elif slot_kind == "categoryTitle":
-                cat = st.find_category(structure, target.get("categoryId"))
-                st.apply_title_discipline(cat, filename)
+            _learn_from_assignment(structure, target, filename)
             # Tag only a placement that actually happened: a file that falls
             # back to the tray (the except below) is nothing to confirm.
             if _truthy(params.get('autoAssigned')):
@@ -1273,10 +1286,9 @@ def assign_file(req: func.HttpRequest) -> func.HttpResponse:
             cat = st.find_category(structure, target.get("categoryId"))
             seg = st.find_segment(cat, target.get("segmentId")) if cat else None
             _fill_segment_count_from_results(structure, seg)
-        elif target.get("kind") == "categoryTitle" and file_id:
-            cat = st.find_category(structure, target.get("categoryId"))
+        if file_id:
             meta = structure.get("files", {}).get(file_id) or {}
-            st.apply_title_discipline(cat, meta.get("filename"))
+            _learn_from_assignment(structure, target, meta.get("filename"))
         if file_id:
             # Moving a file by hand *is* the confirmation an auto-placement was
             # waiting for — including a move back to the tray. A caller that is
@@ -1325,6 +1337,90 @@ def delete_file(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Internal server error", status_code=500)
 
 
+# ── category codes from the competition's FSM files ───────────────────────────
+
+LEARN_SAMPLES_MAX = 60
+
+
+def _learn_codes_from_pool(entity, structure) -> dict:
+    """Stamp the ISU codes (and so the disciplines) the competition's own FS
+    Manager files reveal onto the schedule's categories; see `pool_codes`.
+
+    Lists the bound platform competition's pool (`fsm/`, then `uploads/`), reads
+    one coded report per category code the structure does not carry yet, and
+    applies what each one prints. Best-effort by design: an unbound record, an
+    unconfigured pool, a listing or download failure, an unreadable PDF — each
+    just means nothing (more) is learned, never a failed request. Logs carry
+    counts and exception types only: a pool filename can name a person.
+    Returns `{categoryId: code}` for what was stamped."""
+    platform_id = (entity or {}).get("PlatformId")
+    if not platform_id:
+        return {}
+    try:
+        container = sh.get_platform_container_client()
+        if container is None:
+            return {}
+        known = {st.strip_code(c.get("code")) for c in structure.get("categories") or []}
+        known.discard("")
+        names = []
+        for folder in ("fsm", "uploads"):
+            prefix = f"{platform_id}/{folder}/"
+            for blob in container.list_blobs(name_starts_with=prefix):
+                size = getattr(blob, "size", None)
+                if size is not None and size > pool_codes.MAX_SAMPLE_BYTES:
+                    continue
+                names.append((folder, blob.name[len(prefix):]))
+        picks = pool_codes.pick_samples(names)
+        samples = []
+        for code, (folder, filename) in picks.items():
+            if code in known:
+                continue
+            if len(samples) >= LEARN_SAMPLES_MAX:
+                break
+            data = container.get_blob_client(f"{platform_id}/{folder}/{filename}").download_blob().readall()
+            samples.append((code, pool_codes.page1_lines(data)))
+        learned = pool_codes.learn_codes(structure, samples)
+        logging.info(f"Pool code learning: {len(picks)} coded reports, {len(samples)} read, "
+                     f"{len(learned)} categories stamped")
+        return learned
+    except Exception as e:
+        logging.warning(f"Pool code learning skipped: {type(e).__name__}")
+        return {}
+
+
+@app.route(route="learn_pool_codes", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
+def learn_pool_codes(req: func.HttpRequest) -> func.HttpResponse:
+    """Learn the categories' ISU codes from the FSM files in the competition pool
+    (`_learn_codes_from_pool`) — the site calls it when a competition still has
+    code-less categories and FS Manager has pushed its reports — and, when the
+    stored roster report still lists unplaced teams, re-match them straight away
+    with the codes now known. Body `{id}`; answers `{learned, structure}`, with an
+    empty `learned` when the pool had nothing to teach (never an error for that)."""
+    caller = _require_user(req)
+    if not caller:
+        return _unauthorized()
+    try:
+        body = req.get_json()
+        comp_id = body.get('id')
+    except ValueError:
+        return func.HttpResponse("Invalid JSON body", status_code=400)
+    if not comp_id:
+        return func.HttpResponse("Missing id", status_code=400)
+    try:
+        entity, folder_path, denied = _require_competition(caller, comp_id, "write")
+        if denied:
+            return denied
+        structure = sh.read_structure(folder_path)
+        learned = _learn_codes_from_pool(entity, structure)
+        if learned:
+            _rematch_after_results(structure, folder_path)
+            sh.write_structure(folder_path, structure)
+        return sh.json_response({"learned": learned, "structure": structure})
+    except Exception as e:
+        logging.error(f"Error learning pool codes: {type(e).__name__}")
+        return func.HttpResponse("Internal server error", status_code=500)
+
+
 # ── schedule + roster ──────────────────────────────────────────────────────────
 
 def _apply_schedule_meta(event: dict, meta: dict) -> None:
@@ -1364,8 +1460,11 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
 
     Either way an existing category list is only rebuilt with `force=true`
     (409 otherwise), the source file is kept as `schedule.pdf` (a `schedule.xml`
-    kept by an earlier XML parse is removed), and the parsed dates auto-fill the
-    event. A pool parse echoes back which pool file it used in `source`."""
+    kept by an earlier XML parse is removed), the parsed dates auto-fill the
+    event, and the categories' ISU codes and disciplines are learned from the FSM
+    reports already in the competition pool (`_learn_codes_from_pool`, best-effort;
+    `learnedCodes` in the response). A pool parse echoes back which pool file it
+    used in `source`."""
     caller = _require_user(req)
     if not caller:
         return _unauthorized()
@@ -1426,10 +1525,14 @@ def parse_schedule(req: func.HttpRequest) -> func.HttpResponse:
         structure["scheduleParsed"] = True
         # Auto-fill event fields the schedule gives us, without clobbering user input.
         _apply_schedule_meta(structure.setdefault("event", {}), meta)
+        # The PDF prints names only; the FSM reports already in the pool carry
+        # the codes (and with them the disciplines) for those very names.
+        learned = _learn_codes_from_pool(entity, structure)
         sh.write_structure(folder_path, structure)
         result = {
             "rows": len(rows),
             "categories": len(structure["categories"]),
+            "learnedCodes": len(learned),
             "structure": structure,
         }
         if pool_ref:
@@ -1736,6 +1839,10 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
 
         structure = sh.read_structure(folder_path)
         container = sh.get_container_client()
+        # Teams register by ISU code; a category that has none (or shares one
+        # with its sibling block) may learn it from the FSM files first.
+        if st.categories_needing_codes(structure):
+            _learn_codes_from_pool(entity, structure)
 
         if not teams_xml and not _roster_blob(container, folder_path, "teams.xml").exists():
             return func.HttpResponse(
@@ -1871,6 +1978,26 @@ def upload_fallback_photos(req: func.HttpRequest) -> func.HttpResponse:
 
 # ── structure editing (manual add/remove/update) ──────────────────────────────
 
+def _set_category_code(category, value):
+    """`set_category code`: an explicit empty value clears the code; anything
+    else is stored (and decides the discipline) unless it would *downgrade* a
+    block code to its bare event — the one case that is never a correction: a
+    site that still learns the bare abbreviation from the Judge Papers table
+    must not undo the `…--01` the backend read off the filename."""
+    new = st.strip_code(str(value or "").strip()[:32])
+    if not new:
+        category["code"] = ""
+        return
+    old = st.strip_code(category.get("code"))
+    if old and old != new and old.startswith(new + "-"):
+        return
+    if old != new:
+        category["code"] = new
+    discipline = st.discipline_from_code(new)
+    if discipline:
+        category["discipline"] = discipline
+
+
 @app.route(route="edit_structure", auth_level=func.AuthLevel.ANONYMOUS, methods=["POST"])
 def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
     """Manual structure edits via a small command set so the tool is usable and
@@ -1929,7 +2056,7 @@ def edit_structure(req: func.HttpRequest) -> func.HttpResponse:
                 if k in body:
                     c[k] = body[k]
             if "code" in body:
-                c["code"] = str(body["code"] or "").strip()[:32]
+                _set_category_code(c, body["code"])
             # The category's team-page defaults, tri-state exactly like a team's:
             # an explicit null (or an unknown name mode) returns the category to
             # the competition-wide default.

@@ -83,7 +83,7 @@ Every route that names a competition, by this tool's record id or by a
 | Need | Routes |
 | --- | --- |
 | **read** | `list_competitions` (filtered to the records the caller can read; admin: all), `get_competition_details` (incl. the generated protocols' download links), `get_file`, `resolve_competition` |
-| **write** | `save_event_settings`, `upload_file`, `import_platform_file`, `assign_file`, `delete_file`, `parse_schedule`, `import_rosters`, `upload_fallback_photos`, `edit_structure`, `generate_protocol`, `delete_protocol` |
+| **write** | `save_event_settings`, `upload_file`, `import_platform_file`, `assign_file`, `delete_file`, `parse_schedule`, `import_rosters`, `learn_pool_codes`, `upload_fallback_photos`, `edit_structure`, `generate_protocol`, `delete_protocol` |
 | **owner** (an admin counts as owner) | `delete_competition` |
 
 `check_user_permission` and `health` name no competition.

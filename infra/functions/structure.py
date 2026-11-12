@@ -7,6 +7,7 @@ ordered categories with their slots. Uploaded files are referenced by `fileId`;
 each file lives in at most one slot. Files not referenced by any slot are
 "unassigned" (the UI shows them in a tray to be dragged into place).
 """
+import re
 from uuid import uuid4
 
 DISCIPLINES = ("single", "pair", "dance", "synchro")
@@ -72,7 +73,7 @@ def new_category(name: str, discipline: str, order: int) -> dict:
     return {
         "id": new_id("cat"),
         "name": name,
-        "code": "",          # ISU event code (an earlier DT_SCHEDULE import, or learned from FSM filenames), if any
+        "code": "",          # ISU category code (see "ISU codes" below): learned from the FSM files, if any
         "discipline": discipline if discipline in DISCIPLINES else "single",
         "order": order,
         # Team-page defaults for this category's teams; None = inherit the
@@ -147,8 +148,19 @@ def detect_discipline(name: str) -> str:
     return discipline_signal(name) or "single"
 
 
-# ISU protocol head-page PDF filename prefixes ("Protocol Head Page" slot).
-TITLE_PDF_PREFIXES = (
+# ── ISU codes ─────────────────────────────────────────────────────────────────
+#
+# FS Manager names every export after the ISU RSC code of its unit:
+# `<22-char category code><phase>_<ReportTitle>.pdf`, e.g.
+# `FSKXSYNCHRONADVNOV--01FNL-000100--_StartListwithTimes.pdf`. The first 22
+# characters are the category: the discipline/event abbreviation
+# (`FSKXSYNCHRONADVNOV`, `FSKWSINGLES-DEBYTW`, bare `FSKXSYNCHRON` for senior
+# synchro) padded with dashes, plus an optional `--NN` block suffix when the event
+# is run in blocks. That code — never the printed name — is what identifies a
+# category across the schedule, the FSM PDFs and the DT_PARTIC_TEAMS roster, and
+# its prefix is what tells the discipline.
+
+CODE_DISCIPLINES = (
     ("FSKWSINGLES", "single"),
     ("FSKMSINGLES", "single"),
     ("FSKXSYNCHRON", "synchro"),
@@ -157,23 +169,105 @@ TITLE_PDF_PREFIXES = (
     ("FSKWSOLDANCE", "dance"),
     ("FSKXPAIRS", "pair"),
 )
+# Kept under the old name for callers that still read head-page prefixes.
+TITLE_PDF_PREFIXES = CODE_DISCIPLINES
+
+RSC_CODE_LEN = 22
+_RSC_STEM = re.compile(r"[A-Z]{3}[A-Z0-9-]+")
 
 
-def discipline_from_title_filename(filename: str):
-    """Discipline encoded in an ISU head-page PDF filename prefix, or None when
-    the name doesn't follow the ISU convention."""
-    n = (filename or "").upper()
-    return next((d for prefix, d in TITLE_PDF_PREFIXES if n.startswith(prefix)), None)
+def strip_code(code) -> str:
+    """The canonical form of an ISU category code: upper-case, trailing dash
+    padding removed, interior block suffix kept (`FSKWSINGLES-DEBYTW----` and
+    `FSKWSINGLES-DEBYTW` are the same code; `…ADVNOV--01` is not `…ADVNOV`)."""
+    return str(code or "").strip().upper().rstrip("-")
+
+
+def code_from_filename(filename) -> str:
+    """The category code an FSM export filename carries, canonical, or `""` when
+    the name is not an FSM export (a photo, a hand-named PDF)."""
+    name = str(filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if "_" not in name:
+        return ""          # FSM always separates the code from the report title
+    stem = name.rsplit("_", 1)[0].upper()
+    if len(stem) < RSC_CODE_LEN or not _RSC_STEM.fullmatch(stem):
+        return ""
+    return strip_code(stem[:RSC_CODE_LEN])
+
+
+def discipline_from_code(code):
+    """Discipline encoded in an ISU code's (or FSM filename's) prefix, or None
+    when it does not follow the ISU convention."""
+    n = str(code or "").strip().upper()
+    return next((d for prefix, d in CODE_DISCIPLINES if n.startswith(prefix)), None)
+
+
+# The head-page helper's old name: a filename is read exactly like a code.
+discipline_from_title_filename = discipline_from_code
+
+
+def apply_code(category: dict, code) -> bool:
+    """Record an ISU code on a category and let it decide the discipline.
+
+    The code comes from an FSM filename or from the competition's pool; the
+    policy keeps the most specific truth and never destroys one:
+
+      * no code yet -> set it;
+      * the same code (padded or not) -> nothing to store, the discipline is
+        still (re)asserted;
+      * the new code extends the old by a dash-led block (`…ADVNOV` ->
+        `…ADVNOV--01`) -> replace: the bare abbreviation was a guess at the block;
+      * a downgrade (`…ADVNOV--01` -> `…ADVNOV`) or any other conflict -> ignored.
+
+    Whenever a code is accepted its prefix overrides the stored discipline (as
+    authoritative as the head page always was). Returns True when the category
+    changed."""
+    new = strip_code(code)
+    if not category or not new:
+        return False
+    old = strip_code(category.get("code"))
+    changed = False
+    if old and old != new:
+        if not new.startswith(old + "-"):
+            return False
+        category["code"] = new
+        changed = True
+    elif not old:
+        category["code"] = new
+        changed = True
+    discipline = discipline_from_code(new)
+    if discipline and category.get("discipline") != discipline:
+        category["discipline"] = discipline
+        changed = True
+    return changed
 
 
 def apply_title_discipline(category: dict, filename: str) -> bool:
-    """Set the category's discipline from an ISU head-page filename. The prefix
-    is authoritative ISU coding, so it overrides any name-based guess."""
-    discipline = discipline_from_title_filename(filename)
+    """Set the category's discipline from an ISU head-page PDF filename. The
+    prefix is authoritative ISU coding, so it overrides any name-based guess —
+    even on a hand-named head page that carries no full code."""
+    discipline = discipline_from_code(filename)
     if not category or not discipline or category.get("discipline") == discipline:
         return False
     category["discipline"] = discipline
     return True
+
+
+def category_needs_code(category: dict) -> bool:
+    return not strip_code((category or {}).get("code"))
+
+
+def categories_needing_codes(structure: dict) -> bool:
+    """True when some category has no code, or two share one (a bare
+    abbreviation stamped on both blocks of a split event) — either way the
+    competition's own FSM files may know better."""
+    seen = set()
+    for category in structure.get("categories") or []:
+        code = strip_code(category.get("code"))
+        if not code or code in seen:
+            return True
+        seen.add(code)
+    return False
 
 
 # ── lookups ───────────────────────────────────────────────────────────────────

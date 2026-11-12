@@ -178,7 +178,8 @@ renames, and a read-only caller's resolve changes nothing),
 of the platform's shared competition file pool — see below), `get_file`
 (streams bytes for previews),
 `assign_file`, `delete_file`, `parse_schedule` (body upload *or* a pool
-reference, see below), `import_rosters`,
+reference, see below), `import_rosters`, `learn_pool_codes` (category ISU codes
+from the FSM reports in the pool, see **Category codes** below),
 `upload_fallback_photos` (bulk fallback-picture ZIP), `edit_structure`
 (manual add/remove/set ops — including `set_team_pages {enabled?, nameMode?}` for the
 competition-wide team-page defaults, `set_category`'s `pageEnabled` / `nameMode` for
@@ -306,9 +307,9 @@ included. One table client per request or sweep (`_platform_table()`, passed as
 `upload_file` and `import_platform_file` share `_register_upload(structure,
 folder_path, filename, body, params)` — file-id mint, blob write, `files{}`
 entry and the optional slot assignment (`slotKind` + `categoryId`/`segmentId`/
-`teamId`/`role`, with the podium / unit-count / title-discipline side effects).
-A target the structure no longer has leaves the file in the tray instead of
-failing the request.
+`teamId`/`role`, with the podium / unit-count side effects and the category-code
+stamping of **Category codes** below). A target the structure no longer has
+leaves the file in the tray instead of failing the request.
 
 `POST import_platform_file?competition=&name=[&source=upload|fsm]` copies a
 file the platform holds in `competition-data/<PlatformId>/<uploads|fsm>/<name>`
@@ -366,6 +367,54 @@ slot assignment actually succeeded, and any later manual `assign_file` (includin
 a move back to the tray) drops the tag — unless that call declares itself
 automatic with body `"autoAssigned": true`.
 
+### Category codes: the ISU code identifies a category, the name is only printed
+
+FS Manager names every export after its unit's RSC code —
+`<22-char category code><phase>_<ReportTitle>.pdf`,
+`FSKXSYNCHRONADVNOV--01FNL-000100--_StartListwithTimes.pdf` — and writes its
+standard **English** names into every ODF XML, while the organizer's custom name
+file rewrites the **PDFs** only ("SM-Noviisit"). So the schedule PDF knows the
+categories by the printed names alone, and a `DT_PARTIC_TEAMS` roster knows the
+teams by `RegisteredEvent` code alone. The code (`structure.code_from_filename`:
+the first 22 characters, trailing dashes stripped, a `--NN` block suffix kept;
+`strip_code` is the canonical form, so a padded DT_SCHEDULE-era `…----` code
+compares equal) is what ties them together, and its prefix (`CODE_DISCIPLINES`,
+`discipline_from_code`) is what decides the discipline — a Finnish-only schedule
+carries no "synchro" word at all. Two sources, both backend-side (the frontend no
+longer learns codes from the Judge Papers table):
+
+- **Every coded file placed into a category stamps it** (`_learn_from_assignment`
+  in `_register_upload` and `assign_file`, any slot kind): `structure.apply_code`
+  sets a missing code, replaces a bare code with its block (`…ADVNOV` →
+  `…ADVNOV--01`: the bare abbreviation was a guess), never downgrades or
+  overwrites a conflicting one, and asserts the discipline whenever a code is
+  accepted. A hand-named head page (`FSKXSYNCHRON-head.pdf`) still sets the
+  discipline alone (`apply_title_discipline`). `edit_structure set_category code`
+  remains the manual escape hatch (`_set_category_code`: empty clears, anything
+  else is stored — except a downgrade of a block code to its bare event, which an
+  older site stamping the table abbreviation must not win).
+- **The competition's pool teaches the rest** (`pool_codes.py`, pure;
+  `_learn_codes_from_pool(entity, structure)` lists `fsm/` then `uploads/`):
+  one coded report per code the structure does not carry yet — StartListwithTimes
+  > JudgesSheetAll > Results > ProtocolHeadPage (`pick_samples`), ≤ 5 MiB, ≤ 60
+  per pass — has its page-1 header read (`page1_lines`) and the printed
+  `<CATEGORY> <SEGMENT>` / `<CATEGORY>` line matched by **equality** after
+  `fallback_photos.normalize` against `category.name` or `category.name +
+  segment.name` (`match_printed`; a name two categories share matches nothing,
+  "TIME SCHEDULE"/the competition name never do). Several codes printing one name
+  (FSM split the start order into blocks the schedule prints once) stamp only
+  the bare code (`learn_codes`). Verified on real synchro, singles and mixed
+  competitions (every code resolved); tests use invented names. Best-effort by
+  design: unbound record, pool off, listing/download failure or an unreadable
+  PDF just means nothing (more) is learned, logged as counts and exception
+  types only (a pool filename can name a person). Three triggers:
+  `parse_schedule` (both inputs; `learnedCodes` in the response),
+  `import_rosters` when `structure.categories_needing_codes` (a missing or a
+  shared code), and `POST learn_pool_codes {id}` (write; `{learned, structure}`,
+  an empty map when there was nothing to learn), which also re-matches a stored
+  roster report that still lists unplaced teams — the site calls it on open and
+  after a pool refresh while a category lacks a code.
+
 ## Parsers (calibration pending)
 
 - `schedule_parser.py` — `parse_schedule_data(bytes)` takes the **schedule PDF
@@ -377,8 +426,11 @@ automatic with body `"autoAssigned": true`.
     an XML comment must not get a participant file stored as `schedule.pdf`).
   - **Schedule PDF** — calibrated against the Finnish "COMPETITION
     SCHEDULE" export: glued start/finish times, 2-space category|segment columns,
-    multi-day segment merge, and synchro detected from the document title
-    ("MUODOSTELMALUISTELUN…") via `structure.discipline_signal`.
+    multi-day segment merge, and synchro detected from a category name or the
+    document text ("MUODOSTELMALUISTELUN…", `structure.discipline_signal` /
+    `muodostelma|synchron`) — a Finnish-only schedule prints neither, which is
+    why the codes learned from the pool (**Category codes**) decide the
+    discipline right after the parse.
   - Every stored `schedule` row carries the `categoryId`/`segmentId` it was
     grouped into (explicit `None` for meetings/practices). The schedule's names
     are only the default: the time-schedule page prints the category's/segment's
@@ -399,9 +451,9 @@ automatic with body `"autoAssigned": true`.
     their ISU `Unit Code` (`unit_code[:22]`, stored as the category `code`, so
     Advanced Novice L1 `…ADVNOV----` and L2 `…ADVNOV--01` stay distinct);
     `tests/test_schedule_xml_codes.py` pins that grouping. A PDF-parsed category
-    has no `code` until the frontend's filename auto-assignment learns one from
-    the FSM PDFs filed into it (`set_category code`); until then it matches by
-    name.
+    has no `code` until the backend learns one from the pool's FSM reports or
+    from a coded file placed into it (**Category codes**); until then it
+    matches by name.
 - `dt_partic.py` — calibrated against real ISU/TAIKKARI OdfBody files. Joins
   **DT_PARTIC_TEAMS** (`<Team>`/`<Composition>`/`<Athlete Code>`) with
   **DT_PARTIC** (`<Participant Code GivenName FamilyName>`) on athlete `Code`.
@@ -410,17 +462,27 @@ automatic with body `"autoAssigned": true`.
   (real exports carry trailing spaces). That "FAMILY Given" shape is load-bearing:
   `generate_pages._given_names` reverses it for the team page's given-names mode.
 - `roster_matching.py` — pure team→category placement, used by `import_rosters`.
-  Teams register per **event** (`RegisteredEvent="…MLAIKU----"`) but often compete
-  per **block** ("Aikuiset, Mupi L1"/"L2"; DT_SCHEDULE codes `…MLAIKU--01`), and
-  block membership exists *only* in each block's total-results PDF. So matching is
-  **results-first**: `match_teams` places a team into the category whose result
-  rows name it (exact normalized name, then word-subset fuzzy — "JääLeidit" ⊂
-  "Helsinki JääLeidit" — with the club abbreviation as tiebreak), and only falls
-  back to the registered event when that maps to exactly one category
-  (`categories_for_event`: trailing-dash-stripped code prefix at a dash boundary
-  — bare senior `FSKXSYNCHRON` must not swallow `FSKXSYNCHRONJUNIOR` → event-token
-  fragment vs. category-name words, "MLAIKU"→"Aikuiset…" → ISU/Finnish label, a
-  bare synchro code reading "Senior"; each pass drops hits whose *name* signals
+  Teams register per **event** (`RegisteredEvent="…MLAIKU----"`) but may compete
+  per **block** ("Aikuiset, Mupi L1"/"L2"; codes `…MLAIKU--01`). FS Manager
+  registers a team to its block's exact code once the blocks are drawn (verified:
+  `…ADVNOV----` teams on the bare-coded block's sheet, `…ADVNOV--01` teams on
+  the other's); a roster exported earlier carries the bare event for everyone and
+  block membership then exists *only* in each block's total-results PDF. So
+  matching is **results-first**: `match_teams` places a team into the category
+  whose result rows name it (exact normalized name, then word-subset fuzzy —
+  "JääLeidit" ⊂ "Helsinki JääLeidit" — with the club abbreviation as tiebreak),
+  and only falls back to the registered event when that maps to exactly one
+  category (`categories_for_event`: the category whose `strip_event`ed code
+  **equals** the event's first; only when none does, the codes that extend it by
+  a dash-led block suffix, or that it extends — bare senior `FSKXSYNCHRON` must
+  not swallow `FSKXSYNCHRONJUNIOR` → event-token fragment (`event_token`, block
+  suffix dropped) vs. category-name words, "MLAIKU"→"Aikuiset…" → the event's
+  label (`dt_partic.event_base_label`: ISU English, or the platform registry's
+  name for a Finnish federation token — MLKJUN "Juniorit", MLKNOV "Noviisit,
+  Mupi", MLKSEN "Seniorit", MLMINO "Minorit", …) equal to the whole name first,
+  then contained in it, a bare synchro code reading "Senior"; the report's
+  `eventLabel` names a block, "Advanced Novice (block 1)"; each pass drops hits
+  whose *name* signals
   another discipline, so "SM-JUNIORI Naiset" never competes with "SM-JUNIORI
   Muodostelma" — names only, since placing a team flips a category's stored
   `discipline` to synchro and would otherwise skew a partial import).
