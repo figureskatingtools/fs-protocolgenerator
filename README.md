@@ -13,7 +13,10 @@ page), the tool supplies sensible **defaults/backups** so a protocol can always 
 
 1. **Create a competition** (name + dates).
 2. **Upload the schedule PDF.** The backend parses it into the ordered list of
-   categories and their segments and builds the matching slots.
+   categories and their segments and builds the matching slots. Each category's ISU
+   code and discipline are read from the FS Manager files in the competition files
+   (start lists, judges' sheets, results, head pages) and from any FSM file placed
+   into it — the category can be called whatever the organizer calls it.
 3. **Fill in event details** (organizer, authorization org, city, ice rink) and drop files
    into slots: category title PDF, podium photo + names, total results PDF, and per segment
    the results / panel-of-judges / judges-details PDFs. Synchronized-skating categories also

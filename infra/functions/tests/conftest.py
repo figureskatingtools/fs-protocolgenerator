@@ -102,6 +102,22 @@ def schedule_pdf(*lines):
     return buf.getvalue()
 
 
+def sheet_pdf(*lines):
+    """A one-page PDF printing these lines top to bottom — the header of an FSM
+    report (start list, judges' sheet, results, head page) as pypdf reads it."""
+    import io
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    y = 800
+    for line in lines:
+        c.drawString(40, y, line)
+        y -= 14
+    c.save()
+    return buf.getvalue()
+
+
 # ── dict-backed stand-ins for blob storage ────────────────────────────────────
 
 class FakeDownload:
@@ -150,6 +166,13 @@ class FakeContainerClient:
 
     def delete_blob(self, path):
         self.blobs.pop(path, None)
+
+    def list_blobs(self, name_starts_with=""):
+        """The listing surface the pool learner uses: `.name` and `.size`, in
+        name order like the service."""
+        return [SimpleNamespace(name=path, size=len(data))
+                for path, data in sorted(self.blobs.items())
+                if path.startswith(name_starts_with)]
 
 
 class FakeStorage:

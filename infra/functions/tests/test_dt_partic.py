@@ -98,3 +98,20 @@ def test_document_type_of_anything_else_is_none():
     update = PARTIC_XML.replace('DocumentType="DT_PARTIC"', 'DocumentType="DT_PARTIC_UPDATE"')
     assert document_type(update.encode()) is None
     assert document_type(b"not xml") is None
+
+
+def test_finnish_federation_events_carry_the_registry_names():
+    assert event_label("FSKXSYNCHRONMLKJUN----------------") == "Juniorit"
+    assert event_label("FSKXSYNCHRONMLKNOV----------------") == "Noviisit, Mupi"
+    assert event_label("FSKXSYNCHRONMLKSEN----------------") == "Seniorit"
+    assert event_label("FSKXSYNCHRONMLMINO----------------") == "Minorit"
+    assert event_label("FSKXSYNCHRONJUNMUP----------------") == "Juniorit, Mupi"
+    assert event_label("FSKXSYNCHRONMASTER----------------") == "Masters"
+
+
+def test_a_block_suffix_is_named_not_mangled():
+    from dt_partic import event_base_label, split_block
+    assert event_label("FSKXSYNCHRONADVNOV--01------------") == "Advanced Novice (block 1)"
+    assert event_base_label("FSKXSYNCHRONADVNOV--01------------") == "Advanced Novice"
+    assert split_block("FSKXSYNCHRONADVNOV--01------------") == ("FSKXSYNCHRONADVNOV", 1)
+    assert split_block("FSKXSYNCHRONADVNOV----------------") == ("FSKXSYNCHRONADVNOV", None)

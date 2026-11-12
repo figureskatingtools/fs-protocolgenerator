@@ -82,13 +82,32 @@ def test_event_code_matching_a_single_category_places_the_team():
         [("c2", "event")]
 
 
-def test_padded_event_code_spans_every_block_of_that_event():
-    """`…MLTULO----` is the whole event, so both of its blocks are candidates —
-    which is what makes the "assign the result sheets" report necessary."""
-    s = struct(cat("c1", "Tulokkaat, Mupi L1", code="FSKXSYNCHRONMLTULO----"),
-               cat("c2", "Tulokkaat, Mupi L2", code="FSKXSYNCHRONMLTULO--01"),
+def test_a_bare_event_is_the_bare_coded_block_when_one_exists():
+    """FS Manager registers a team to its block's exact code: with the blocks
+    drawn, `…MLTULO----` *is* the bare-coded block and `…MLTULO--01` the other,
+    whether the stored codes are padded or not."""
+    s = struct(cat("c1", "Tulokkaat, Mupi L2", code="FSKXSYNCHRONMLTULO----"),
+               cat("c2", "Tulokkaat, Mupi L1", code="FSKXSYNCHRONMLTULO--01"),
+               cat("c3", "Aikuiset, Mupi L1", code="FSKXSYNCHRONMLAIKU--01"))
+    assert [c["id"] for c in rm.categories_for_event(s, TULO)] == ["c1"]
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLTULO--01")] == ["c2"]
+    report = rm.match_teams(s, [team("Blue Herons", event=TULO),
+                                team("Silver Comets", event="FSKXSYNCHRONMLTULO--01")], {})
+    assert [(a["team"]["name"], a["categoryId"], a["method"]) for a in report["assignments"]] == \
+        [("Blue Herons", "c1", "event"), ("Silver Comets", "c2", "event")]
+    assert not report["unmatched"]
+
+
+def test_a_bare_event_spans_the_blocks_when_none_carries_it():
+    """A roster exported before the blocks were drawn registers every team to
+    the whole event, so both `--01`/`--02` blocks are candidates — which is what
+    makes the "assign the result sheets" report necessary."""
+    s = struct(cat("c1", "Tulokkaat, Mupi L1", code="FSKXSYNCHRONMLTULO--01"),
+               cat("c2", "Tulokkaat, Mupi L2", code="FSKXSYNCHRONMLTULO--02"),
                cat("c3", "Aikuiset, Mupi L1", code="FSKXSYNCHRONMLAIKU--01"))
     assert [c["id"] for c in rm.categories_for_event(s, TULO)] == ["c1", "c2"]
+    report = rm.match_teams(s, [team("Blue Herons", event=TULO)], {})
+    assert "matches 2 categories" in report["unmatched"][0]["reason"]
 
 
 def test_block_specific_event_code_matches_only_its_own_block():
@@ -99,6 +118,46 @@ def test_block_specific_event_code_matches_only_its_own_block():
     assert rm.strip_event("FSKXSYNCHRONMLTULO--01") == "FSKXSYNCHRONMLTULO--01"
     assert rm.strip_event("FSKXSYNCHRONMLTULO----") == "FSKXSYNCHRONMLTULO"
     assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLTULO--02")] == ["c2"]
+
+
+def test_a_block_registration_without_codes_still_matches_by_token():
+    """`…MLTULO--01` on a code-less schedule: the block suffix is not part of
+    the event token (otherwise "MLTULO01" would find nothing), and the
+    unmatched report names the block."""
+    s = struct(cat("c1", "Aikuiset, Mupi L1"), cat("c2", "Tulokkaat, Mupi L1"),
+               cat("c3", "Tulokkaat, Mupi L2"))
+    assert rm.event_token("FSKXSYNCHRONMLTULO--01") == "MLTULO"
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLTULO--01")] == ["c2", "c3"]
+    report = rm.match_teams(s, [team("Blue Herons", event="FSKXSYNCHRONMLTULO--01")], {})
+    assert report["unmatched"][0]["eventLabel"] == "Tulokkaat (block 1)"
+
+
+def test_finnish_federation_events_find_their_categories_by_label():
+    """The organizer prints the platform's names ("Juniorit", "Noviisit, Mupi",
+    "Seniorit", "Minorit"): an exact label beats the "junior" fragment that
+    would also hit "SM-Juniorit", while the ISU junior event (label "Junior",
+    no exact name) stays ambiguous between the two until a code arrives."""
+    s = struct(cat("nm", "Noviisit, Mupi"), cat("mi", "Minorit"), cat("ju", "Juniorit"),
+               cat("se", "Seniorit"), cat("smn", "SM-Noviisit"), cat("smj", "SM-Juniorit"))
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLKJUN----------------")] == ["ju"]
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLKSEN----------------")] == ["se"]
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLKNOV----------------")] == ["nm"]
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLMINO----------------")] == ["mi"]
+    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["ju", "smj"]
+    # "Advanced Novice" is printed nowhere: only a code can place it.
+    assert rm.categories_for_event(s, "FSKXSYNCHRONADVNOV----------------") == []
+    report = rm.match_teams(s, [team("Blue Herons", event="FSKXSYNCHRONADVNOV----------------")], {})
+    assert report["unmatched"][0]["reason"] == "no category matches event Advanced Novice"
+
+
+def test_codes_settle_what_names_cannot():
+    """The same competition once its codes are learned from the FSM files."""
+    s = struct(cat("ju", "Juniorit", code="FSKXSYNCHRONMLKJUN"),
+               cat("smj", "SM-Juniorit", code="FSKXSYNCHRONJUNIOR"),
+               cat("smn", "SM-Noviisit", code="FSKXSYNCHRONADVNOV"))
+    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["smj"]
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONADVNOV----------------")] == ["smn"]
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLKJUN----------------")] == ["ju"]
 
 
 def test_name_fragment_places_a_pdf_parsed_category():
