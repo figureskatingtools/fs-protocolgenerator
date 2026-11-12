@@ -15,6 +15,7 @@ Real exports are not tidy: attributes carry trailing spaces (`Name="Shadows "`)
 and a team can hold several `<RegisteredEvent>` rows, the first of which may have
 an empty `Event`.
 """
+import re
 import logging
 import xml.etree.ElementTree as ET
 
@@ -128,22 +129,40 @@ _EVENT_LABELS = {
     "JUNIOR": "Junior",
     "SENIOR": "Senior",
     "ADULT": "Adult",
-    # Finnish federation (TAIKKARI) tokens: ML = muodostelmaluistelu.
+    # Finnish federation (TAIKKARI) tokens: ML = muodostelmaluistelu. The labels
+    # are the names the platform's category registry gives these events.
     "MLTULO": "Tulokkaat",
     "MLNOVI": "Noviisit",
     "MLAIKU": "Aikuiset",
+    "MLMINO": "Minorit",
+    "MLKNOV": "Noviisit, Mupi",
+    "MLKJUN": "Juniorit",
+    "MLKSEN": "Seniorit",
+    "MINMUP": "Minorit, Mupi",
+    "JUNMUP": "Juniorit, Mupi",
+    "SENMUP": "Seniorit, Mupi",
+    "MASTER": "Masters",
 }
 
+_BLOCK_SUFFIX = re.compile(r"-+(\d{2})$")
 
-def event_label(code: str) -> str:
-    """Human label for an ISU event code, e.g.
-    'FSKXSYNCHRONADVNOV----' -> 'Advanced Novice'.
 
-    A bare synchro code (`'FSKXSYNCHRON----'`, no event token) is the senior
-    event and reads 'Senior'. Any other empty (or prefix-only) code yields `""` —
-    callers substring-match labels against category names, so a placeholder
-    label would match everything."""
-    token = (code or "").replace("-", "").strip()
+def split_block(code: str):
+    """`('FSKXSYNCHRONADVNOV', 1)` for `'FSKXSYNCHRONADVNOV--01'`; the trailing
+    dash padding goes, a `--NN` block suffix comes back as a number (None when
+    there is none)."""
+    base = (code or "").strip().rstrip("-")
+    m = _BLOCK_SUFFIX.search(base)
+    if not m:
+        return base, None
+    return base[:m.start()], int(m.group(1))
+
+
+def event_base_label(code: str) -> str:
+    """`event_label` without the block: what the event is called whichever of
+    its blocks the code names."""
+    base, _block = split_block(code)
+    token = base.replace("-", "").strip()
     for prefix in ("FSKXSYNCHRON", "FSKSYNCHRON", "SYNCHRON", "FSKX", "FSK"):
         if token.startswith(prefix):
             token = token[len(prefix):]
@@ -153,6 +172,22 @@ def event_label(code: str) -> str:
     if not token:
         return ""
     return _EVENT_LABELS.get(token, token.title())
+
+
+def event_label(code: str) -> str:
+    """Human label for an ISU event code, e.g.
+    'FSKXSYNCHRONADVNOV----' -> 'Advanced Novice', and
+    'FSKXSYNCHRONADVNOV--01' -> 'Advanced Novice (block 1)'.
+
+    A bare synchro code (`'FSKXSYNCHRON----'`, no event token) is the senior
+    event and reads 'Senior'. Any other empty (or prefix-only) code yields `""` —
+    callers substring-match labels against category names, so a placeholder
+    label would match everything."""
+    label = event_base_label(code)
+    _base, block = split_block(code)
+    if label and block is not None:
+        return f"{label} (block {block})"
+    return label
 
 
 def distinct_events(teams):

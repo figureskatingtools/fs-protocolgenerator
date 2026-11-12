@@ -4,10 +4,12 @@ Placing DT_PARTIC_TEAMS teams into the schedule's categories.
 Teams register per **event** — one ISU code such as
 `FSKXSYNCHRONMLAIKU----------------` ("Aikuiset"/Adult) — but a competition may
 run that event as several **blocks**, each of which is its own category in the
-schedule ("Aikuiset, Mupi L1" / "Aikuiset, Mupi L2"; DT_SCHEDULE codes
-`…MLAIKU--01` vs `…MLAIKU----`). The roster XML carries no block information at
-all: which team skated in which block is visible **only in each block's total
-results PDF**. So the matcher works results-first and falls back to the event:
+schedule ("Aikuiset, Mupi L1" / "Aikuiset, Mupi L2"; codes `…MLAIKU--01` vs
+`…MLAIKU----`). FS Manager registers a team to its block's exact code when the
+blocks are drawn before the roster export, in which case the code settles it;
+a roster exported earlier carries the bare event for every team, and which block
+a team skated in is then visible **only in each block's total results PDF**. So
+the matcher works results-first and falls back to the event:
 
   1. the team's name appears in a category's parsed result rows -> that category
      (exact, then a fuzzy word-subset pass for "JääLeidit" vs
@@ -24,7 +26,7 @@ This module is pure: no Azure imports, no mutation of the structure. The caller
 report. Name folding is shared with the photo ZIP importer
 (`fallback_photos.normalize`) so both features agree on what "the same team" is.
 """
-from dt_partic import event_label
+from dt_partic import event_base_label, event_label, split_block
 from fallback_photos import normalize
 from structure import discipline_signal
 
@@ -79,9 +81,10 @@ def strip_event(code: str) -> str:
 
 
 def event_token(code: str) -> str:
-    """The event part of a code, without discipline prefix or dashes:
-    `'FSKXSYNCHRONMLAIKU----'` -> `'MLAIKU'`."""
-    token = strip_event(code)
+    """The event part of a code, without discipline prefix, block suffix or
+    dashes: `'FSKXSYNCHRONMLAIKU----'` and `'FSKXSYNCHRONMLAIKU--01'` ->
+    `'MLAIKU'`."""
+    token, _block = split_block(strip_event(code))
     upper = token.upper()
     for prefix in _EVENT_PREFIXES:
         if upper.startswith(prefix):
@@ -97,15 +100,23 @@ def categories_for_event(structure: dict, event_code: str) -> list:
     split into blocks yields several categories — that is the caller's cue that
     results are needed to tell them apart):
 
-      1. **code** — the categories a DT_SCHEDULE import stamped with a code that
-         equals this event's code or extends it by a dash-led block suffix (and
-         vice versa). The dash boundary matters: senior synchro is the bare
-         `FSKXSYNCHRON`, a plain string prefix of junior's `FSKXSYNCHRONJUNIOR`;
+      1. **code** — the category whose stored code (learned from the FSM files,
+         see `pool_codes`, or an old DT_SCHEDULE import) *equals* this event's
+         code: FS Manager registers a team to its block's exact code, so the
+         bare `…ADVNOV` is exactly the bare-coded block when one exists. Only
+         when no category carries the code itself do the codes that extend it by
+         a dash-led block suffix (and vice versa) stand in — a roster exported
+         before the blocks were drawn names the whole event. The dash boundary
+         matters: senior synchro is the bare `FSKXSYNCHRON`, a plain string
+         prefix of junior's `FSKXSYNCHRONJUNIOR`;
       2. **name fragment** — the event token's tail matched against the start of a
          category-name word ("MLAIKU" -> "AIKU" -> "Aikuiset, Mupi L1"), longest
          fragment first so a shorter accidental match can never win;
-      3. **ISU label** — the English label as a substring of the category name
-         (how a bare senior code, which has no token, reaches "SM-seniorit").
+      3. **label** — the event's label (`dt_partic.event_base_label`: the ISU
+         English one, or the platform's name for a Finnish federation event)
+         equal to the whole category name first ("Juniorit" is the MLKJUN
+         category, not "SM-Juniorit"), then as a substring of it (how a bare
+         senior code, which has no token, reaches "SM-seniorit").
 
     Every pass then prefers synchro: DT_PARTIC_TEAMS holds only synchro teams, so
     a hit whose name signals another discipline ("SM-JUNIORI Naiset" next to
@@ -117,13 +128,19 @@ def categories_for_event(structure: dict, event_code: str) -> list:
     if not ev:
         return []
 
-    hits = []
+    exact, family = [], []
     for cat in cats:
         cc = strip_event(cat.get("code")).casefold()
-        if cc and (cc == ev or cc.startswith(ev + "-") or ev.startswith(cc + "-")):
-            hits.append(cat)
-    if hits:
-        return _prefer_synchro(hits)
+        if not cc:
+            continue
+        if cc == ev:
+            exact.append(cat)
+        elif cc.startswith(ev + "-") or ev.startswith(cc + "-"):
+            family.append(cat)
+    if exact:
+        return _prefer_synchro(exact)
+    if family:
+        return _prefer_synchro(family)
 
     token = event_token(event_code)
     for size in range(len(token), MIN_FRAGMENT - 1, -1):
@@ -133,8 +150,11 @@ def categories_for_event(structure: dict, event_code: str) -> list:
         if hits:
             return _prefer_synchro(hits)
 
-    label = event_label(event_code).casefold().strip()
+    label = normalize(event_base_label(event_code))
     if label:
+        hits = [c for c in cats if label == normalize(c.get("name", ""))]
+        if hits:
+            return _prefer_synchro(hits)
         hits = [c for c in cats if label in normalize(c.get("name", ""))]
         if hits:
             return _prefer_synchro(hits)
