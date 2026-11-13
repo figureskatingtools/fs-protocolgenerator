@@ -37,6 +37,12 @@ _EVENT_PREFIXES = ("FSKXSYNCHRON", "FSKSYNCHRON", "SYNCHRON", "FSKX", "FSK")
 # fragments/substrings of this length may match by containment.
 MIN_FRAGMENT = 4
 
+# What a Finnish competition calls the ISU synchro events (normalised): the
+# championship series, printed "SM-Noviisit" / "SM-Juniorit" / "SM-Seniorit",
+# next to the federation's own levels ("Juniorit" is MLKJUN). Keyed by event
+# token, the bare senior code by its label.
+_FINNISH_ISU_NAMES = {"ADVNOV": "sm noviisit", "JUNIOR": "sm juniorit", "SENIOR": "sm seniorit"}
+
 
 def _despaced(s: str) -> str:
     return s.replace(" ", "")
@@ -96,7 +102,7 @@ def event_token(code: str) -> str:
 def categories_for_event(structure: dict, event_code: str) -> list:
     """Every category an event could belong to, in structure order.
 
-    Three independent attempts, the first with any hit wins (an event genuinely
+    Four independent attempts, the first with any hit wins (an event genuinely
     split into blocks yields several categories — that is the caller's cue that
     results are needed to tell them apart):
 
@@ -109,10 +115,15 @@ def categories_for_event(structure: dict, event_code: str) -> list:
          before the blocks were drawn names the whole event. The dash boundary
          matters: senior synchro is the bare `FSKXSYNCHRON`, a plain string
          prefix of junior's `FSKXSYNCHRONJUNIOR`;
-      2. **name fragment** — the event token's tail matched against the start of a
+      2. **Finnish championship name** — an ISU event (`ADVNOV`, `JUNIOR`, bare
+         senior) is the category named "SM-Noviisit" / "SM-Juniorit" /
+         "SM-Seniorit" (or a block of it, "SM-Noviisit L1") when no category
+         carries the code — before the fragment pass, whose "junior" also hits
+         "Juniorit";
+      3. **name fragment** — the event token's tail matched against the start of a
          category-name word ("MLAIKU" -> "AIKU" -> "Aikuiset, Mupi L1"), longest
          fragment first so a shorter accidental match can never win;
-      3. **label** — the event's label (`dt_partic.event_base_label`: the ISU
+      4. **label** — the event's label (`dt_partic.event_base_label`: the ISU
          English one, or the platform's name for a Finnish federation event)
          equal to the whole category name first ("Juniorit" is the MLKJUN
          category, not "SM-Juniorit"), then as a substring of it (how a bare
@@ -143,6 +154,13 @@ def categories_for_event(structure: dict, event_code: str) -> list:
         return _prefer_synchro(family)
 
     token = event_token(event_code)
+    finnish = _FINNISH_ISU_NAMES.get(token or event_base_label(event_code).upper())
+    if finnish:
+        hits = [c for c in cats if normalize(c.get("name", "")) == finnish
+                or normalize(c.get("name", "")).startswith(finnish + " ")]
+        if hits:
+            return _prefer_synchro(hits)
+
     for size in range(len(token), MIN_FRAGMENT - 1, -1):
         fragment = token[-size:].lower()
         hits = [c for c in cats

@@ -488,7 +488,10 @@ longer learns codes from the Judge Papers table):
   category (`categories_for_event`: the category whose `strip_event`ed code
   **equals** the event's first; only when none does, the codes that extend it by
   a dash-led block suffix, or that it extends — bare senior `FSKXSYNCHRON` must
-  not swallow `FSKXSYNCHRONJUNIOR` → event-token fragment (`event_token`, block
+  not swallow `FSKXSYNCHRONJUNIOR` → the Finnish championship name of an ISU
+  event (`_FINNISH_ISU_NAMES`: ADVNOV "SM-Noviisit", JUNIOR "SM-Juniorit", bare
+  senior "SM-Seniorit", or a block of it, "SM-Noviisit L1"), so code-less
+  categories still tell "SM-Juniorit" from the federation's "Juniorit" → event-token fragment (`event_token`, block
   suffix dropped) vs. category-name words, "MLAIKU"→"Aikuiset…" → the event's
   label (`dt_partic.event_base_label`: ISU English, or the platform registry's
   name for a Finnish federation token — MLKJUN "Juniorit", MLKNOV "Noviisit,

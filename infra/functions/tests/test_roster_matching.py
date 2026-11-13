@@ -134,20 +134,30 @@ def test_a_block_registration_without_codes_still_matches_by_token():
 
 def test_finnish_federation_events_find_their_categories_by_label():
     """The organizer prints the platform's names ("Juniorit", "Noviisit, Mupi",
-    "Seniorit", "Minorit"): an exact label beats the "junior" fragment that
-    would also hit "SM-Juniorit", while the ISU junior event (label "Junior",
-    no exact name) stays ambiguous between the two until a code arrives."""
+    "Seniorit", "Minorit") for the federation's levels and the championship
+    names for the ISU events: "SM-Juniorit" is Junior, "SM-Noviisit" Advanced
+    Novice — so no code is needed to tell "Juniorit" and "SM-Juniorit" apart."""
     s = struct(cat("nm", "Noviisit, Mupi"), cat("mi", "Minorit"), cat("ju", "Juniorit"),
                cat("se", "Seniorit"), cat("smn", "SM-Noviisit"), cat("smj", "SM-Juniorit"))
     assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLKJUN----------------")] == ["ju"]
     assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLKSEN----------------")] == ["se"]
     assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLKNOV----------------")] == ["nm"]
     assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONMLMINO----------------")] == ["mi"]
-    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["ju", "smj"]
-    # "Advanced Novice" is printed nowhere: only a code can place it.
-    assert rm.categories_for_event(s, "FSKXSYNCHRONADVNOV----------------") == []
+    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["smj"]
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONADVNOV----------------")] == ["smn"]
     report = rm.match_teams(s, [team("Blue Herons", event="FSKXSYNCHRONADVNOV----------------")], {})
-    assert report["unmatched"][0]["reason"] == "no category matches event Advanced Novice"
+    assert report["unmatched"] == [] and report["withdrawn"] == []
+
+
+def test_a_championship_event_split_into_blocks_finds_every_block():
+    s = struct(cat("smn1", "SM-Noviisit L1"), cat("smn2", "SM-Noviisit L2"),
+               cat("nm", "Noviisit, Mupi"))
+    assert [c["id"] for c in rm.categories_for_event(s, "FSKXSYNCHRONADVNOV----------------")] == ["smn1", "smn2"]
+
+
+def test_a_learned_code_still_beats_the_championship_name():
+    s = struct(cat("smj", "SM-Juniorit"), cat("x", "Juniorit, kansallinen", code="FSKXSYNCHRONJUNIOR"))
+    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["x"]
 
 
 def test_codes_settle_what_names_cannot():
