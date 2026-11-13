@@ -439,3 +439,13 @@ def test_the_automatic_rematch_keeps_the_skipped_record(bound, storage, pool):
     files = bound["rosterImport"]["files"]
     fa._run_roster_match(bound, storage.container, FOLDER)
     assert bound["rosterImport"]["files"] == files
+
+
+def test_a_teams_file_listing_no_teams_is_still_a_422_with_an_archive(comp, storage):
+    """Passing a file over is only for one that lists teams: an empty export, or
+    a DT_PARTIC picked as the TEAMS file, must not report the archive as imported."""
+    payload(import_rosters(teamsXml=TEAMS_XML, particXml=PARTIC_XML))
+    assert import_rosters(teamsXml=EMPTY_TEAMS_XML).status_code == 422
+    assert import_rosters(teamsXml=PARTIC_XML).status_code == 422
+    assert "skippedTeams" not in comp["rosterImport"]["files"]
+    assert teams_of(comp)[0]["members"] == ["AHLBERG Bertil", "KOSKINEN Aino"]

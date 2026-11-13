@@ -1688,8 +1688,8 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
     before anything is written, when they cannot be removed (or the file is not
     XML at all).
 
-    A fresh TEAMS file without any `<Composition>` (FS Manager's own export, which
-    never says who skates in a team) never replaces an archived roster that has
+    A fresh TEAMS file that lists teams but no `<Composition>` (FS Manager's own
+    export, which never says who skates in a team) never replaces an archived roster that has
     one: the archived TEAMS is re-matched instead — as an automatic pass, against
     this call's DT_PARTIC when it brings one — and the skipped file is recorded
     as `files.skippedTeams` so the UI stops offering it. With no such archive it is
@@ -1701,7 +1701,9 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
     skipped_teams = False
     if not auto:
         teams_xml = odf_birth_dates.strip_birth_dates(_as_bytes(teams_xml))
-        if not dt_partic.has_compositions(teams_xml):
+        # Only a file that lists teams can be passed over: one with none (an
+        # empty export, a DT_PARTIC picked as TEAMS) still ends in the 422 below.
+        if not dt_partic.has_compositions(teams_xml) and parse_team_rosters(teams_xml, {}):
             archived = _roster_blob(container, folder_path, "teams.xml")
             skipped_teams = archived.exists() and dt_partic.has_compositions(
                 archived.download_blob().readall())

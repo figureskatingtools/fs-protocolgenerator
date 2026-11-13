@@ -156,10 +156,14 @@ def categories_for_event(structure: dict, event_code: str) -> list:
     token = event_token(event_code)
     finnish = _FINNISH_ISU_NAMES.get(token or event_base_label(event_code).upper())
     if finnish:
-        hits = [c for c in cats if normalize(c.get("name", "")) == finnish
-                or normalize(c.get("name", "")).startswith(finnish + " ")]
+        # A name is no proof here, so a hit named for another discipline ("SM-
+        # Juniorit Naiset") is dropped outright, leaving the later passes to find
+        # the synchro one — not merely deprioritised as `_prefer_synchro` would.
+        hits = [c for c in cats if (normalize(c.get("name", "")) == finnish
+                or normalize(c.get("name", "")).startswith(finnish + " "))
+                and not _other_discipline(c)]
         if hits:
-            return _prefer_synchro(hits)
+            return hits
 
     for size in range(len(token), MIN_FRAGMENT - 1, -1):
         fragment = token[-size:].lower()

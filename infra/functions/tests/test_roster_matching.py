@@ -160,6 +160,13 @@ def test_a_learned_code_still_beats_the_championship_name():
     assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["x"]
 
 
+def test_a_championship_name_of_another_discipline_is_passed_over():
+    """Singles and synchro juniors side by side: "SM-Juniorit Naiset" carries the
+    championship name, but only the synchro category may take a synchro team."""
+    s = struct(cat("sn", "SM-Juniorit Naiset"), cat("sm", "SM-JUNIORI Muodostelma"))
+    assert [c["id"] for c in rm.categories_for_event(s, JUNIOR)] == ["sm"]
+
+
 def test_codes_settle_what_names_cannot():
     """The same competition once its codes are learned from the FSM files."""
     s = struct(cat("ju", "Juniorit", code="FSKXSYNCHRONMLKJUN"),
