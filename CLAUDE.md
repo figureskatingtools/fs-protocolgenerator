@@ -350,7 +350,20 @@ pooled file whose content is not the type it was referenced as
 (`dt_partic.document_type`: root `DocumentType` — any other declared type, e.g.
 `DT_PARTIC_UPDATE`, is neither — else `<Composition>` vs `<Participant>`) is 400
 `wrong_document_type` — the pool is picked by filename.
-The success JSON adds `"source": {teams?, partic?}` → `{poolName, source}`.
+**Members come only from TAIKKARI's TEAMS file.** FS Manager's own
+DT_PARTIC_TEAMS (`Source="FSKFSK1"`, what it pushes over HOVTP) lists the same
+teams by the same codes but has no `<Composition>`, and no DT_PARTIC links a
+skater to a team. So a fresh TEAMS file without any `<Composition>`
+(`dt_partic.has_compositions`) never replaces an archived TEAMS that has one: the
+archived file is re-matched instead (as an automatic pass, against the call's
+DT_PARTIC when it brings one), nothing is archived, and the file is recorded as
+`rosterImport.files.skippedTeams` (`{at, poolName?, source?}`) so the UI stops
+offering it; a TEAMS file with members clears that entry. With no such archive it
+imports as before (teams without members). `rosterImport.noMembers: true` while
+the TEAMS in use has no compositions. TAIKKARI's athlete codes match FSM's
+DT_PARTIC, so either participants file joins.
+The success JSON adds `"source": {teams?, partic?}` → `{poolName, source}`,
+`skippedTeams` and `noMembers`.
 `rosterImport.files` (`{teams?, partic?}` → `{at, poolName?, source?}`) records
 which files are in use and when each was supplied; a pass that does not supply a
 file — the automatic re-match included — keeps its entry, and a fresh TEAMS file

@@ -14,6 +14,11 @@ and Junior), so callers import one Event at a time. Names are rendered
 Real exports are not tidy: attributes carry trailing spaces (`Name="Shadows "`)
 and a team can hold several `<RegisteredEvent>` rows, the first of which may have
 an empty `Event`.
+
+Only the federation registry's export (Taikkari, `Source="TAIKKARI"`) carries the
+`<Composition>`. FS Manager's own DT_PARTIC_TEAMS (what it pushes over HOVTP)
+lists the same teams by the same codes but never who skates in them, and its
+DT_PARTIC links no skater to a team either — see `has_compositions`.
 """
 import re
 import logging
@@ -50,6 +55,16 @@ def document_type(xml_bytes):
     if "Participant" in tags:
         return PARTIC
     return None
+
+
+def has_compositions(teams_xml_bytes) -> bool:
+    """Whether a DT_PARTIC_TEAMS says who skates in its teams: any `<Composition>`
+    at all. False for FS Manager's export (and for anything unparseable)."""
+    try:
+        root = ET.fromstring(teams_xml_bytes)
+    except Exception:
+        return False
+    return any(_local(el.tag) == "Composition" for el in root.iter())
 
 
 def parse_participants(xml_bytes) -> dict:
