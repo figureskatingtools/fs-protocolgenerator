@@ -364,3 +364,88 @@ def test_a_partic_added_to_a_legacy_import_keeps_the_teams_time(bound, storage, 
     files = bound["rosterImport"]["files"]
     assert files["teams"] == {"at": LEGACY_REPORT["at"]}
     assert files["partic"]["poolName"] == PARTIC_NAME
+
+
+# ── FS Manager's TEAMS file has no team members ───────────────────────────────
+# Only the federation registry's export (Taikkari) carries <Composition>; FS
+# Manager pushes the same teams over HOVTP without it. Such a file must never
+# wipe the members an earlier import brought.
+
+FSM_TEAMS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<OdfBody DocumentType="DT_PARTIC_TEAMS" Source="FSKFSK1" Version="1">
+  <Competition>
+    <Team Code="SYNCHRO0001" Organisation="BHK" Name="Blue Herons" TeamType="SYN">
+      <Discipline Code="FSK-------------------------------">
+        <RegisteredEvent Event="FSKXSYNCHRONMLTULO----------------">
+          <EventEntry Code="ENTRY_ORDER" Type="ER_EXTENDED" Value="1" />
+        </RegisteredEvent>
+      </Discipline>
+    </Team>
+  </Competition>
+</OdfBody>
+"""
+FSM_TEAMS_NAME = "DT_PARTIC_TEAMS_FSK-------------------------------_2.xml"
+
+
+def test_a_teams_file_without_members_keeps_the_imported_members(bound, storage, pool):
+    payload(import_rosters(teamsXml=TEAMS_XML, particXml=PARTIC_XML))
+    teams_entry = bound["rosterImport"]["files"]["teams"]
+    pool.upload_blob(f"p-1/fsm/{FSM_TEAMS_NAME}", FSM_TEAMS_XML.encode())
+
+    data = payload(import_rosters(teamsPool=fsm(FSM_TEAMS_NAME)))
+
+    assert data["skippedTeams"] is True and data["noMembers"] is False
+    assert teams_of(bound)[0]["members"] == ["AHLBERG Bertil", "KOSKINEN Aino"]
+    assert storage.container.blobs[f"{FOLDER}/rosters/teams.xml"] == TEAMS_XML.encode()
+    files = bound["rosterImport"]["files"]
+    assert files["teams"] == teams_entry and "partic" in files
+    assert files["skippedTeams"]["poolName"] == FSM_TEAMS_NAME
+    assert "noMembers" not in bound["rosterImport"]
+
+
+def test_a_member_less_teams_file_still_brings_its_partic(comp, storage):
+    payload(import_rosters(teamsXml=TEAMS_XML, particXml=PARTIC_XML))
+    payload(import_rosters(teamsXml=FSM_TEAMS_XML, particXml=CORRECTED_PARTIC_XML))
+    assert teams_of(comp)[0]["members"] == ["AHLBERG Bertil", "KOSKINEN Aino Maria"]
+
+
+def test_a_member_less_teams_file_alone_imports_the_teams_and_says_so(comp, storage):
+    data = payload(import_rosters(teamsXml=FSM_TEAMS_XML, particXml=PARTIC_XML))
+    assert data["noMembers"] is True and data["skippedTeams"] is False
+    assert teams_of(comp)[0]["name"] == "Blue Herons"
+    assert teams_of(comp)[0]["members"] == []
+    assert comp["rosterImport"]["noMembers"] is True
+
+
+def test_a_teams_file_with_members_replaces_a_member_less_one(comp, storage):
+    payload(import_rosters(teamsXml=FSM_TEAMS_XML))
+    data = payload(import_rosters(teamsXml=TEAMS_XML, particXml=PARTIC_XML))
+    assert data["noMembers"] is False
+    assert teams_of(comp)[0]["members"] == ["AHLBERG Bertil", "KOSKINEN Aino"]
+    assert "noMembers" not in comp["rosterImport"]
+
+
+def test_a_later_teams_file_with_members_clears_the_skipped_record(comp, storage):
+    payload(import_rosters(teamsXml=TEAMS_XML, particXml=PARTIC_XML))
+    payload(import_rosters(teamsXml=FSM_TEAMS_XML))
+    assert "skippedTeams" in comp["rosterImport"]["files"]
+    payload(import_rosters(teamsXml=TEAMS_XML))
+    assert "skippedTeams" not in comp["rosterImport"]["files"]
+
+
+def test_the_automatic_rematch_keeps_the_skipped_record(bound, storage, pool):
+    payload(import_rosters(teamsXml=TEAMS_XML, particXml=PARTIC_XML))
+    payload(import_rosters(teamsXml=FSM_TEAMS_XML))
+    files = bound["rosterImport"]["files"]
+    fa._run_roster_match(bound, storage.container, FOLDER)
+    assert bound["rosterImport"]["files"] == files
+
+
+def test_a_teams_file_listing_no_teams_is_still_a_422_with_an_archive(comp, storage):
+    """Passing a file over is only for one that lists teams: an empty export, or
+    a DT_PARTIC picked as the TEAMS file, must not report the archive as imported."""
+    payload(import_rosters(teamsXml=TEAMS_XML, particXml=PARTIC_XML))
+    assert import_rosters(teamsXml=EMPTY_TEAMS_XML).status_code == 422
+    assert import_rosters(teamsXml=PARTIC_XML).status_code == 422
+    assert "skippedTeams" not in comp["rosterImport"]["files"]
+    assert teams_of(comp)[0]["members"] == ["AHLBERG Bertil", "KOSKINEN Aino"]

@@ -1686,11 +1686,28 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
     from the pool (already clean there; stripped again all the same) — and is
     parsed and archived only in that form. odf_birth_dates.BirthDateError, raised
     before anything is written, when they cannot be removed (or the file is not
-    XML at all)."""
+    XML at all).
+
+    A fresh TEAMS file that lists teams but no `<Composition>` (FS Manager's own
+    export, which never says who skates in a team) never replaces an archived roster that has
+    one: the archived TEAMS is re-matched instead — as an automatic pass, against
+    this call's DT_PARTIC when it brings one — and the skipped file is recorded
+    as `files.skippedTeams` so the UI stops offering it. With no such archive it is
+    imported as before; either way the report says `noMembers` while the TEAMS in
+    use has no compositions, so the UI can ask for the federation's (Taikkari's)
+    export."""
     auto = teams_xml is None
     fresh_partic = partic_xml is not None
+    skipped_teams = False
     if not auto:
         teams_xml = odf_birth_dates.strip_birth_dates(_as_bytes(teams_xml))
+        # Only a file that lists teams can be passed over: one with none (an
+        # empty export, a DT_PARTIC picked as TEAMS) still ends in the 422 below.
+        if not dt_partic.has_compositions(teams_xml) and parse_team_rosters(teams_xml, {}):
+            archived = _roster_blob(container, folder_path, "teams.xml")
+            skipped_teams = archived.exists() and dt_partic.has_compositions(
+                archived.download_blob().readall())
+            auto = skipped_teams
     if fresh_partic:
         partic_xml = odf_birth_dates.strip_birth_dates(_as_bytes(partic_xml))
     if auto:
@@ -1735,8 +1752,12 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
         files["teams"] = {"at": now, **pool.get("teams", {})}
         # A fresh TEAMS file is never joined with the archived DT_PARTIC.
         files.pop("partic", None)
+        files.pop("skippedTeams", None)
+    if skipped_teams:
+        files["skippedTeams"] = {"at": now, **pool.get("teams", {})}
     if fresh_partic:
         files["partic"] = {"at": now, **pool.get("partic", {})}
+    no_members = not dt_partic.has_compositions(teams_xml)
     structure["rosterImport"] = {
         "at": now,
         "imported": imported,
@@ -1744,9 +1765,12 @@ def _run_roster_match(structure, container, folder_path, teams_xml=None, partic_
         "unmatched": report["unmatched"],
         "withdrawn": report["withdrawn"],
     }
+    if no_members:
+        structure["rosterImport"]["noMembers"] = True
     if files:   # a re-match of a roster imported before `files` existed has none
         structure["rosterImport"]["files"] = files
-    return {"imported": imported, "moved": moved, "touched": touched, "report": report}
+    return {"imported": imported, "moved": moved, "touched": touched, "report": report,
+            "skippedTeams": skipped_teams, "noMembers": no_members}
 
 
 def _rematch_after_results(structure, folder_path):
@@ -1782,6 +1806,12 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
     referenced as (`dt_partic.document_type`), or the request is a 400
     `wrong_document_type`: the pool is picked by filename, and a TEAMS file taken
     for DT_PARTIC would import with bare athlete codes for names.
+
+    Team members come only from the TEAMS file's `<Composition>`, which only the
+    federation's (Taikkari) export carries: a TEAMS file without one (FS Manager's)
+    never replaces a roster that has members (`_run_roster_match`). The response
+    says `skippedTeams` when that happened and `noMembers` while the roster in use
+    has none.
 
     One TEAMS file spans every synchro event, but teams register per *event* and
     compete per *block*: which block a team skated in shows up only in that block's
@@ -1865,6 +1895,8 @@ def import_rosters(req: func.HttpRequest) -> func.HttpResponse:
         return sh.json_response({
             "imported": summary["imported"],
             "moved": summary["moved"],
+            "skippedTeams": summary["skippedTeams"],
+            "noMembers": summary["noMembers"],
             "categories": len(summary["touched"]),
             "report": summary["report"],
             "source": pool,

@@ -350,7 +350,20 @@ pooled file whose content is not the type it was referenced as
 (`dt_partic.document_type`: root `DocumentType` — any other declared type, e.g.
 `DT_PARTIC_UPDATE`, is neither — else `<Composition>` vs `<Participant>`) is 400
 `wrong_document_type` — the pool is picked by filename.
-The success JSON adds `"source": {teams?, partic?}` → `{poolName, source}`.
+**Members come only from TAIKKARI's TEAMS file.** FS Manager's own
+DT_PARTIC_TEAMS (`Source="FSKFSK1"`, what it pushes over HOVTP) lists the same
+teams by the same codes but has no `<Composition>`, and no DT_PARTIC links a
+skater to a team. So a fresh TEAMS file without any `<Composition>`
+(`dt_partic.has_compositions`) never replaces an archived TEAMS that has one: the
+archived file is re-matched instead (as an automatic pass, against the call's
+DT_PARTIC when it brings one), nothing is archived, and the file is recorded as
+`rosterImport.files.skippedTeams` (`{at, poolName?, source?}`) so the UI stops
+offering it; a TEAMS file with members clears that entry. With no such archive it
+imports as before (teams without members). `rosterImport.noMembers: true` while
+the TEAMS in use has no compositions. TAIKKARI's athlete codes match FSM's
+DT_PARTIC, so either participants file joins.
+The success JSON adds `"source": {teams?, partic?}` → `{poolName, source}`,
+`skippedTeams` and `noMembers`.
 `rosterImport.files` (`{teams?, partic?}` → `{at, poolName?, source?}`) records
 which files are in use and when each was supplied; a pass that does not supply a
 file — the automatic re-match included — keeps its entry, and a fresh TEAMS file
@@ -475,7 +488,10 @@ longer learns codes from the Judge Papers table):
   category (`categories_for_event`: the category whose `strip_event`ed code
   **equals** the event's first; only when none does, the codes that extend it by
   a dash-led block suffix, or that it extends — bare senior `FSKXSYNCHRON` must
-  not swallow `FSKXSYNCHRONJUNIOR` → event-token fragment (`event_token`, block
+  not swallow `FSKXSYNCHRONJUNIOR` → the Finnish championship name of an ISU
+  event (`_FINNISH_ISU_NAMES`: ADVNOV "SM-Noviisit", JUNIOR "SM-Juniorit", bare
+  senior "SM-Seniorit", or a block of it, "SM-Noviisit L1"), so code-less
+  categories still tell "SM-Juniorit" from the federation's "Juniorit" → event-token fragment (`event_token`, block
   suffix dropped) vs. category-name words, "MLAIKU"→"Aikuiset…" → the event's
   label (`dt_partic.event_base_label`: ISU English, or the platform registry's
   name for a Finnish federation token — MLKJUN "Juniorit", MLKNOV "Noviisit,

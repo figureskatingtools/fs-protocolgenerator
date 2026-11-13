@@ -4,7 +4,8 @@ The XML below is invented (real exports carry minors' names); it only reproduces
 the *shape* of the real files, including their untidiness: padded attributes, a
 leading empty `RegisteredEvent` and an athlete with no participant record.
 """
-from dt_partic import document_type, event_label, parse_participants, parse_team_rosters
+from dt_partic import (document_type, event_label, has_compositions, parse_participants,
+                       parse_team_rosters)
 
 TEAMS_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <OdfBody DocumentType="DT_PARTIC_TEAMS">
@@ -115,3 +116,29 @@ def test_a_block_suffix_is_named_not_mangled():
     assert event_base_label("FSKXSYNCHRONADVNOV--01------------") == "Advanced Novice"
     assert split_block("FSKXSYNCHRONADVNOV--01------------") == ("FSKXSYNCHRONADVNOV", 1)
     assert split_block("FSKXSYNCHRONADVNOV----------------") == ("FSKXSYNCHRONADVNOV", None)
+
+
+# FS Manager's own DT_PARTIC_TEAMS (what it pushes over HOVTP): the same team by
+# the same code, but no <Composition> — it never says who skates in a team.
+FSM_TEAMS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<OdfBody DocumentType="DT_PARTIC_TEAMS" Source="FSKFSK1" Version="1">
+  <Competition>
+    <Team Code="SYNCHRO0001" Organisation="BHK " Name="Blue Herons " TeamType="SYN">
+      <Discipline Code="FSK-------------------------------">
+        <RegisteredEvent Event="FSKXSYNCHRONMLTULO----------------">
+          <EventEntry Code="ENTRY_ORDER" Type="ER_EXTENDED" Value="1" />
+        </RegisteredEvent>
+      </Discipline>
+    </Team>
+  </Competition>
+</OdfBody>
+"""
+
+
+def test_only_a_teams_file_with_a_composition_has_members():
+    assert has_compositions(TEAMS_XML.encode())
+    assert not has_compositions(FSM_TEAMS_XML.encode())
+    assert not has_compositions(b"not xml")
+    team = parse_team_rosters(FSM_TEAMS_XML.encode(), parse_participants(PARTIC_XML.encode()))[0]
+    assert (team["code"], team["event"], team["members"]) == (
+        "SYNCHRO0001", "FSKXSYNCHRONMLTULO----------------", [])
