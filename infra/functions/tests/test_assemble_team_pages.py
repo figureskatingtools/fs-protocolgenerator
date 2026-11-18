@@ -141,3 +141,41 @@ def test_a_skipped_team_still_counts_towards_the_information_page():
     stats = assemble._competition_stats(structure, lambda _file_id: None)
     assert stats == assemble._competition_stats(competition(), lambda _f: None)
     assert stats["units"] == 2
+
+
+def _one_page_pdf(*lines) -> bytes:
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    y = 800
+    for line in lines:
+        c.drawString(40, y, line)
+        y -= 14
+    c.save()
+    return buf.getvalue()
+
+
+def test_the_head_page_opens_the_category_before_its_team_pages():
+    """The protocol head page is what names the category, so it comes first:
+    head page -> one page per team -> podium -> results. Team pages used to
+    open the category, which put the rosters ahead of the page that says which
+    category they belong to."""
+    structure = competition()
+    structure["files"]["head-1"] = {"filename": "FSKXSYNCHRON-head.pdf", "kind": "pdf",
+                                    "size": 1, "blob": "x"}
+    category_of(structure)["titlePdf"] = "head-1"
+    category_of(structure)["podium"]["names"] = ["HTK - Helsinki Finettes", "", ""]
+    head = _one_page_pdf("PROTOCOL HEAD PAGE MARKER", "SM-seniorit")
+
+    pdf = assemble.assemble_protocol(structure, lambda fid: head if fid == "head-1" else None)
+    pages = [(page.extract_text() or "") for page in PdfReader(io.BytesIO(pdf)).pages]
+
+    def page_of(marker):
+        return next(i for i, text in enumerate(pages) if marker in text)
+
+    head_at = page_of("PROTOCOL HEAD PAGE MARKER")
+    finettes_at = page_of("Helsinki Finettes")
+    rockettes_at = page_of("Rockettes")
+    podium_at = max(i for i, text in enumerate(pages) if "Helsinki Finettes" in text)
+    assert head_at < finettes_at < rockettes_at < podium_at

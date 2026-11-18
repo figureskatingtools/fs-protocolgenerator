@@ -31,7 +31,7 @@ page), the tool supplies sensible **defaults/backups** so a protocol can always 
 ## Assembled protocol order
 
 Cover (custom or default) → event info page → time schedule → for each category in schedule
-order: *(synchro)* team pages → title PDF → podium → total results → per segment (results →
+order: protocol head page PDF → *(synchro)* team pages → podium → total results → per segment (results →
 panel → judges details) → optional last page (custom or default placeholder).
 
 ## Architecture

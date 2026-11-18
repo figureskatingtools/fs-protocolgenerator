@@ -8,8 +8,8 @@ canonical ISU-protocol order:
   event-info page
   time-schedule page
   for each category (schedule order):
+      protocol head page PDF (the category's title PDF)
       [synchro] one team-presentation page per team
-      category title PDF
       podium page (photo + names) — when a photo or any name is present
       total category results PDF
       for each segment: results PDF -> panel PDF -> judges-details PDF
@@ -271,7 +271,11 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
     for category in sorted_categories(structure):
         cat_name = category.get("name", "")
 
-        # Synchronized skating: a team-presentation page per team, first.
+        # Category protocol head page PDF opens the category, before any
+        # team pages: the head page is what names the category.
+        _append_file(writer, structure, category.get("titlePdf"), get_file_bytes)
+
+        # Synchronized skating: a team-presentation page per team.
         if category.get("discipline") == "synchro":
             for team in category.get("teams", []):
                 # Turned off competition-wide, for this category or for this
@@ -288,9 +292,6 @@ def assemble_protocol(structure: dict, get_file_bytes) -> bytes:
                     team, photo, chrome,
                     name_mode=team_name_mode(structure, category, team),
                     text_rows=team_text_rows(team)))
-
-        # Category protocol head page PDF
-        _append_file(writer, structure, category.get("titlePdf"), get_file_bytes)
 
         # Podium page (only when there's a photo or at least one name)
         podium = category.get("podium", {}) or {}
