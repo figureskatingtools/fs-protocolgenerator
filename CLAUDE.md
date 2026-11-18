@@ -97,8 +97,8 @@ rows blank on both sides and hands the renderer plain `{label, value}` data;
 ## Assembly order (`assemble.py`)
 
 cover (custom or default) → event-info page → time-schedule page → for each
-category in schedule order: *(synchro)* one team page per team → protocol head
-page PDF (the category's `titlePdf` slot; "Protocol Head Page" in the UI) →
+category in schedule order: protocol head page PDF (the category's `titlePdf`
+slot; "Protocol Head Page" in the UI) → *(synchro)* one team page per team →
 podium page (when a photo or name exists) → total results PDF → per segment
 (results → panel → judges details) → last page (custom or default).
 
