@@ -28,6 +28,9 @@ from results_parser import parse_top_three, count_result_rows, parse_result_rows
 from assemble import assemble_protocol
 from pdf_sanitize import SanitizeError
 
+# The Azure SDK logs every storage request URL (blob paths, file and competition names) at INFO.
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp") + image_sanitize.HEIF_EXTS
