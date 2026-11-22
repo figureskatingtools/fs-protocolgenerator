@@ -85,6 +85,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   }
   properties: {
     serverFarmId: appServicePlan.id
+    httpsOnly: true
     siteConfig: {
       cors: {
         // No browser ever calls this Function App directly — every request comes
